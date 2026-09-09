@@ -27,6 +27,7 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 | リリース・Homebrew の formula 更新 | `docs/release.md`（配布物の範囲もここ） |
 | `container/**`・`Dockerfile` | `.agents/rules/container.md` |
 | `bin/aws-survey`・`libexec/**`・`templates/`・接続設定 | `.agents/rules/credentials.md` |
+| `libexec/ec2/**`（EC2 に置く診断ゲートウェイ） | `docs/design-ec2-ssh.md` の第 2 節（名前）と第 5 節（仕様）。実装の段階と未確認事項は第 10 節 |
 
 上の規則は新規ファイルにも適用する。`.agents/rules/` はどのエージェントも自動では読み込まない。この表に従って読む。
 `container/instructions/` は配布用の調査指示であり、開発中の自分の役割を切り替える指示ではない。
@@ -49,6 +50,7 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 - 対象固有の値は `environment.json` に置き、スクリプトは `libexec/load-env.sh` から読む。
 - `--policy-arns arn=...ReadOnlyAccess` を外さない。Deny のみのセッションポリシーと対で使う。
 - 長期 AWS キー・元プロファイル・資格情報の再発行機能を調査コンテナに渡さない。
+- EC2 に残すもの（`libexec/ec2/`）の名前に「ai」「agent」「survey」を含めない。root 読み取り段は 5 動詞固定で、任意パスの読み取りを足さない。シェルを経由せず argv を list で渡す。
 - ガードはイメージへ焼き込み、root 所有を保つ。プロンプトだけを安全性の根拠にしない。
 - 調査の共通指示は `container/instructions/survey-agents.md`、詳細は `method/`。
 - 対象固有の知識は `out/`、フェーズ固有の規則はその `00_目的と規則.md` に置く。
