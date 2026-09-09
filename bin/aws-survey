@@ -378,10 +378,11 @@ to_bool() {
 profile_list()   { aws configure list-profiles 2>/dev/null; }
 profile_exists() { profile_list | grep -qx -- "$1"; }
 profile_region() { aws configure get region --profile "$1" 2>/dev/null; }
-profile_is_sso() {
-  [ -n "$(aws configure get sso_session --profile "$1" 2>/dev/null)" ] \
-    || [ -n "$(aws configure get sso_start_url --profile "$1" 2>/dev/null)" ]
-}
+
+# refresh_command の既定。aws-login は formula の依存なので、在る前提で出す（docs/release.md「依存」）。
+# MFA か SSO かは aws-login が設定から判定するので、ここでは分けない。
+# <名>-mfa は aws-login が作る一時キーの保存先なので、渡すのは元の <名>（aws-login と同じ命名規則）。
+refresh_default() { printf 'aws-login --profile %s' "${1%-mfa}"; }
 
 # source_profile の候補。<名>-mfa があるとき、元の <名> は長期キー側で借りる元にならないので省く（aws-login と同じ命名規則）。
 # profile_candidates は残す名前、profile_hidden は省いた名前を改行区切りで出す。
@@ -526,7 +527,7 @@ ask() {
 }
 
 init_interactive() {
-  local profiles ident arn_def acct_def mfa_def refresh_def region_def
+  local profiles ident arn_def acct_def mfa_def region_def
   ui_text "AWS への繋ぎ方を 9 問で聞きます。Enter で ( ) の既定を受け付けます。"
   ui_text "対象がどんなシステムか・何を調べたいかは、ここでは聞きません（調査コンテナの中でユーザーと決めます）。"
   echo ""
@@ -574,9 +575,8 @@ init_interactive() {
   echo ""
   ui_head "6/9 refresh_command"
   ui_text "$I_PROFILE が切れたとき、何を実行して有効にし直すか（環境ごとに違う唯一の操作）。無ければ - 。"
-  refresh_def="-"
-  profile_is_sso "$I_PROFILE" && refresh_def="aws sso login --profile $I_PROFILE"
-  ask I_REFRESH "refresh_command" "$refresh_def" ""
+  ui_text "既定は aws-login です（MFA / SSO を設定から判定してログインし直します）。別のコマンドなら書き換えてください。"
+  ask I_REFRESH "refresh_command" "$(refresh_default "$I_PROFILE")" ""
   [ "$I_REFRESH" = "-" ] && I_REFRESH=""
 
   echo ""

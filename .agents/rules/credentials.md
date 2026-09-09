@@ -11,7 +11,7 @@
 | アカウント ID・ロール名・プロファイル名 | `environment.json` | どこにもない |
 | リージョン | `environment.json`（`claude-ro` プロファイルにも入る） | なし |
 | セッションの長さ | `environment.json` の `auth.duration_seconds` | なし。調査エージェント向けの文書にも書かない |
-| 元プロファイルの更新方法 | `environment.json` の `auth.refresh_command` | なし。環境ごとに変わる唯一の操作 |
+| 元プロファイルの更新方法 | `environment.json` の `auth.refresh_command`（既定は aws-login） | なし。環境ごとに変わる唯一の操作 |
 | 現在のフェーズ | `environment.json` の `phase_dir` | なし |
 
 セッション時間の絶対値を調査エージェント向けの文書に書かないこと。「1 時間で失効」「残り 15 分」と書くと、
@@ -47,6 +47,8 @@
 （端末でない実行環境で黙って AWS を叩かないため）。
 `init` が聞くのは AWS への繋ぎ方の 9 項目だけ（`AGENTS.md`「ホストと調査コンテナ」）。項目を足すときは `environment.json` の雛形・`load-env.sh`・
 非対話モードの `AWS_SURVEY_INIT_*` を揃え、対象の概要や調査項目に踏み込まない。
+`refresh_command` の既定は `aws-login --profile <元プロファイル>`（`refresh_default`）。`<名>-mfa` は aws-login が作る
+一時キーの保存先なので、渡すのは `-mfa` を外した元の名前。aws-login は formula の依存なので、在る前提で既定に出す。
 全角括弧が変数の直後に来るときは `$VAR（` ではなく `${VAR}（` と波括弧で囲む。
 本体の場所を `$PWD` で、対象フォルダの場所をスクリプトの位置で決めない。`cd` してから相対パスで
 参照するのもやめる。対象を切り替えても一時キーが上書きされないよう、`AWS_DIR` は `name` ごとに分ける。

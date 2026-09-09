@@ -60,7 +60,7 @@ if ! check_source; then
     die "$reason
   $PROFILE_SRC でログインし直してから、もう一度実行してください。
   毎回この手間をかけたくない場合は、そのログインのコマンドを environment.json の auth.refresh_command に
-  書いておくと、次からここで自動的に実行します（例: \"aws sso login --profile $PROFILE_SRC\"）。"
+  書いておくと、次からここで自動的に実行します（例: \"aws-login --profile ${PROFILE_SRC%-mfa}\"）。"
   fi
 fi
 ui_ok "$who"

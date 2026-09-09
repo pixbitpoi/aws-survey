@@ -68,6 +68,9 @@ README を表示するコマンドは無く、`brew home` は formula の `homep
 ## 依存
 
 - `jq` は `depends_on`。
+- [aws-login](https://github.com/pixbitpoi/aws-login) は `depends_on`（同じ tap の `pixbitpoi/tap/aws-login`）。
+  `init` が `auth.refresh_command` の既定に `aws-login --profile <元プロファイル>` を書き、
+  `aws-survey credentials` が元プロファイルの期限切れでそれを実行するため、入っている前提にする。
 - AWS CLI v2 は `depends_on` にしない。公式インストーラーで入れている環境と二重になるため、caveats で案内する
   （[aws-login](https://github.com/pixbitpoi/aws-login) の formula と同じ扱い）。
 - Docker は cask なので `depends_on` にしない。有無は `aws-survey doctor` と引数なし実行が見る。

@@ -23,6 +23,8 @@ $ aws-survey
 
 - AWS CLI と Docker を事前に導入してください。
 - AWS CLI で調査対象にアクセスできる状態にしてください。
+- 元プロファイルのログインには [aws-login](https://github.com/pixbitpoi/aws-login) を使います。
+  brew の依存に入っているので、`aws-survey` と一緒に入ります。
 - macos を前提としています。
 
 ### 2. インストール

@@ -504,7 +504,7 @@ class Init(CliCase):
         self.assertEqual(config['auth']['principal_arn'], 'arn:aws:iam::000000000000:user/fake')
         self.assertEqual(config['account_id'], '000000000000')
         self.assertEqual(config['auth']['mfa_required'], True)
-        self.assertEqual(config['auth']['refresh_command'], 'aws sso login --profile sso-prof')
+        self.assertEqual(config['auth']['refresh_command'], 'aws-login --profile sso-prof')
         self.assertEqual(config['region'], 'ap-northeast-1')
         self.assertIn('1/9', result.stdout)
         self.assertIn('9/9', result.stdout)
@@ -525,6 +525,8 @@ class Init(CliCase):
         self.assertIn('一覧にありません', result.stdout)
         config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['auth']['source_profile'], 'base-mfa')
+        # 一時キーの保存先を選んでも、aws-login に渡すのは元の <名>
+        self.assertEqual(config['auth']['refresh_command'], 'aws-login --profile base')
 
     def test_interactive_menu_uses_arrow_keys_on_a_terminal(self):
         # 端末（pty）では矢印キーで選ぶ。↓ 1 回で 2 番目の sso-prof、以降は既定を Enter
