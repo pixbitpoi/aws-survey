@@ -1,0 +1,881 @@
+#!/usr/bin/env bash
+# aws-survey — ホスト側の準備・起動を 1 つの入口にまとめる
+#
+#   aws-survey                      いまの段階を判定し（AWS は叩かない）、次の 1 手を案内して、
+#                                   「実行しますか？」と聞きながら起動まで進める。
+#                                   端末でなければ案内だけで終わる（エージェントは 1 本ずつ手渡す）
+#   aws-survey status               到達点・一時キーの残り時間・本体とデータの場所
+#   aws-survey doctor               aws / jq / docker の有無と、発行失敗の切り分け（libexec/commands/doctor.sh）
+#   aws-survey init [--from <json>] [--force]
+#                                   対象フォルダに environment.json を作る（対話。--from か AWS_SURVEY_INIT_* で非対話）
+#   aws-survey role [--create]      経路の判定・ロール作成（libexec/commands/role.sh）
+#   aws-survey credentials          一時キーの発行・再発行（libexec/commands/credentials.sh）
+#   aws-survey verify               読み取り専用の検証（libexec/commands/verify.sh）
+#   aws-survey run [cmd]            コンテナのビルドと起動（libexec/commands/run.sh）
+#
+#   共通オプション:  --dir <対象フォルダ>   既定はカレントディレクトリ（AWS_SURVEY_DIR でも指定可）
+#
+#   init が聞くのは AWS への繋ぎ方だけ。対象の概要・調査項目は聞かない（AGENTS.md「ホストと調査コンテナ」）。
+#
+# 本体（AWS_SURVEY_HOME）はこのファイルの実体パス（シンボリックリンク解決後）の親。環境変数で上書き可。
+# 対象固有の値は対象フォルダの environment.json が持つ。ここには書かない。
+set -uo pipefail
+
+# ---- 本体の場所 ----
+_realpath() {
+  local p="$1" dir target
+  while [ -L "$p" ]; do
+    target=$(readlink "$p") || break
+    case "$target" in
+      /*) p="$target" ;;
+      *)  p="$(dirname "$p")/$target" ;;
+    esac
+  done
+  dir=$(cd "$(dirname "$p")" && pwd -P) || return 1
+  printf '%s/%s\n' "$dir" "$(basename "$p")"
+}
+
+SELF=$(_realpath "${BASH_SOURCE[0]}")
+AWS_SURVEY_HOME="${AWS_SURVEY_HOME:-$(dirname "$(dirname "$SELF")")}"
+export AWS_SURVEY_HOME
+LIBEXEC_DIR="$AWS_SURVEY_HOME/libexec"
+
+die() { echo "" >&2; echo "✗ $*" >&2; exit 1; }
+[ -d "$LIBEXEC_DIR" ] || die "AWS_SURVEY_HOME に libexec/ がありません: $AWS_SURVEY_HOME"
+
+# ---- 引数 ----
+DIR_OPT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir)   [ $# -ge 2 ] || die "--dir には対象フォルダを指定してください。"; DIR_OPT="$2"; shift 2 ;;
+    --dir=*) DIR_OPT="${1#--dir=}"; shift ;;
+    -h|--help|help) CMD=help; shift; break ;;
+    --) shift; break ;;
+    -*) die "不明なオプション: $1（aws-survey --help）" ;;
+    *) break ;;
+  esac
+done
+CMD="${CMD:-${1:-}}"
+[ $# -gt 0 ] && shift
+# コマンド名の後ろに書かれた --dir も受け付ける（aws-survey status --dir <対象フォルダ>）。それ以外はサブコマンドへ渡す
+REST=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dir)   [ $# -ge 2 ] || die "--dir には対象フォルダを指定してください。"; DIR_OPT="$2"; shift 2 ;;
+    --dir=*) DIR_OPT="${1#--dir=}"; shift ;;
+    *) REST+=("$1"); shift ;;
+  esac
+done
+set -- ${REST[@]+"${REST[@]}"}
+
+# ---- 対象フォルダ ----
+if [ -n "$DIR_OPT" ]; then
+  [ -d "$DIR_OPT" ] || die "対象フォルダがありません: $DIR_OPT"
+  AWS_SURVEY_DIR=$(cd "$DIR_OPT" && pwd -P)
+else
+  AWS_SURVEY_DIR="${AWS_SURVEY_DIR:-$PWD}"
+  [ -d "$AWS_SURVEY_DIR" ] || die "対象フォルダがありません: $AWS_SURVEY_DIR"
+  AWS_SURVEY_DIR=$(cd "$AWS_SURVEY_DIR" && pwd -P)
+fi
+export AWS_SURVEY_DIR
+ENV_FILE="${ENV_FILE:-$AWS_SURVEY_DIR/environment.json}"
+
+# 案内文に書くコマンド名。インストール済み（PATH 上に aws-survey がある）を前提に、常に短い名前で案内する。
+# --dir を使って呼ばれたときは、案内する次の 1 手にも同じ --dir を付ける
+CMD_NAME="aws-survey"
+[ -n "$DIR_OPT" ] && CMD_NAME="$CMD_NAME --dir $AWS_SURVEY_DIR"
+
+# ---- 補助 ----
+# ISO 8601（AWS の Expiration: 2026-01-02T03:04:05+00:00 / ...Z）を epoch 秒に。読めなければ空。
+iso_to_epoch() {
+  local s="$1" n
+  n=$(printf '%s' "$s" | sed -E 's/\.[0-9]+//; s/\+00:00$/Z/; s/UTC$/Z/')
+  case "$n" in
+    *Z) jq -rn --arg t "$n" '$t | fromdateiso8601' 2>/dev/null && return 0 ;;
+  esac
+  date -d "$s" +%s 2>/dev/null && return 0
+  date -j -f '%Y-%m-%dT%H:%M:%S%z' "${s/%Z/+0000}" +%s 2>/dev/null
+}
+mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+
+# 判定はファイルだけで行う。AWS は叩かない。
+missing_tools() {
+  local t out=""
+  for t in aws jq docker; do command -v "$t" >/dev/null 2>&1 || out="$out $t"; done
+  printf '%s' "${out# }"
+}
+
+# environment.json が使える状態か。使えなければ理由を標準出力に返し 1 を返す。
+env_state() {
+  if [ ! -f "$ENV_FILE" ]; then
+    echo "environment.json がありません: $ENV_FILE"; return 1
+  fi
+  if ! jq -e . "$ENV_FILE" >/dev/null 2>&1; then
+    echo "environment.json が壊れています（JSON として読めません）: $ENV_FILE"; return 1
+  fi
+  if jq -e '[.. | strings | select(startswith("TEMPLATE-"))] | length > 0' "$ENV_FILE" >/dev/null 2>&1; then
+    echo "environment.json が雛形のままです（TEMPLATE- が残っています）: $ENV_FILE"; return 1
+  fi
+  local err
+  if ! err=$(AWS_SURVEY_HOME="$AWS_SURVEY_HOME" AWS_SURVEY_DIR="$AWS_SURVEY_DIR" ENV_FILE="$ENV_FILE" \
+             bash -c '. "$1/libexec/load-env.sh"' _ "$AWS_SURVEY_HOME" 2>&1 >/dev/null); then
+    echo "${err#*✗ }"; return 1
+  fi
+  return 0
+}
+
+# load-env.sh を読み込む（env_state が通ってから呼ぶ）
+load_env() { . "$LIBEXEC_DIR/load-env.sh"; }
+
+setup_value() { jq -r --arg k "$1" '.setup[$k] // empty' "$ENV_FILE"; }
+
+# 一時キーの状態。KEY_STATE = missing | expired | valid | unknown、KEY_EXP / KEY_LEFT_MIN / KEY_TOTAL_MIN / KEY_NOTE
+key_state() {
+  local cred="$AWS_DIR/credentials" session="$AWS_DIR/session.json" exp="" dur="" mt exp_epoch now
+  KEY_STATE=missing; KEY_EXP=""; KEY_LEFT_MIN=""; KEY_TOTAL_MIN=""; KEY_NOTE=""
+  [ -f "$cred" ] || return 0
+  if [ -f "$session" ]; then
+    exp=$(jq -r '.expiration // empty' "$session" 2>/dev/null)
+    dur=$(jq -r '.duration_seconds // empty' "$session" 2>/dev/null)
+  fi
+  [ -n "$dur" ] || dur="$DURATION"
+  if [ -z "$exp" ]; then
+    # 発行元の情報が無いときは、credentials の更新時刻 + duration_seconds で推定する
+    if mt=$(mtime_of "$cred") && [ -n "$mt" ]; then
+      exp_epoch=$(( mt + dur )); KEY_NOTE="（credentials の更新時刻から推定）"
+      exp=$(date -u -r "$exp_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$exp_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+    fi
+  else
+    exp_epoch=$(iso_to_epoch "$exp")
+  fi
+  KEY_EXP="$exp"
+  if [ -z "${exp_epoch:-}" ]; then KEY_STATE=unknown; return 0; fi
+  now=$(date +%s)
+  KEY_LEFT_MIN=$(( (exp_epoch - now) / 60 ))
+  KEY_TOTAL_MIN=$(( dur / 60 ))
+  if [ "$exp_epoch" -le "$now" ]; then KEY_STATE=expired; else KEY_STATE=valid; fi
+}
+
+survey_started() { [ -f "$AWS_SURVEY_DIR/out/00_進捗.md" ]; }
+
+print_places() { printf "  %s対象フォルダ:%s %s\n" "$C_DIM" "$C_RESET" "$AWS_SURVEY_DIR"; }
+
+init_guidance() {
+  next_cmd "$CMD_NAME init" "AWS への繋ぎ方を 9 問で聞いて environment.json を作ります"
+  ui_text "Claude Code / Codex に「準備して」と伝えると、必要なことを順に聞かれます。"
+}
+
+# ---- 表示 ----
+. "$LIBEXEC_DIR/ui.sh"
+
+# 1 行読む。端末なら待ち続け、端末でなければ数秒で諦める（エージェントの実行環境では標準入力が閉じず、待つと止まる）。
+# 読めなければ 1 を返す。
+read_line() {
+  if [ -t 0 ]; then read -r "$1"; else read -t 5 -r "$1"; fi
+}
+
+# ---- 引数なし: 段階の判定と、その場での実行 ----
+# cmd_guide は判定と表示だけを行い（AWS は叩かない）、次の 1 手は guide_next / guide_also に覚えさせる。
+# 実行するかどうかは cmd_guide_loop が利用者に聞いてから決める。
+
+# 次の 1 手。案内の文字列は「aws-survey に続く引数」だけを持ち、印字は guide_show_next がまとめて行う。
+GUIDE_NEXT=""; GUIDE_NEXT_DESC=""; GUIDE_ALSO=""; GUIDE_ALSO_DESC=""
+guide_reset() { GUIDE_NEXT=""; GUIDE_NEXT_DESC=""; GUIDE_ALSO=""; GUIDE_ALSO_DESC=""; }
+guide_next()  { GUIDE_NEXT="$1"; GUIDE_NEXT_DESC="${2:-}"; }
+guide_also()  { GUIDE_ALSO="$1"; GUIDE_ALSO_DESC="${2:-}"; }
+guide_show_next() {
+  [ -n "$GUIDE_NEXT" ] || return 0
+  next_cmd "$CMD_NAME $GUIDE_NEXT" "$GUIDE_NEXT_DESC"
+  [ -z "$GUIDE_ALSO" ] || also_cmd "$CMD_NAME $GUIDE_ALSO" "$GUIDE_ALSO_DESC"
+}
+
+# 段階を 1 本のトラックで見せる。✔ 済 / ● いまここ / ○ まだ。番号は手順書の「段階 N」と対応する。
+STAGE_LABELS=("前提" "設定" "経路・ロール" "検証" "一時キー" "調査")
+STAGE_DONE=("" "" "" "" "" "")
+show_track() {
+  local cur="$1" detail="$2" i label name chars bytes width
+  for i in 0 1 2 3 4 5; do
+    # 全角を 2 桁として揃える（3 バイト文字は幅 2 とみなす）
+    name=${STAGE_LABELS[i]}; chars=${#name}; bytes=$(LC_ALL=C; printf '%s' "$name" | wc -c | tr -d ' ')
+    width=$(( chars + (bytes - chars) / 2 ))
+    label=$(printf '%d %s%*s' "$i" "$name" $(( 12 - width )) '')
+    if [ "$i" -lt "$cur" ]; then
+      printf '  %s✔%s %s%s%s  %s%s%s\n' "$C_GREEN" "$C_RESET" "$C_DIM" "$label" "$C_RESET" "$C_DIM" "${STAGE_DONE[i]}" "$C_RESET"
+    elif [ "$i" -eq "$cur" ]; then
+      printf '  %s●%s %s%s%s  %s\n' "$C_CYAN" "$C_RESET" "$C_BOLD" "$label" "$C_RESET" "$detail"
+    else
+      printf '  %s○ %d %s%s\n' "$C_DIM" "$i" "$name" "$C_RESET"
+    fi
+  done
+  echo ""
+}
+cmd_guide() {
+  local missing reason
+  ui_title "aws-survey"
+  print_places
+  echo ""
+
+  missing=$(missing_tools)
+  if [ -n "$missing" ]; then
+    show_track 0 "$(printf '%s' "$missing" | tr '\n' ' ' | sed 's/ $//') が見つかりません"
+    local t
+    for t in $missing; do
+      case "$t" in
+        aws)    ui_err "aws が見つかりません    $(ui_cmd 'brew install awscli')" ;;
+        jq)     ui_err "jq が見つかりません     $(ui_cmd 'brew install jq')" ;;
+        docker) ui_err "docker が見つかりません Docker Desktop を導入して起動してください" ;;
+      esac
+    done
+    ui_text "導入してから、もう一度 $CMD_NAME を実行してください。"
+    return 1
+  fi
+  STAGE_DONE[0]="aws / jq / docker"
+
+  if ! reason=$(env_state); then
+    show_track 1 "$reason"
+    # 壊れている・雛形のままなら差し替えになる。その確認は init 側が改めて出す
+    [ ! -f "$ENV_FILE" ] || ui_text "いまある environment.json は init が退避してから作り直します。"
+    ui_text "Claude Code / Codex に「準備して」と伝えると、必要なことを順に聞かれます。"
+    guide_next "init" "AWS への繋ぎ方を 9 問で聞いて environment.json を作ります"
+    return 0
+  fi
+  load_env
+  STAGE_DONE[1]="$SURVEY_NAME / アカウント $ACCOUNT_ID / $REGION"
+
+  if [ -z "$(setup_value route_decided)" ] || [ -z "$(setup_value role_created)" ]; then
+    show_track 2 "setup.route_decided / setup.role_created が未記録（ロール ${ROLE_NAME}）"
+    ui_text "作れないときは、既にあるロールを借りるか管理者に頼む形になります。どちらになるか・そのあと何を書き換えるかは、この判定が出します。"
+    guide_next "role" "このアカウントでロールを自分で作れるか調べます（読むだけで、何も作りません）"
+    guide_also "role --create" "作れると分かったら、続けてこれで読み取り専用ロールを作ります"
+    return 0
+  fi
+  STAGE_DONE[2]="${AUTH_ROUTE:-未定} / $ROLE_NAME"
+
+  key_state
+  if [ -z "$(setup_value readonly_verified)" ]; then
+    show_track 3 "setup.readonly_verified が未記録。読み取り専用であることの検証は省略できません"
+    case "$KEY_STATE" in
+      valid)
+        ui_text "一時キーの残り: 約 ${KEY_LEFT_MIN} 分 / ${KEY_TOTAL_MIN} 分${KEY_NOTE}"
+        guide_next "verify" "一時キーが読み取り専用であることを確かめます" ;;
+      *)
+        guide_next "credentials" "読み取り専用の一時キーを発行します"
+        guide_also "verify" "続けて、その一時キーが読み取り専用であることを確かめます" ;;
+    esac
+    return 0
+  fi
+  STAGE_DONE[3]="readonly_verified $(setup_value readonly_verified)"
+
+  case "$KEY_STATE" in
+    missing)
+      show_track 4 "一時キーがありません: $AWS_DIR/credentials"
+      guide_next "credentials" "読み取り専用の一時キーを発行します"
+      return 0 ;;
+    expired)
+      show_track 4 "一時キーが期限切れ（${KEY_EXP}${KEY_NOTE}）"
+      guide_next "credentials" "一時キーを発行し直します"
+      return 0 ;;
+    unknown)
+      show_track 4 "一時キーの期限が不明: ${KEY_EXP:-（記録なし）}。発行し直すのが確実です"
+      guide_next "credentials" "一時キーを発行し直します"
+      return 0 ;;
+  esac
+  STAGE_DONE[4]="残り約 ${KEY_LEFT_MIN} 分 / ${KEY_TOTAL_MIN} 分${KEY_NOTE}（期限 ${KEY_EXP}）"
+
+  if survey_started; then
+    show_track 5 "調査: 開始済み（out/00_進捗.md あり）。続きはコンテナ内の台帳に従います"
+  else
+    show_track 5 "調査: 未開始。目的と進め方はコンテナ内でユーザーと決めます"
+  fi
+  guide_next "run" "調査コンテナを起動します。中で Claude Code / Codex と調査を進めます"
+}
+
+# いま実行してよいか聞く。Enter は「はい」。端末でなければ read_line が諦めるので、案内だけ出して終わる。
+guide_confirm() {
+  local ans
+  printf '  %s❯%s いま %s を実行しますか？ %s(Y/n)%s: ' \
+    "$C_CYAN" "$C_RESET" "$(ui_cmd "$CMD_NAME $1")" "$C_DIM" "$C_RESET"
+  if ! read_line ans; then echo ""; return 1; fi
+  case "$ans" in
+    ""|y|Y|yes|YES) return 0 ;;
+    *) ui_text "ここで止めます。続けるときは上のコマンドを打ってください。"; return 1 ;;
+  esac
+}
+
+# 案内した 1 手を実行する。AWS_SURVEY_CHAIN=1 は、各コマンドが末尾に出す「次に打つコマンド」を
+# 黙らせるため（次の案内は、もう一度判定し直したこちらが出す）。run だけは端末を渡して戻らない。
+guide_run() {
+  local cmd="$1" rc; shift
+  case "$cmd" in
+    init) AWS_SURVEY_CHAIN=1; cmd_init "$@"; rc=$?; AWS_SURVEY_CHAIN=0; return "$rc" ;;
+    run)  exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
+    *)    AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/$cmd.sh" "$@" ;;
+  esac
+}
+
+# 引数なしの入口。判定 → 案内 → （答えが「はい」なら）実行 → もう一度判定、を最後まで繰り返す。
+# 判定そのものは AWS を叩かない。AWS に触るのは、利用者が実行に同意したあとの各コマンドだけ。
+cmd_guide_loop() {
+  local ran="" rc
+  while :; do
+    guide_reset
+    cmd_guide || return $?
+    [ -n "$GUIDE_NEXT" ] || return 0
+    # 直前に実行した 1 手で段階が変わらなかったときは、その続き（role --create など）を出す。
+    # 続きが無ければ、同じコマンドを勧め続けずにここで止める。
+    if [ "$GUIDE_NEXT" = "$ran" ]; then
+      if [ -n "$GUIDE_ALSO" ] && [ "$GUIDE_ALSO" != "$ran" ]; then
+        GUIDE_NEXT="$GUIDE_ALSO"; GUIDE_NEXT_DESC="$GUIDE_ALSO_DESC"
+        GUIDE_ALSO=""; GUIDE_ALSO_DESC=""
+      else
+        guide_show_next
+        echo ""
+        ui_text "ここから先は自動では進めません。上のコマンドを打つか、この出力を Claude Code / Codex に伝えてください。"
+        return 0
+      fi
+    fi
+    guide_show_next
+    echo ""
+    guide_confirm "$GUIDE_NEXT" || return 0
+    echo ""
+    ran="$GUIDE_NEXT"
+    # 案内の文字列をそのまま引数に割る（role --create）。中身は上で組み立てた定数だけ
+    guide_run $GUIDE_NEXT
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo ""
+      ui_err "$CMD_NAME $ran が失敗しました。上の出力を確認してください。"
+      ui_text "直したら、もう一度 $CMD_NAME を実行すれば続きから再開できます。"
+      return "$rc"
+    fi
+    echo ""
+  done
+}
+
+# ---- init ----
+# 聞くのは AWS への繋ぎ方だけ（設計案「init の対話」の 9 項目）。auth.route と phase_dir は聞かない。
+# 対話・非対話のどちらでも、検証（init_validate）と書き出し（init_write）は同じ経路を通る。
+INIT_FROM=""; INIT_FORCE=0
+I_NAME=""; I_PROFILE=""; I_ARN=""; I_ACCOUNT=""; I_MFA=""; I_REFRESH=""; I_REGION=""; I_DURATION=""; I_ROLE=""
+
+init_die() { ui_die "$@"; }
+
+valid_name()     { [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]; }
+valid_account()  { [[ "$1" =~ ^[0-9]{12}$ ]]; }
+valid_arn()      { [[ "$1" =~ ^arn:aws[a-z0-9-]*:(iam|sts)::[0-9]{12}:.+$ ]]; }
+valid_region()   { [[ "$1" =~ ^[a-z]+(-[a-z]+)+-[0-9]+$ ]]; }
+valid_duration() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 900 ] && [ "$1" -le 43200 ]; }
+valid_role()     { [[ "$1" =~ ^[A-Za-z0-9+=,.@_-]{1,64}$ ]]; }
+valid_bool()     { [ "$1" = true ] || [ "$1" = false ]; }
+# y/n・true/false を true/false に正規化。読めなければ空
+to_bool() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    y|yes|true|1) echo true ;; n|no|false|0) echo false ;; *) echo "" ;;
+  esac
+}
+
+# ローカルの ~/.aws/config を読むだけ。AWS には繋がない
+profile_list()   { aws configure list-profiles 2>/dev/null; }
+profile_exists() { profile_list | grep -qx -- "$1"; }
+profile_region() { aws configure get region --profile "$1" 2>/dev/null; }
+profile_is_sso() {
+  [ -n "$(aws configure get sso_session --profile "$1" 2>/dev/null)" ] \
+    || [ -n "$(aws configure get sso_start_url --profile "$1" 2>/dev/null)" ]
+}
+
+# source_profile の候補。<名>-mfa があるとき、元の <名> は長期キー側で借りる元にならないので省く（aws-login と同じ命名規則）。
+# profile_candidates は残す名前、profile_hidden は省いた名前を改行区切りで出す。
+profile_split() {
+  local mode="$1" all p
+  all=$(profile_list)
+  [ -n "$all" ] || return 0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    if printf '%s\n' "$all" | grep -qx -- "${p}-mfa"; then
+      [ "$mode" != hidden ] || printf '%s\n' "$p"
+    else
+      [ "$mode" != candidates ] || printf '%s\n' "$p"
+    fi
+  done <<< "$all"
+}
+profile_candidates() { profile_split candidates; }
+profile_hidden()     { profile_split hidden; }
+
+# 候補から 1 つ選んで I_PROFILE に入れる。端末なら矢印キーのメニュー、端末でなければ番号か名前の入力。
+choose_profile() {
+  local profiles="$1" n=0 i sel hidden
+  local -a entries=()
+  while IFS= read -r i; do [ -n "$i" ] && entries+=("$i"); done <<< "$profiles"
+  n=${#entries[@]}
+  hidden=$(profile_hidden | tr '\n' ' ' | sed 's/ $//')
+  if [ -n "$hidden" ]; then
+    ui_text "（$hidden は <名>-mfa がある長期キー側なので省いています）"
+  fi
+  if [ -t 0 ] && [ "$UI_TTY" = 1 ]; then
+    choose_profile_menu "${entries[@]}"
+    return 0
+  fi
+  for i in "${!entries[@]}"; do printf '    %2d) %s\n' "$((i+1))" "${entries[i]}"; done
+  while :; do
+    printf '  source_profile（番号か名前）: '
+    read_line sel || { echo ""; init_die "入力が尽きました。非対話モードは $CMD_NAME init --from <json>。"; }
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$n" ]; then
+      sel=${entries[sel-1]}
+    fi
+    for i in "${entries[@]}"; do
+      if [ "$i" = "$sel" ]; then I_PROFILE="$sel"; return 0; fi
+    done
+    ui_err "一覧にありません。"
+  done
+}
+
+# ↑↓ / j k で移動、1〜9 で番号へ、Enter で決定、q または Ctrl-D で中断。描画は ANSI（色・カーソル移動・消去）だけ。
+# 初期カーソルは default があればそこ、なければ先頭。決定後はメニューを消して 1 行に畳む。
+# 色は標準出力が端末で NO_COLOR が無いときだけ。
+choose_profile_menu() {
+  local -a entries=("$@")
+  local count=${#entries[@]} cursor=0 i key rest
+  for i in "${!entries[@]}"; do
+    [ "${entries[i]}" != default ] || cursor=$i
+  done
+  # 描く行数 = 候補 + ヒント 1 行。見出しは動かさない
+  draw_menu() {
+    local i
+    for i in "${!entries[@]}"; do
+      if [ "$i" = "$cursor" ]; then
+        printf '\033[K  %s❯ %s%s\n' "$C_CYAN" "${entries[i]}" "$C_RESET"
+      else
+        printf '\033[K  %s  %s%s\n' "$C_DIM" "${entries[i]}" "$C_RESET"
+      fi
+    done
+    printf '\033[K  %s↑↓ 移動 · Enter 決定 · q 中断%s\n' "$C_DIM" "$C_RESET"
+  }
+  show_cursor() { printf '\033[?25h'; }
+  trap show_cursor EXIT
+  printf '\033[?25l'
+  printf '  %s❯%s source_profile を選んでください\n' "$C_CYAN" "$C_RESET"
+  draw_menu
+  while :; do
+    IFS= read -rsn1 key || { show_cursor; echo ""; init_die "source_profile の選択が中断されました。"; }
+    case "$key" in
+      $'\e')
+        read -rsn2 -t 0.2 rest || rest=
+        case "$rest" in
+          '[A') [ "$cursor" -le 0 ] || cursor=$((cursor-1)) ;;
+          '[B') [ "$cursor" -ge $((count-1)) ] || cursor=$((cursor+1)) ;;
+        esac
+        ;;
+      k) [ "$cursor" -le 0 ] || cursor=$((cursor-1)) ;;
+      j) [ "$cursor" -ge $((count-1)) ] || cursor=$((cursor+1)) ;;
+      [1-9]) [ "$key" -gt "$count" ] || cursor=$((key-1)) ;;
+      '') break ;;
+      q) show_cursor; echo ""; init_die "source_profile の選択が中断されました。" ;;
+    esac
+    printf '\033[%dA' "$((count+1))"
+    draw_menu
+  done
+  I_PROFILE=${entries[cursor]}
+  # 問い + 候補 + ヒント + Enter で bash が出す改行 1 行を消して、結果 1 行に畳む
+  printf '\033[%dA' "$((count+3))"
+  printf '\033[J'
+  ui_ok "source_profile: ${C_BOLD}${I_PROFILE}${C_RESET}"
+  show_cursor
+  trap - EXIT
+}
+
+default_name() {
+  local b; b=$(basename "$AWS_SURVEY_DIR")
+  if valid_name "$b"; then echo "$b"; else echo "survey"; fi
+}
+mfa_default_from_arn() {
+  case "$1" in
+    *:user/*) echo true ;;
+    *) echo false ;;
+  esac
+}
+
+# 1 問。ask <変数名> <説明> <既定> <検証関数> [変換関数]。既定を受けるときは Enter。
+# 標準入力が尽きたら既定で埋めずに失敗する（エージェントの実行環境で黙って進めない）。
+# 端末では ❯ の入力行だけを答えた後に ✔ の 1 行へ畳む（見出しと補足は残す）。
+ask() {
+  local var="$1" label="$2" def="$3" check="$4" conv="${5:-}" ans lines=0
+  label=${label#"${label%%[![:space:]]*}"}
+  while :; do
+    if [ "$UI_TTY" = 1 ]; then
+      if [ -n "$def" ]; then printf '  %s❯%s %s %s(%s)%s: ' "$C_CYAN" "$C_RESET" "$label" "$C_DIM" "$def" "$C_RESET"
+      else printf '  %s❯%s %s: ' "$C_CYAN" "$C_RESET" "$label"; fi
+    else
+      if [ -n "$def" ]; then printf '  %s [%s]: ' "$label" "$def"; else printf '  %s: ' "$label"; fi
+    fi
+    if ! read_line ans; then
+      echo ""
+      init_die "入力が尽きました。対話できない環境では非対話モード（$CMD_NAME init --from <json>、または AWS_SURVEY_INIT_* の環境変数）を使ってください。"
+    fi
+    lines=$((lines+1))
+    [ -n "$ans" ] || ans="$def"
+    [ -n "$conv" ] && ans=$("$conv" "$ans")
+    if [ -z "$check" ] || { [ -n "$ans" ] && "$check" "$ans"; }; then
+      printf -v "$var" '%s' "$ans"
+      ui_erase "$lines"
+      ui_ok "$label: ${C_BOLD}${ans:--}${C_RESET}"
+      return 0
+    fi
+    ui_err "受け付けられない値です。もう一度入力してください。"
+    lines=$((lines+1))
+  done
+}
+
+init_interactive() {
+  local profiles ident arn_def acct_def mfa_def refresh_def region_def
+  ui_text "AWS への繋ぎ方を 9 問で聞きます。Enter で ( ) の既定を受け付けます。"
+  ui_text "対象がどんなシステムか・何を調べたいかは、ここでは聞きません（調査コンテナの中でユーザーと決めます）。"
+  echo ""
+
+  ui_head "1/9 name"
+  ui_text "対象を表す短い英数字名。イメージ名・一時キーの置き場（~/.aws-survey/<name>/）に使います。"
+  ask I_NAME "name" "$(default_name)" valid_name
+
+  echo ""
+  ui_head "2/9 source_profile"
+  ui_text "ロールを借りる元になるホスト側のプロファイル（aws configure list-profiles）。"
+  ui_text "いま有効なキーを持つ方を選びます。MFA の一時キーを別プロファイル（<名>-mfa など）に保存する運用なら、その保存先の方です。"
+  profiles=$(profile_candidates)
+  if [ -z "$profiles" ]; then
+    ui_err "プロファイルが 1 つもありません（~/.aws/config）。先に aws configure か aws configure sso で作ってください。"
+    init_die "source_profile を選べません。"
+  fi
+  choose_profile "$profiles"
+
+  echo ""
+  ui_head "3/9 principal_arn"
+  ui_text "$I_PROFILE の実体（IAM ユーザーか SSO のロール）。信頼ポリシーに入ります。"
+  arn_def=""; acct_def=""
+  if ident=$(aws sts get-caller-identity --profile "$I_PROFILE" --output json 2>/dev/null); then
+    arn_def=$(printf '%s' "$ident" | jq -r '.Arn // empty')
+    acct_def=$(printf '%s' "$ident" | jq -r '.Account // empty')
+    ui_kv "sts get-caller-identity" "$arn_def"
+  else
+    ui_warn "$I_PROFILE で sts get-caller-identity が通りません（未ログインか期限切れ）。手で入力するか、"
+    ui_text "別の端末でログインし直してから、もう一度 $CMD_NAME init を実行してください。"
+  fi
+  ask I_ARN "principal_arn" "$arn_def" valid_arn
+
+  echo ""
+  ui_head "4/9 account_id"
+  ui_text "調べる AWS アカウント ID（12 桁）。"
+  ask I_ACCOUNT "account_id" "$acct_def" valid_account
+
+  echo ""
+  ui_head "5/9 mfa_required"
+  ui_text "MFA が必須のアカウントか。信頼ポリシーの条件と権限判定が変わります。"
+  mfa_def=$(mfa_default_from_arn "$I_ARN")
+  ask I_MFA "mfa_required (y/n)" "$([ "$mfa_def" = true ] && echo y || echo n)" valid_bool to_bool
+
+  echo ""
+  ui_head "6/9 refresh_command"
+  ui_text "$I_PROFILE が切れたとき、何を実行して有効にし直すか（環境ごとに違う唯一の操作）。無ければ - 。"
+  refresh_def="-"
+  profile_is_sso "$I_PROFILE" && refresh_def="aws sso login --profile $I_PROFILE"
+  ask I_REFRESH "refresh_command" "$refresh_def" ""
+  [ "$I_REFRESH" = "-" ] && I_REFRESH=""
+
+  echo ""
+  ui_head "7/9 region"
+  ui_text "主に見るリージョン。既定リージョンになります。"
+  region_def=$(profile_region "$I_PROFILE")
+  ask I_REGION "region" "$region_def" valid_region
+
+  echo ""
+  ui_head "8/9 duration_seconds"
+  ui_text "1 回の調査セッションに取れる時間（秒、900〜43200）。"
+  ui_text "有効期限ではなく、調査エージェントの働き方を決める値です。短ければ守備範囲を狭く、長ければ通しで進めます。"
+  ask I_DURATION "duration_seconds" "3600" valid_duration
+
+  echo ""
+  ui_head "9/9 role_name"
+  ui_text "調査に使う読み取り専用ロールの名前。借りる経路では既存ロール名。"
+  ask I_ROLE "role_name" "aws-survey-readonly" valid_role
+}
+
+# 非対話: --from の JSON → 環境変数 AWS_SURVEY_INIT_* の順で上書き。AWS は叩かない。
+init_noninteractive() {
+  local f="$INIT_FROM"
+  if [ -n "$f" ]; then
+    [ -f "$f" ] || init_die "--from のファイルがありません: $f"
+    jq -e . "$f" >/dev/null 2>&1 || init_die "--from の JSON が読めません: $f"
+    I_NAME=$(jq -r '.name // empty' "$f")
+    I_ACCOUNT=$(jq -r '.account_id // empty' "$f")
+    I_REGION=$(jq -r '.region // empty' "$f")
+    I_PROFILE=$(jq -r '.auth.source_profile // empty' "$f")
+    I_ARN=$(jq -r '.auth.principal_arn // empty' "$f")
+    I_MFA=$(jq -r 'if .auth.mfa_required == null then "" else (.auth.mfa_required | tostring) end' "$f")
+    I_REFRESH=$(jq -r '.auth.refresh_command // empty' "$f")
+    I_ROLE=$(jq -r '.auth.role_name // empty' "$f")
+    I_DURATION=$(jq -r '.auth.duration_seconds // empty' "$f")
+  fi
+  I_NAME="${AWS_SURVEY_INIT_NAME:-$I_NAME}"
+  I_ACCOUNT="${AWS_SURVEY_INIT_ACCOUNT_ID:-$I_ACCOUNT}"
+  I_REGION="${AWS_SURVEY_INIT_REGION:-$I_REGION}"
+  I_PROFILE="${AWS_SURVEY_INIT_SOURCE_PROFILE:-$I_PROFILE}"
+  I_ARN="${AWS_SURVEY_INIT_PRINCIPAL_ARN:-$I_ARN}"
+  I_MFA="${AWS_SURVEY_INIT_MFA_REQUIRED:-$I_MFA}"
+  I_REFRESH="${AWS_SURVEY_INIT_REFRESH_COMMAND:-$I_REFRESH}"
+  I_ROLE="${AWS_SURVEY_INIT_ROLE_NAME:-$I_ROLE}"
+  I_DURATION="${AWS_SURVEY_INIT_DURATION_SECONDS:-$I_DURATION}"
+  # 既定が決められる項目だけ埋める
+  [ -n "$I_NAME" ]     || I_NAME=$(default_name)
+  [ -n "$I_MFA" ]      || I_MFA=$(mfa_default_from_arn "$I_ARN")
+  [ -n "$I_DURATION" ] || I_DURATION=3600
+  [ -n "$I_ROLE" ]     || I_ROLE=aws-survey-readonly
+  I_MFA=$(to_bool "$I_MFA")
+  local k
+  for k in I_PROFILE I_ARN I_ACCOUNT I_REGION; do
+    [ -n "${!k}" ] || init_die "非対話モードに ${k#I_} がありません（--from の JSON か AWS_SURVEY_INIT_* で渡してください）。"
+  done
+}
+
+# 対話・非対話で共通の検証
+init_validate() {
+  valid_name "$I_NAME"         || init_die "name が不正です: ${I_NAME}（[A-Za-z0-9_-]+）"
+  valid_account "$I_ACCOUNT"   || init_die "account_id が不正です: ${I_ACCOUNT}（12 桁）"
+  valid_arn "$I_ARN"           || init_die "principal_arn が不正です: $I_ARN"
+  valid_bool "$I_MFA"          || init_die "mfa_required が不正です: ${I_MFA}（y/n）"
+  valid_region "$I_REGION"     || init_die "region が不正です: $I_REGION"
+  valid_duration "$I_DURATION" || init_die "duration_seconds が不正です: ${I_DURATION}（900〜43200）"
+  valid_role "$I_ROLE"         || init_die "role_name が不正です: $I_ROLE"
+  profile_exists "$I_PROFILE"  || init_die "source_profile がプロファイル一覧にありません: ${I_PROFILE}（aws configure list-profiles）"
+}
+
+# 既存 environment.json の扱い。対話なら確認、非対話なら --force が要る
+init_confirm_replace() {
+  local ans
+  [ -f "$ENV_FILE" ] || return 0
+  ui_warn "environment.json がすでにあります: $ENV_FILE"
+  if [ "$INIT_MODE" = noninteractive ]; then
+    [ "$INIT_FORCE" -eq 1 ] || init_die "上書きしません。差し替えるなら --force を付けてください。"
+  else
+    ui_text "差し替えると environment.json.bak に退避し、setup.* の到達点は白紙になります。"
+    printf '  %s❯%s 差し替えますか？ %s(y/N)%s: ' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET"
+    read_line ans || ans=""
+    case "$ans" in y|Y|yes|YES) ;; *) ui_text "そのままにします。"; exit 0 ;; esac
+  fi
+  cp "$ENV_FILE" "$ENV_FILE.bak" || init_die "退避できませんでした: $ENV_FILE.bak"
+  ui_ok "退避しました: $ENV_FILE.bak"
+}
+
+init_write() {
+  local tmp
+  tmp=$(mktemp) || init_die "一時ファイルを作れません。"
+  jq -n --arg name "$I_NAME" --arg account "$I_ACCOUNT" --arg region "$I_REGION" \
+        --arg profile "$I_PROFILE" --arg arn "$I_ARN" --argjson mfa "$I_MFA" \
+        --arg role "$I_ROLE" --arg refresh "$I_REFRESH" --argjson duration "$I_DURATION" '
+    {name: $name, account_id: $account, region: $region,
+     auth: {route: null, source_profile: $profile, principal_arn: $arn, mfa_required: $mfa,
+            role_name: $role, refresh_command: (if $refresh == "" then null else $refresh end),
+            duration_seconds: $duration},
+     phase_dir: "01_基礎調査",
+     setup: {route_decided: null, role_created: null, readonly_verified: null, container_verified: null}}' \
+    > "$tmp" || { rm -f "$tmp"; init_die "environment.json を組み立てられませんでした。"; }
+  jq -e . "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; init_die "書き出した JSON が読めません。"; }
+  mv "$tmp" "$ENV_FILE" || init_die "書き込めません: $ENV_FILE"
+  chmod 600 "$ENV_FILE" 2>/dev/null
+  local reason
+  reason=$(env_state) || init_die "書き出した environment.json を load-env.sh が受け付けません: $reason"
+  ui_ok "書き出しました: $ENV_FILE"
+}
+
+# out/ の器と、対象フォルダ用の AGENTS.md / CLAUDE.md
+init_scaffold() {
+  mkdir -p "$AWS_SURVEY_DIR/out/_環境" || init_die "out/ を作れません。"
+  ui_ok "out/ と out/_環境/ を用意しました${C_DIM}（中身は調査コンテナが書きます）${C_RESET}"
+  if [ "$AWS_SURVEY_DIR" = "$AWS_SURVEY_HOME" ]; then
+    ui_text "対象フォルダが本体そのものなので AGENTS.md / CLAUDE.md は置きません。"
+    return 0
+  fi
+  if [ -f "$AWS_SURVEY_DIR/AGENTS.md" ]; then
+    ui_text "AGENTS.md はすでにあるので置き換えません。"
+  else
+    cat > "$AWS_SURVEY_DIR/AGENTS.md" <<EOF
+# aws-survey の対象フォルダ
+
+ここは \`aws-survey\` の対象フォルダ。対象固有のものは \`environment.json\`（AWS への繋ぎ方と到達点）と
+\`out/\`（調査コンテナが書く記録）だけで、本体は別の場所にある。ホスト側の入口は \`aws-survey\`（引数なしで次の 1 手が出る）。
+
+- 準備と立ち上げに手順書は無い。\`aws-survey\`（引数なし）が段階を判定し、次の 1 手を出し、確認しながら実行する。
+- 詰まったら \`aws-survey doctor\`。ツールの有無と、一時キーを発行できない原因を切り分ける。
+- \`aws-survey run\` で調査コンテナが立ち上がったら、ホスト側の仕事は終わり。
+  調査も、結果の説明も、報告の検証も、コンテナの中の調査エージェントが持っている。ここから先回りしない。
+- 対象の概要・調査項目・フェーズの目的をここで作らない。それらは調査コンテナの中でユーザーと決め、\`out/\` に記録される。
+  ここで扱うのは AWS への繋ぎ方だけ。
+EOF
+    ui_ok "AGENTS.md を置きました${C_DIM}（このフォルダの位置づけだけを書いています）${C_RESET}"
+  fi
+  if [ -f "$AWS_SURVEY_DIR/CLAUDE.md" ]; then
+    ui_text "CLAUDE.md はすでにあるので置き換えません。"
+  else
+    printf '@AGENTS.md\n' > "$AWS_SURVEY_DIR/CLAUDE.md"
+    ui_ok "CLAUDE.md を置きました${C_DIM}（AGENTS.md を読み込むだけ）${C_RESET}"
+  fi
+}
+
+cmd_init() {
+  local missing
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --from)   [ $# -ge 2 ] || init_die "--from には JSON ファイルを指定してください。"; INIT_FROM="$2"; shift 2 ;;
+      --from=*) INIT_FROM="${1#--from=}"; shift ;;
+      --force)  INIT_FORCE=1; shift ;;
+      *) init_die "init の不明なオプション: $1（--from <json> / --force）" ;;
+    esac
+  done
+  missing=$(missing_tools)
+  case " $missing " in
+    *" aws "*|*" jq "*) init_die "aws と jq が必要です（不足: ${missing}）。$CMD_NAME doctor で確認してください。" ;;
+  esac
+  if [ -n "$INIT_FROM" ] || [ -n "${AWS_SURVEY_INIT_NAME:-}${AWS_SURVEY_INIT_ACCOUNT_ID:-}${AWS_SURVEY_INIT_REGION:-}${AWS_SURVEY_INIT_SOURCE_PROFILE:-}${AWS_SURVEY_INIT_PRINCIPAL_ARN:-}" ]; then
+    INIT_MODE=noninteractive
+  else
+    INIT_MODE=interactive
+  fi
+  ui_title "aws-survey init"
+  print_places
+  echo ""
+  init_confirm_replace
+  if [ "$INIT_MODE" = noninteractive ]; then init_noninteractive; else init_interactive; echo ""; fi
+  init_validate
+  init_write
+  init_scaffold
+  echo ""
+  ui_head "対象"
+  ui_kv "name" "$I_NAME"
+  ui_kv "account_id" "$I_ACCOUNT"
+  ui_kv "region" "$I_REGION"
+  ui_kv "source_profile" "$I_PROFILE"
+  ui_kv "role_name" "$I_ROLE"
+  ui_kv "duration" "$I_DURATION 秒"
+  ui_text "読み取り専用ロールをどう用意するか（自分で作る / 既存のロールを借りる）はまだ決めていません。"
+  ui_text "次の $CMD_NAME role が、このアカウントでロールを作れるかを調べて決めます。"
+  echo ""
+  ui_head "このフォルダを Git で管理するなら"
+  ui_text "environment.json と trust.json にはアカウント ID が入ります。init は .gitignore を作らないので、"
+  ui_text "次の 3 行を .gitignore に書いてください。"
+  echo "      /environment.json"
+  echo "      /environment.json.bak"
+  echo "      /trust.json"
+  ui_text "out/（調査の記録）を含めるかは任意です。"
+  echo ""
+  next_cmd "$CMD_NAME role" "このアカウントでロールを自分で作れるか調べます（読むだけで、何も作りません）"
+}
+
+# ---- status ----
+route_label() {
+  case "$1" in
+    own_role)      echo "自分で作る" ;;
+    existing_role) echo "既存のロールを借りる" ;;
+    granted_role)  echo "管理者に信頼してもらう" ;;
+    "")            echo "未定" ;;
+    *)             echo "$1" ;;
+  esac
+}
+
+cmd_status() {
+  local reason v
+  ui_title "aws-survey status"
+  print_places
+  ui_kv "本体" "$AWS_SURVEY_HOME"
+  if ! reason=$(env_state); then
+    ui_kv "一時キー" "（environment.json が使えないため不明）"
+    echo ""
+    ui_warn "未設定: $reason"
+    init_guidance
+    return 0
+  fi
+  load_env
+  ui_kv "一時キー" "$AWS_DIR"
+  echo ""
+  ui_head "対象"
+  ui_kv "名前" "$SURVEY_NAME"
+  ui_kv "アカウント" "$ACCOUNT_ID"
+  ui_kv "リージョン" "$REGION"
+  ui_kv "ロール" "$ROLE_NAME"
+  ui_kv "ロールの用意" "$(route_label "$AUTH_ROUTE")"
+  ui_kv "フェーズ" "$SURVEY_PHASE_DIR"
+  echo ""
+  ui_head "済んだこと（environment.json に記録された日付）"
+  milestone() {
+    local v; v=$(setup_value "$1")
+    if [ -n "$v" ]; then ui_ok "$2  ${C_DIM}$v${C_RESET}"; else ui_skip "$2  まだ"; fi
+  }
+  milestone route_decided     "ロールの用意のしかたを決めた"
+  milestone role_created      "ロールを用意した"
+  milestone readonly_verified "読み取り専用であることを確かめた"
+  milestone container_verified "コンテナの中で環境を確かめた"
+  echo ""
+  ui_head "一時キー"
+  key_state
+  case "$KEY_STATE" in
+    missing) ui_skip "なし（$AWS_DIR/credentials）" ;;
+    expired) ui_warn "期限切れ${KEY_NOTE}（期限 ${KEY_EXP}）" ;;
+    unknown) ui_warn "あり。有効期限を読めません（${KEY_EXP:-記録なし}）" ;;
+    valid)   ui_ok "残り 約 ${KEY_LEFT_MIN} 分 / ${KEY_TOTAL_MIN} 分${KEY_NOTE}  ${C_DIM}期限 ${KEY_EXP}${C_RESET}" ;;
+  esac
+  echo ""
+  ui_head "調査"
+  if survey_started; then
+    ui_ok "開始済み（out/00_進捗.md あり）"
+  else
+    ui_skip "未開始"
+  fi
+}
+
+# ---- doctor ----
+cmd_doctor() {
+  local t p ok=1 reason
+  ui_title "aws-survey doctor"
+  print_places
+  echo ""
+  ui_head "ホストのツール"
+  for t in aws jq docker; do
+    if p=$(command -v "$t" 2>/dev/null); then
+      ui_ok "$(printf '%-6s' "$t")  ${C_DIM}$p${C_RESET}"
+    else
+      ui_err "$(printf '%-6s' "$t")  見つかりません"; ok=0
+    fi
+  done
+  if command -v docker >/dev/null 2>&1; then
+    if docker info >/dev/null 2>&1; then
+      ui_ok "docker デーモンに接続できます"
+    else
+      ui_err "docker デーモンに接続できません。Docker Desktop を起動してください。"
+    fi
+  fi
+  echo ""
+  if [ "$ok" -eq 0 ]; then
+    ui_text "不足しているツールを導入してから、もう一度実行してください。"
+    return 1
+  fi
+  if ! reason=$(env_state); then
+    ui_warn "未設定: $reason"
+    init_guidance
+    return 1
+  fi
+  ui_head "一時キーを発行できない原因の切り分け"
+  ui_text "AWS を読むだけで、何も変更しません。"
+  echo ""
+  bash "$LIBEXEC_DIR/commands/doctor.sh"
+}
+
+cmd_help() { sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+case "$CMD" in
+  "")          cmd_guide_loop ;;
+  status)      cmd_status ;;
+  doctor)      cmd_doctor ;;
+  help)        cmd_help ;;
+  init)        cmd_init "$@" ;;
+  role)        exec "$LIBEXEC_DIR/commands/role.sh" "$@" ;;
+  credentials) exec "$LIBEXEC_DIR/commands/credentials.sh" "$@" ;;
+  verify)      exec "$LIBEXEC_DIR/commands/verify.sh" "$@" ;;
+  run)         exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
+  *)           die "不明なコマンド: ${CMD}（aws-survey --help）" ;;
+esac

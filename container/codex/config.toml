@@ -1,0 +1,14 @@
+# コンテナ専用。モデルはユーザーが選ぶ。
+# Docker が隔離境界。入れ子の bubblewrap は標準 Docker の seccomp で起動できない。
+sandbox_mode = "danger-full-access"
+approval_policy = "never"
+web_search = "disabled"
+cli_auth_credentials_store = "file"
+
+
+[features]
+# write_stdin の追加入力は PreToolUse を再実行しないため、unified exec は無効にする。
+unified_exec = false
+
+[projects."/home/node/aws-survey"]
+trust_level = "trusted"

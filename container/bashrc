@@ -1,0 +1,41 @@
+# AWS インフラ構成調査コンテナ
+case $- in *i*) ;; *) return;; esac
+
+. /usr/local/lib/survey-ui.sh
+
+# 履歴は ~/.local（名前付きボリューム）に置く。コンテナを作り直しても残る。
+# 打つたびに追記するので、コンテナが落ちても直前のコマンドを失わない。
+HISTFILE=$HOME/.local/state/bash_history
+HISTSIZE=10000
+HISTFILESIZE=20000
+HISTCONTROL=ignoreboth
+mkdir -p "$(dirname "$HISTFILE")" 2>/dev/null
+shopt -s histappend checkwinsize
+PROMPT_COMMAND='history -a'
+
+export PS1='\[\e[36m\]survey\[\e[0m\]:\[\e[2m\]\w\[\e[0m\]\$ '
+export PAGER=less
+export LESS='-R -F -X -i'
+
+alias ls='ls --color=auto'
+alias ll='ls -la'
+alias grep='grep --color=auto'
+alias c='claude'
+alias cc='claude --continue'
+alias cx='codex'
+alias cxx='codex resume --last'
+complete -C aws_completer aws
+
+survey-status
+
+sui_head "調査を始める・続ける"
+sui_cmd "claude"              "新しく始める"
+sui_cmd "claude -c"           "直前の会話の続きから（quit しても残ります）"
+sui_cmd "claude -r"           "過去のセッションを選んで再開"
+sui_cmd "codex"               "Codex で始める（初回は codex login --device-auth）"
+sui_cmd "codex resume --last" "Codex の直前の会話を再開"
+sui_cmd "survey-status"       "資格情報の残り時間を確認"
+echo
+sui_line "調査結果は out/ に書きます。台帳は out/00_進捗.md です。"
+sui_text "短縮: c=claude  cc=claude -c  cx=codex  cxx=codex resume --last  ll=ls -la"
+echo

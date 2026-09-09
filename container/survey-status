@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# 資格情報の残り時間と、いま何をすべきかを表示する（API は叩かない）
+#
+# 判断の閾値は、このセッションに与えられた時間の長さから毎回計算する。
+# 「1 時間」を前提にした固定値を、指示文書の側に書かないための仕組み。
+. /usr/local/lib/survey-ui.sh
+
+SESSION_FILE=/home/node/.aws-claude/session.json
+CRED_FILE=/home/node/.aws-claude/credentials
+
+# プロファイル・リージョン・アカウント・フェーズ。資格情報があるときだけ最後に出す。
+show_context() {
+  local line="プロファイル ${AWS_PROFILE:-未設定}"
+  [ -n "$region" ]  && line="$line ・ リージョン $region"
+  [ -n "$account" ] && line="$line ・ アカウント $account"
+  [ -n "${SURVEY_PHASE_DIR:-}" ] && line="$line ・ フェーズ $SURVEY_PHASE_DIR"
+  sui_text "$line"
+}
+
+echo
+if [ ! -f "$CRED_FILE" ]; then
+  sui_warn "資格情報がありません。"
+  sui_next "ユーザーに伝えてください: この作業環境の外で、一時キーを発行し直す必要があります。"
+  echo
+  exit 0
+fi
+
+exp=""; total_min=""; note=""
+region=""; account=""; renew=""
+
+if [ -f "$SESSION_FILE" ] && command -v jq >/dev/null 2>&1; then
+  exp=$(jq -r '.expiration // empty'  "$SESSION_FILE" 2>/dev/null)
+  dur=$(jq -r '.duration_seconds // empty' "$SESSION_FILE" 2>/dev/null)
+  region=$(jq -r '.region // empty'   "$SESSION_FILE" 2>/dev/null)
+  account=$(jq -r '.account_id // empty' "$SESSION_FILE" 2>/dev/null)
+  renew=$(jq -r '.renew_hint // empty' "$SESSION_FILE" 2>/dev/null)
+  [ -n "$dur" ] && total_min=$(( dur / 60 ))
+fi
+
+if [ -z "$exp" ]; then
+  # 資格情報ファイルの更新時刻 + 1 時間で推定する（発行元の情報が無い場合）
+  if mtime=$(stat -c %Y "$CRED_FILE" 2>/dev/null); then
+    exp=$(date -d "@$(( mtime + 3600 ))" --iso-8601=seconds)
+    total_min=60
+    note="（推定）"
+  fi
+fi
+
+if [ -z "$exp" ]; then
+  sui_head "資格情報" "あり（有効期限は不明）"
+  show_context
+  echo
+  exit 0
+fi
+
+if ! exp_epoch=$(date -d "$exp" +%s 2>/dev/null); then
+  sui_head "資格情報" "あり（有効期限を読めませんでした: ${exp}）"
+  show_context
+  echo
+  exit 0
+fi
+
+now=$(date +%s)
+left=$(( (exp_epoch - now) / 60 ))
+# 時刻はコンテナの時間帯（run.sh が TZ を渡す）で、分まで。ISO 8601 のまま出すと読みにくい。
+exp_local=$(date -d "@$exp_epoch" '+%m/%d %H:%M' 2>/dev/null) || exp_local="$exp"
+[ -z "$total_min" ] && total_min=60
+
+# 閾値。保存と台帳の更新にかかる時間はセッションの長さによらずほぼ一定なので下限を固定し、
+# 短いセッションで「常に着手禁止」にならないよう、割合による上限も掛ける。
+stop=15;   quarter=$(( total_min / 4 ));      [ "$quarter" -lt "$stop" ]   && stop=$quarter
+finish=40; twothirds=$(( total_min * 2 / 3 )); [ "$twothirds" -lt "$finish" ] && finish=$twothirds
+[ "$stop" -lt 1 ] && stop=1
+[ "$finish" -le "$stop" ] && finish=$(( stop + 1 ))
+
+if [ "$left" -le 0 ]; then
+  sui_warn "資格情報は期限切れです${note}（${exp_local} に失効）"
+  sui_next "書きかけを out/ に保存し、台帳を更新してから、ユーザーに再発行を依頼してください。"
+  sui_note "この作業環境は開いたままで構いません。作り直す必要はありません。"
+  if [ -n "$renew" ]; then
+    echo ""
+    sui_text "ユーザーへ伝える文面:"
+    sui_note "資格情報が切れました。次を実行してください:"
+    sui_cmd "  $renew"
+    echo ""
+  fi
+else
+  sui_head "資格情報" "残り 約 ${left} 分 / ${total_min} 分${note}  ${exp_local} まで"
+  if [ "$left" -lt "$stop" ]; then
+    sui_next "新しい作業に着手しないでください。成果の保存と台帳の更新に充ててください。"
+  elif [ "$left" -lt "$finish" ]; then
+    sui_next "着手中の領域を仕上げてください。新しい領域には入らないこと。"
+  else
+    sui_next "新しい領域に着手して構いません。"
+  fi
+fi
+
+show_context
+echo

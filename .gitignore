@@ -1,0 +1,15 @@
+# 調査結果と監査ログはコミットしない。out/ は aws-survey init / run が作る（開発中にリポジトリ直下を対象にしたときだけ現れる）
+out/
+
+# 対象環境の設定（アカウント ID・ARN を含む）と、そこから生成される信頼ポリシー。
+# このマシンの上にだけ置く。雛形は templates/environment.json。
+/environment.json
+/environment.json.bak
+/trust.json
+
+# Python のテスト・フックのキャッシュ
+__pycache__/
+*.pyc
+
+# macOS が置いていくもの
+.DS_Store
