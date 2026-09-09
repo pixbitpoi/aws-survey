@@ -64,6 +64,13 @@ esac
 
 ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
 
+# EC2 の中を調べる機能（任意）。ログインユーザー名と、登録済みホストの別名だけを読む。
+# 既定は diag。init では聞かず、aws-survey ssh setup で決める。
+SSH_USER="${SSH_USER:-$(_get .ssh.user)}"
+SSH_USER="${SSH_USER:-diag}"
+[[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || _die "environment.json の ssh.user が不正です: ${SSH_USER}（小文字英字か _ で始まり、小文字英数字 _ - で 32 字まで）"
+SSH_HOSTS="${SSH_HOSTS:-$(jq -r '.ssh.hosts // {} | keys | join(" ")' "$ENV_FILE")}"
+
 # 案内文に書く CLI の名前。インストール済み（PATH 上に aws-survey がある）を前提に、常に短い名前にする。
 # 利用者に見せる「次に打つコマンド」はスクリプト名ではなくこれで組み立てる。
 AWS_SURVEY_CMD="${AWS_SURVEY_CMD:-aws-survey}"

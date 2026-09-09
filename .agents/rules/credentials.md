@@ -40,8 +40,9 @@
 
 利用者に見せる「次に打つコマンド」は `load-env.sh` が入れる `AWS_SURVEY_CMD`（`aws-survey` か `<本体>/aws-survey`）で
 組み立てる。`./run.sh` のようなスクリプト名を案内文に書かない。入口は `aws-survey`（`role` / `credentials` / `verify` /
-`run` / `status` / `doctor` / `init`）。実体は `role` / `credentials` / `verify` / `run` / `doctor` が
+`run` / `status` / `doctor` / `init` / `ssh`）。実体は `role` / `credentials` / `verify` / `run` / `doctor` / `ssh` が
 `libexec/commands/<名前>.sh`、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。
+`ssh` は任意の追加機能で、段階の判定には組み込まない（`environment.json` の `ssh.hosts` があれば `status` に出すだけ）。
 引数なしの `aws-survey` の判定は AWS を叩かずファイルだけで行う。
 案内した 1 手を続けて実行するのは、利用者に `(Y/n)` で聞いて「はい」と答えたときだけ。読めなければ案内だけで終わる
 （端末でない実行環境で黙って AWS を叩かないため）。

@@ -39,7 +39,7 @@ formula と `tests/test_distribution.py` の `INCLUDED_HIDDEN` を揃えるこ�
 | 入るもの | 理由 |
 | --- | --- |
 | `bin/aws-survey` | 入口。keg では `libexec/aws-survey` へ移され、`bin` には env ラッパーが置かれる |
-| `libexec/` | ホスト側の実装。各スクリプトと `session-guard.json`、EC2 へ導入する診断ゲートウェイ（`ec2/`） |
+| `libexec/` | ホスト側の実装。各スクリプトと `session-guard.json`、EC2 へ導入する診断ゲートウェイと導入スクリプトの雛形（`ec2/`。`aws-survey ssh setup --print` が組み立てる） |
 | `container/`・`Dockerfile` | 調査コンテナへ渡る資材と、そのビルド定義。ビルド文脈は `container/` |
 | `templates/` | `init` が使う `environment.json` の雛形 |
 
@@ -47,7 +47,7 @@ formula と `tests/test_distribution.py` の `INCLUDED_HIDDEN` を揃えるこ�
 | --- | --- |
 | `README.md`・`docs/` | **利用者向け文書の正本は GitHub**（`brew home aws-survey`）。配布物の中には読む手段が無く、参照する側も無い |
 | `AGENTS.md`・`CLAUDE.md`・`.agents/` | 開発時の入口と規則。`aws-survey run` から先はコンテナの仕事なので、インストール済みのツリーの中で作業するエージェントはいない。開発は git clone で行う |
-| `tests/` | 開発時にリポジトリで走らせる |
+| `tests/` | 開発時にリポジトリで走らせる（`ec2_install_smoke.sh` は Docker が要るので手で実行する） |
 | `environment.json`・`out/`・`trust.json`・一時キー | 対象フォルダとホームに属する。配布物には無い |
 
 `README.md` を formula の除外リストに入れても、**keg 直下には現れます。**Homebrew が展開した tarball から

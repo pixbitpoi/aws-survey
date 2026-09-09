@@ -46,7 +46,7 @@ EC2 に残すものの名前はすべて `diag` で統一する。「ai」「age
 | sshd 設定 | `/etc/ssh/sshd_config.d/diag.conf` |
 | sudoers | `/etc/sudoers.d/diag` |
 | journal のタグ | `diag-gateway` |
-| ロック | `/run/diag.lock` |
+| ロック | `/run/diag.lock`（再作成の定義は `/etc/tmpfiles.d/diag.conf`） |
 | EC2 のタグ | `diag:ssh=<name>` |
 | IAM ポリシー | `diag-ssh-<name>`（ロール名は既存の `auth.role_name` のまま） |
 
@@ -147,9 +147,10 @@ aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoe
 
 ### 4.3 導入スクリプトの大きさ
 
-`AWS-RunShellScript` の `commands` に渡す。ゲートウェイ本体（Python、§5）を heredoc で含めても数十 KB に収まる見込みだが、
-**SSM のパラメータ上限は実装時に実測する**。超える場合は base64 を複数コマンドに分割する。S3 経由は使わない
-（調査側で `s3:GetObject` を Deny している設計と噛み合わないし、余計なバケットを作りたくない）。
+`AWS-RunShellScript` の `commands` に渡す。第 2 段で組み立てた 1 本は約 65 KB（ゲートウェイと `diag-root` を素の heredoc で含む）。
+SSM の公開されている上限は「ドキュメント 64 KB」で、`SendCommand` は `MaxDocumentSizeExceeded` を返す。パラメータ値そのものの上限は
+文書に明記されておらず、**実 AWS で第 3 段のときに実測する**。超えるときは gzip + base64（約 18 KB になる）を 1 つの heredoc で渡し、
+EC2 側で展開して実行する。S3 経由は使わない（調査側で `s3:GetObject` を Deny している設計と噛み合わないし、余計なバケットを作りたくない）。
 
 ### 4.4 environment.json
 
@@ -181,6 +182,8 @@ aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoe
 | `/etc/diag/diag.conf` | 登録済みログ、拒否パターン、strict | root / 644 |
 | `/etc/ssh/sshd_config.d/diag.conf` | `Match User` ブロック（Include が無い古い sshd は `sshd_config` 末尾にマーカー付きで追記） | root / 600 |
 | `/etc/sudoers.d/diag` | `diag-root` 1 本だけの NOPASSWD | root / 440 |
+| `/etc/tmpfiles.d/diag.conf` | 再起動後に `/run/diag.lock` を作り直す 1 行（`/run` は tmpfs で、ログインユーザーは `/run` 直下に作れない） | root / 644 |
+| `/run/diag.lock` | ゲートウェイの直列化ロック | root:<user のグループ> / 660 |
 | `/home/<user>/.ssh/authorized_keys` | `restrict,command="/usr/local/lib/diag/gateway" ssh-ed25519 ...` | user / 600、ディレクトリ 700 |
 
 導入スクリプトの手順。
@@ -207,6 +210,7 @@ aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoe
    `sshd -t` で検証してから `systemctl reload sshd`。**restart ではなく reload**（既存セッションを落とさない）。
    検証に失敗したら書いた設定を戻して非ゼロで終わり、setup がそれを表示する。sftp サブシステム要求も
    ForceCommand に置き換わるため、scp / sftp は同時に塞がる。
+   Ubuntu 24.04 のように sshd がソケット起動で常駐していないときは reload する対象が無く、次の接続から新しい設定が効く。
 5. sudoers: `<user> ALL=(root) NOPASSWD: /usr/local/lib/diag/diag-root` と `Defaults:<user> !requiretty`。
    `visudo -c` で検証してから置く。
 6. `diag.conf` の生成（§5.3 の自動検出 + `--log` + `--deny` + strict）。
@@ -435,15 +439,22 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 
 ## 10. 実装の順序と検証
 
-1. `libexec/ec2/gateway.py` と `diag-root.py`。ローカルで動く（Mac でも Python 標準ライブラリだけで解析部分はテストできる）。
+1. `libexec/ec2/gateway.py` と `diag-root.py`。**済**。ローカルで動く（Mac でも Python 標準ライブラリだけで解析部分はテストできる）。
    `tests/test_gateway.py` に、動詞ごとの許可・拒否・引数上限・拒否パターン（realpath 経由のシンボリックリンクを含む）・
    `shlex` 迂回（`'uptime; id'`、`$(id)`、改行）を書く。
 2. 導入スクリプトの雛形と `aws-survey ssh setup --print`。EC2 を使わず、ローカルの Docker（Ubuntu / AL2023）で
-   root 実行して sshd 設定と権限を確かめる。
+   root 実行して sshd 設定と権限を確かめる。**済**（`libexec/ec2/install.sh.tmpl`・`libexec/commands/ssh.sh`・
+   `tests/test_ssh_install.py`。Docker での確認は `tests/ec2_install_smoke.sh`）。
 3. `aws-survey ssh setup`（SSM 経由）と `known_hosts` の回収。実 EC2 が要る。
 4. IAM ポリシーと `role` / `credentials` / `verify` の追加。実 AWS が要る。`PackedPolicySize` を再確認する。
 5. Dockerfile・`ec2` ラッパー・フック・`test_guards.py`。
 6. `method/06`、`survey-status`、`security.md`、`README.md`。
 
-実環境で未確認のまま完了扱いにしない項目: `/bin/bash` と ForceCommand の組み合わせ、SSM パラメータの上限、
-AL2 の `requiretty`、session-manager-plugin の deb の arm64 対応。
+実環境で未確認のまま完了扱いにしない項目と、いまの状態。
+
+| 項目 | 状態 |
+| --- | --- |
+| `/bin/bash` と ForceCommand の組み合わせ | ローカル Docker の sshd（Ubuntu 24.04 / AL2023）で、鍵認証 → ForceCommand → ゲートウェイの許可と拒否まで確認。実 EC2 では未確認 |
+| SSM パラメータの上限 | 未確認。生成物は約 65 KB で、公開されている「ドキュメント 64 KB」と同じ桁（§4.3） |
+| AL2 の `requiretty` | 未確認（AL2023 では `requiretty` が無く、AL2 のイメージでは確認していない）。sudoers に `Defaults:<user> !requiretty` を書いてある |
+| session-manager-plugin の deb の arm64 対応 | 未確認（第 5 段） |

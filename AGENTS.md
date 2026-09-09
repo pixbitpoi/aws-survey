@@ -27,7 +27,7 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 | リリース・Homebrew の formula 更新 | `docs/release.md`（配布物の範囲もここ） |
 | `container/**`・`Dockerfile` | `.agents/rules/container.md` |
 | `bin/aws-survey`・`libexec/**`・`templates/`・接続設定 | `.agents/rules/credentials.md` |
-| `libexec/ec2/**`（EC2 に置く診断ゲートウェイ） | `docs/design-ec2-ssh.md` の第 2 節（名前）と第 5 節（仕様）。実装の段階と未確認事項は第 10 節 |
+| `libexec/ec2/**`（EC2 に置く診断ゲートウェイと導入スクリプトの雛形）・`libexec/commands/ssh.sh` | `docs/design-ec2-ssh.md` の第 2 節（名前）・第 4 節（セットアップと EC2 に作るもの）・第 5 節（仕様）。実装の段階と未確認事項は第 10 節 |
 
 上の規則は新規ファイルにも適用する。`.agents/rules/` はどのエージェントも自動では読み込まない。この表に従って読む。
 `container/instructions/` は配布用の調査指示であり、開発中の自分の役割を切り替える指示ではない。

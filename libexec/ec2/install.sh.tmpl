@@ -1,0 +1,292 @@
+#!/usr/bin/env bash
+# Install the diagnostic gateway for a read-only login user. Run as root on the host to diagnose.
+#
+# Idempotent: a second run overwrites the gateway, the helper, the configuration, the sshd and
+# sudoers entries and the authorized key. The user is created once and kept.
+#
+# What it leaves on the host (all under the name "diag"):
+#   /usr/local/lib/diag/gateway         ForceCommand target (Python 3, standard library only)
+#   /usr/local/lib/diag/diag-root       the few diagnostics that need root (Python 3)
+#   /etc/diag/diag.conf                 registered logs, deny patterns, strict flag
+#   /etc/ssh/sshd_config.d/diag.conf    Match User block (appended to sshd_config with markers
+#                                       when sshd_config has no Include)
+#   /etc/sudoers.d/diag                 NOPASSWD for diag-root only
+#   /etc/tmpfiles.d/diag.conf           recreates /run/diag.lock after a reboot
+#   /run/diag.lock                      one request at a time
+#   /home/<user>/.ssh/authorized_keys   one key, restricted to the gateway
+#
+# Exit status is non-zero when any check fails; nothing half-applied is left behind for sshd and
+# sudoers (the previous file is restored). The last lines of the output are HOSTKEY records for
+# the client's known_hosts.
+set -euo pipefail
+umask 022
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+DIAG_USER='@@USER@@'
+DIAG_PUBKEY='@@PUBKEY@@'
+LIB=/usr/local/lib/diag
+CONF_DIR=/etc/diag
+CONF="$CONF_DIR/diag.conf"
+SSHD_CONFIG=/etc/ssh/sshd_config
+SSHD_DROPIN=/etc/ssh/sshd_config.d/diag.conf
+SUDOERS=/etc/sudoers.d/diag
+TMPFILES=/etc/tmpfiles.d/diag.conf
+LOCK=/run/diag.lock
+MARK_BEGIN='# diag begin (managed; do not edit between the markers)'
+MARK_END='# diag end'
+
+say()  { printf '[diag] %s\n' "$*"; }
+fail() { printf '[diag] error: %s\n' "$*" >&2; exit 1; }
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+# ---- preconditions ----
+[ "$(id -u)" -eq 0 ] || fail "run as root"
+case "$DIAG_USER" in
+  [a-z_]*) [ "${#DIAG_USER}" -le 32 ] || fail "user name too long" ;;
+  *) fail "invalid user name" ;;
+esac
+command -v python3 >/dev/null || fail "python3 is required"
+command -v sshd >/dev/null || fail "sshd is required"
+command -v visudo >/dev/null || fail "visudo is required"
+[ -f "$SSHD_CONFIG" ] || fail "$SSHD_CONFIG not found"
+case "$DIAG_PUBKEY" in
+  "ssh-ed25519 "*) ;;
+  *) fail "public key must be ssh-ed25519" ;;
+esac
+
+# ---- 1. user ----
+if id -u "$DIAG_USER" >/dev/null 2>&1; then
+  say "user $DIAG_USER exists; keeping it"
+else
+  # ForceCommand runs through the login shell, so the shell must be a real one. Interactive
+  # logins are blocked by sshd (PermitTTY no + ForceCommand), not by the shell.
+  useradd --system --create-home --shell /bin/bash "$DIAG_USER"
+  say "created user $DIAG_USER"
+fi
+usermod -L "$DIAG_USER" 2>/dev/null || true
+HOME_DIR=$(getent passwd "$DIAG_USER" | cut -d: -f6)
+DIAG_GROUP=$(id -gn "$DIAG_USER")
+[ -n "$HOME_DIR" ] || fail "no home directory for $DIAG_USER"
+[ -d "$HOME_DIR" ] || install -d -m 750 -o "$DIAG_USER" -g "$DIAG_GROUP" "$HOME_DIR"
+
+# ---- 2. groups that make /var/log and the journal readable without root ----
+for group in adm systemd-journal; do
+  if getent group "$group" >/dev/null; then
+    usermod -aG "$group" "$DIAG_USER"
+  fi
+done
+
+# ---- 3. gateway and helper ----
+cat > "$WORK/gateway" <<'__DIAG_GATEWAY__'
+@@GATEWAY_PY@@
+__DIAG_GATEWAY__
+cat > "$WORK/diag-root" <<'__DIAG_ROOT__'
+@@DIAG_ROOT_PY@@
+__DIAG_ROOT__
+for f in gateway diag-root; do
+  python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$WORK/$f" \
+    || fail "$f does not parse"
+done
+install -d -m 755 -o root -g root "$LIB" "$CONF_DIR"
+install -m 755 -o root -g root "$WORK/gateway" "$LIB/gateway"
+install -m 755 -o root -g root "$WORK/diag-root" "$LIB/diag-root"
+say "installed $LIB/gateway and $LIB/diag-root"
+
+# ---- 4. sshd ----
+cat > "$WORK/sshd-block" <<__DIAG_SSHD__
+Match User $DIAG_USER
+    ForceCommand $LIB/gateway
+    PermitTTY no
+    DisableForwarding yes
+    PermitTunnel no
+    PermitUserRC no
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+__DIAG_SSHD__
+
+# Keep a copy of whatever we are about to change so a failed `sshd -t` can put it back.
+cp -p "$SSHD_CONFIG" "$WORK/sshd_config.orig"
+had_dropin=0
+[ ! -f "$SSHD_DROPIN" ] || { had_dropin=1; cp -p "$SSHD_DROPIN" "$WORK/dropin.orig"; }
+restore_sshd() {
+  cp -p "$WORK/sshd_config.orig" "$SSHD_CONFIG"
+  if [ "$had_dropin" -eq 1 ]; then cp -p "$WORK/dropin.orig" "$SSHD_DROPIN"; else rm -f "$SSHD_DROPIN"; fi
+}
+strip_marked_block() {
+  awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+    $0 == b { skip = 1; next }
+    $0 == e { skip = 0; next }
+    !skip' "$1"
+}
+
+if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' "$SSHD_CONFIG"; then
+  install -d -m 755 -o root -g root /etc/ssh/sshd_config.d
+  install -m 600 -o root -g root "$WORK/sshd-block" "$SSHD_DROPIN"
+  # A block appended by an earlier run without Include support would now be read twice.
+  strip_marked_block "$SSHD_CONFIG" > "$WORK/sshd_config.new"
+  sshd_place="$SSHD_DROPIN"
+else
+  rm -f "$SSHD_DROPIN"
+  { strip_marked_block "$SSHD_CONFIG"; printf '\n%s\n' "$MARK_BEGIN"; cat "$WORK/sshd-block"; printf '%s\n' "$MARK_END"; } \
+    > "$WORK/sshd_config.new"
+  sshd_place="$SSHD_CONFIG (appended between markers)"
+fi
+if ! cmp -s "$WORK/sshd_config.new" "$SSHD_CONFIG"; then
+  cat "$WORK/sshd_config.new" > "$SSHD_CONFIG"
+fi
+if ! sshd_check=$(sshd -t 2>&1); then
+  restore_sshd
+  printf '%s\n' "$sshd_check" >&2
+  fail "sshd -t rejected the configuration; previous files restored"
+fi
+say "sshd configuration: $sshd_place"
+
+# ---- 5. sudoers: diag-root only ----
+cat > "$WORK/sudoers" <<__DIAG_SUDOERS__
+Defaults:$DIAG_USER !requiretty
+$DIAG_USER ALL=(root) NOPASSWD: $LIB/diag-root
+__DIAG_SUDOERS__
+visudo -cf "$WORK/sudoers" >/dev/null || fail "visudo rejected the sudoers entry"
+install -m 440 -o root -g root "$WORK/sudoers" "$SUDOERS"
+# The whole sudoers set must still parse with the new file in place.
+if ! visudo -c >/dev/null 2>&1; then
+  rm -f "$SUDOERS"
+  fail "visudo -c failed after installing $SUDOERS; removed it"
+fi
+say "installed $SUDOERS"
+
+# ---- 6. diag.conf: given entries plus root-only logs found on this host ----
+cat > "$WORK/conf.in" <<'__DIAG_CONF__'
+@@CONF_JSON@@
+__DIAG_CONF__
+python3 - "$DIAG_USER" "$WORK/conf.in" "$WORK/conf.out" <<'__DIAG_CONF_PY__'
+"""Merge the requested configuration with root-only logs detected on this host.
+
+A log is registered only when the login user cannot read it through file permissions
+(owner, group membership, world bits and directory traversal). Entries given explicitly
+win over detected ones with the same name.
+"""
+import grp
+import json
+import os
+import pwd
+import re
+import stat
+import sys
+
+user, source, destination = sys.argv[1:4]
+with open(source) as handle:
+    conf = json.load(handle)
+conf.setdefault('strict', False)
+conf.setdefault('logs', {})
+conf.setdefault('deny', [])
+
+entry = pwd.getpwnam(user)
+uid = entry.pw_uid
+gids = {entry.pw_gid} | {g.gr_gid for g in grp.getgrall() if user in g.gr_mem}
+
+
+def allowed(path, bit_owner, bit_group, bit_other):
+    try:
+        info = os.stat(path)
+    except OSError:
+        return False
+    mode = info.st_mode
+    if info.st_uid == uid:
+        return bool(mode & bit_owner)
+    if info.st_gid in gids:
+        return bool(mode & bit_group)
+    return bool(mode & bit_other)
+
+
+def readable(path):
+    parts = os.path.normpath(path).split('/')
+    for depth in range(2, len(parts)):
+        if not allowed('/'.join(parts[:depth]) or '/', stat.S_IXUSR, stat.S_IXGRP, stat.S_IXOTH):
+            return False
+    return os.path.isfile(path) and allowed(path, stat.S_IRUSR, stat.S_IRGRP, stat.S_IROTH)
+
+
+detected = {}
+for name, current in (('messages', '/var/log/messages'), ('secure', '/var/log/secure'),
+                      ('syslog', '/var/log/syslog'), ('auth', '/var/log/auth.log')):
+    if os.path.isfile(current) and not readable(current):
+        detected[name] = current + '*'
+for prefix, directory in (('nginx', '/var/log/nginx'), ('httpd', '/var/log/httpd')):
+    if not os.path.isdir(directory):
+        continue
+    for filename in sorted(os.listdir(directory)):
+        match = re.fullmatch(r'([A-Za-z0-9][A-Za-z0-9_.-]*?)([._]log)', filename)
+        path = os.path.join(directory, filename)
+        if not match or not os.path.isfile(path) or readable(path):
+            continue
+        detected[f'{prefix}-{match.group(1)}'] = os.path.join(directory, match.group(1) + match.group(2) + '*')
+
+logs = dict(detected)
+logs.update(conf['logs'])
+conf['logs'] = dict(sorted(logs.items()))
+conf['deny'] = sorted(set(conf['deny']))
+with open(destination, 'w') as handle:
+    json.dump(conf, handle, indent=2, sort_keys=True)
+    handle.write('\n')
+for name in sorted(detected):
+    if name not in conf['logs'] or conf['logs'][name] == detected[name]:
+        print(f'[diag] registered root-only log: {name} = {detected[name]}')
+__DIAG_CONF_PY__
+install -m 644 -o root -g root "$WORK/conf.out" "$CONF"
+say "wrote $CONF"
+
+# ---- 7. lock file the gateway serializes on (and its recreation after reboot) ----
+printf 'f %s 0660 root %s -\n' "$LOCK" "$DIAG_GROUP" > "$WORK/tmpfiles"
+install -m 644 -o root -g root "$WORK/tmpfiles" "$TMPFILES"
+install -m 660 -o root -g "$DIAG_GROUP" /dev/null "$LOCK"
+
+# ---- 8. authorized key, restricted to the gateway ----
+install -d -m 700 -o "$DIAG_USER" -g "$DIAG_GROUP" "$HOME_DIR/.ssh"
+printf 'restrict,command="%s/gateway" %s\n' "$LIB" "$DIAG_PUBKEY" > "$WORK/authorized_keys"
+install -m 600 -o "$DIAG_USER" -g "$DIAG_GROUP" "$WORK/authorized_keys" "$HOME_DIR/.ssh/authorized_keys"
+say "installed $HOME_DIR/.ssh/authorized_keys"
+
+# ---- 9. self check as the login user: one allowed request, one refused ----
+as_user() {
+  if command -v runuser >/dev/null; then runuser -u "$DIAG_USER" -- "$@"
+  else su -s /bin/bash "$DIAG_USER" -c "$(printf '%q ' "$@")"; fi
+}
+if ! out=$(as_user env "SSH_ORIGINAL_COMMAND=uptime" "$LIB/gateway" 2>&1); then
+  printf '%s\n' "$out" >&2
+  fail "self check: 'uptime' through the gateway failed"
+fi
+if out=$(as_user env "SSH_ORIGINAL_COMMAND=bash" "$LIB/gateway" 2>&1); then
+  printf '%s\n' "$out" >&2
+  fail "self check: 'bash' through the gateway was not refused"
+fi
+case "$out" in
+  denied:*) ;;
+  *) printf '%s\n' "$out" >&2; fail "self check: unexpected reply for 'bash'" ;;
+esac
+say "self check passed (uptime allowed, bash refused)"
+
+# ---- 10. apply the sshd configuration without dropping existing sessions ----
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+  reloaded=0
+  for unit in sshd ssh; do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+      systemctl reload "$unit" && reloaded=1
+      break
+    fi
+  done
+  if [ "$reloaded" -eq 1 ]; then
+    say "sshd reloaded"
+  else
+    say "sshd is not running as a service (socket activated or stopped); the new configuration applies to the next connection"
+  fi
+else
+  say "no systemd; reload sshd yourself"
+fi
+
+for f in /etc/ssh/ssh_host_*_key.pub; do
+  [ -f "$f" ] || continue
+  echo "HOSTKEY $(cut -d' ' -f1,2 "$f")"
+done

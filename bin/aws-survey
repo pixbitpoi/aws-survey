@@ -12,6 +12,8 @@
 #   aws-survey credentials          一時キーの発行・再発行（libexec/commands/credentials.sh）
 #   aws-survey verify               読み取り専用の検証（libexec/commands/verify.sh）
 #   aws-survey run [cmd]            コンテナのビルドと起動（libexec/commands/run.sh）
+#   aws-survey ssh setup --print [...]
+#                                   EC2 の中を調べるための導入スクリプトを書き出す（libexec/commands/ssh.sh。任意の追加機能）
 #
 #   共通オプション:  --dir <対象フォルダ>   既定はカレントディレクトリ（AWS_SURVEY_DIR でも指定可）
 #
@@ -353,7 +355,7 @@ cmd_guide_loop() {
 }
 
 # ---- init ----
-# 聞くのは AWS への繋ぎ方だけ（設計案「init の対話」の 9 項目）。auth.route と phase_dir は聞かない。
+# 聞くのは AWS への繋ぎ方だけ（設計案「init の対話」の 9 項目）。auth.route・phase_dir・ssh（EC2 の中を調べる任意機能）は聞かず、既定を書く。
 # 対話・非対話のどちらでも、検証（init_validate）と書き出し（init_write）は同じ経路を通る。
 INIT_FROM=""; INIT_FORCE=0
 I_NAME=""; I_PROFILE=""; I_ARN=""; I_ACCOUNT=""; I_MFA=""; I_REFRESH=""; I_REGION=""; I_DURATION=""; I_ROLE=""
@@ -674,6 +676,7 @@ init_write() {
             role_name: $role, refresh_command: (if $refresh == "" then null else $refresh end),
             duration_seconds: $duration},
      phase_dir: "01_基礎調査",
+     ssh: {user: "diag", hosts: {}},
      setup: {route_decided: null, role_created: null, readonly_verified: null, container_verified: null}}' \
     > "$tmp" || { rm -f "$tmp"; init_die "environment.json を組み立てられませんでした。"; }
   jq -e . "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; init_die "書き出した JSON が読めません。"; }
@@ -826,6 +829,12 @@ cmd_status() {
   else
     ui_skip "未開始"
   fi
+  # EC2 の中を調べる機能は任意。登録があるときだけ見せ、段階には組み込まない
+  if [ -n "${SSH_HOSTS:-}" ]; then
+    echo ""
+    ui_head "EC2 の中を調べる（ログインユーザー ${SSH_USER}）"
+    ui_kv "登録済みホスト" "$SSH_HOSTS"
+  fi
 }
 
 # ---- doctor ----
@@ -865,7 +874,7 @@ cmd_doctor() {
   bash "$LIBEXEC_DIR/commands/doctor.sh"
 }
 
-cmd_help() { sed -n '2,19p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 case "$CMD" in
   "")          cmd_guide_loop ;;
@@ -877,5 +886,6 @@ case "$CMD" in
   credentials) exec "$LIBEXEC_DIR/commands/credentials.sh" "$@" ;;
   verify)      exec "$LIBEXEC_DIR/commands/verify.sh" "$@" ;;
   run)         exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
+  ssh)         exec "$LIBEXEC_DIR/commands/ssh.sh" "$@" ;;
   *)           die "不明なコマンド: ${CMD}（aws-survey --help）" ;;
 esac

@@ -12,6 +12,10 @@
     "duration_seconds": 3600
   },
   "phase_dir": "01_基礎調査",
+  "ssh": {
+    "user": "diag",
+    "hosts": {}
+  },
   "setup": {
     "route_decided": null,
     "role_created": null,
