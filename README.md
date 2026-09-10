@@ -22,6 +22,9 @@ $ aws-survey
 ### 1. 必要なツールの準備
 
 - AWS CLI と Docker を事前に導入してください。
+- Docker Desktop は Settings → Resources → File Sharing に登録した場所しかマウントできません。Homebrew で入れた本体は
+  `/opt/homebrew` の下にあるので、`/opt/homebrew` を追加して Apply & restart してください（`aws-survey doctor` と `aws-survey run` が
+  足りない場所を案内します）。
 - AWS CLI で調査対象にアクセスできる状態にしてください。
 - 元プロファイルのログインには [aws-login](https://github.com/pixbitpoi/aws-login) を使います。
   brew の依存に入っているので、`aws-survey` と一緒に入ります。

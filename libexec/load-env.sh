@@ -84,6 +84,48 @@ AWS_SURVEY_CMD="${AWS_SURVEY_CMD:-aws-survey}"
 # 一時キーは対象（name）ごとに分ける。対象を切り替えても上書きされない。
 AWS_DIR="${AWS_DIR:-$HOME/.aws-survey/$SURVEY_NAME}"
 
+# ---- Docker Desktop の共有パス ----
+# macOS の Docker Desktop は Settings → Resources → File Sharing に登録した場所しかマウントできず、
+# 外れていると docker run が「mounts denied」で落ちる。既定は /Users・/Volumes・/private・/tmp・/var/folders で、
+# Homebrew 版の本体（/opt/homebrew/Cellar/...）はこの外にある。設定ファイルが読めるときだけ判定し、
+# 無ければ（Docker Desktop でない、Linux）判定しない。判定は run / ssh verify が起動前に、doctor が点検で使う。
+DOCKER_SHARE_SETTINGS="${DOCKER_SHARE_SETTINGS:-$HOME/Library/Group Containers/group.com.docker/settings-store.json}"
+# 共有パスの一覧（1 行 1 つ）。設定が無ければ空
+docker_shared_dirs() {
+  [ -f "$DOCKER_SHARE_SETTINGS" ] || return 0
+  jq -r '(.FilesharingDirectories // .filesharingDirectories // []) | .[]' "$DOCKER_SHARE_SETTINGS" 2>/dev/null
+}
+# 1 引数の場所をマウントできるか。設定が無ければ 0（判定しない）
+docker_path_shared() {
+  local p d dirs
+  dirs=$(docker_shared_dirs); [ -n "$dirs" ] || return 0
+  p=$(cd "$1" 2>/dev/null && pwd -P) || p="$1"
+  while IFS= read -r d; do
+    d=${d%/}; [ -n "$d" ] || continue
+    case "$p/" in "$d"/*) return 0 ;; esac
+  done <<< "$dirs"
+  return 1
+}
+# File Sharing に足す場所の提案。Homebrew の keg はその prefix ごと
+docker_share_suggest() {
+  case "$1" in
+    /opt/homebrew/*) echo /opt/homebrew ;;
+    /usr/local/Cellar/*|/usr/local/opt/*) echo /usr/local ;;
+    *) echo "$1" ;;
+  esac
+}
+# 引数の場所を全部確かめ、マウントできない場所があれば表示して案内し、1 を返す
+docker_check_shared() {
+  local p bad=()
+  for p in "$@"; do docker_path_shared "$p" || bad+=("$p"); done
+  [ ${#bad[@]} -eq 0 ] && return 0
+  ui_err "Docker Desktop がマウントできない場所があります（File Sharing に入っていません）"
+  for p in "${bad[@]}"; do ui_raw "$p"; done
+  ui_text "Docker Desktop のメニュー → Settings → Resources → File Sharing で「+」から次を追加し、Apply & restart してから、もう一度実行してください。"
+  for p in "${bad[@]}"; do ui_text "  $(ui_cmd "$(docker_share_suggest "$p")")"; done
+  return 1
+}
+
 # セットアップの到達点を environment.json に記録する。2 つ目は利用者に見せる言い換え（省略時はキー名）
 #   env_mark_setup role_created "ロールを用意した"
 env_mark_setup() {

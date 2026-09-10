@@ -74,6 +74,10 @@ README を表示するコマンドは無く、`brew home` は formula の `homep
 - AWS CLI v2 は `depends_on` にしない。公式インストーラーで入れている環境と二重になるため、caveats で案内する
   （[aws-login](https://github.com/pixbitpoi/aws-login) の formula と同じ扱い）。
 - Docker は cask なので `depends_on` にしない。有無は `aws-survey doctor` と引数なし実行が見る。
+- keg は `/opt/homebrew` の下にあり、Docker Desktop の File Sharing の既定（`/Users`・`/Volumes`・`/private`・`/tmp`・`/var/folders`）の
+  外なので、`run` の指示書と `method/` のマウントが「mounts denied」で落ちる。`run` / `ssh verify` は起動前に、`doctor` は点検で
+  Docker Desktop の設定（`settings-store.json` の `FilesharingDirectories`）を読んで足りない場所を案内する（`load-env.sh` の
+  `docker_check_shared`）。caveats にも `/opt/homebrew` を File Sharing に足すことを書く。
 - session-manager-plugin はホストに要らない。`aws-survey ssh verify` も調査コンテナの中から接続する。
   ホスト側で要るのは `ssh-keygen`（`ssh setup` が鍵を作る。macOS に標準で入っている）だけ。
 

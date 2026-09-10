@@ -584,6 +584,8 @@ cmd_verify() {
     ui_ok "一時キー ${C_DIM}（期限は不明）${C_RESET}"
   fi
   ui_ok "鍵と接続設定 ${C_DIM}$SSH_DIR${C_RESET}"
+  # 一時キーと鍵の置き場を Docker Desktop がマウントできるか（load-env.sh）
+  docker_check_shared "$AWS_DIR" || exit 1
   echo ""
 
   ui_head "2/3 調査コンテナのイメージを用意する"

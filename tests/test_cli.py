@@ -360,6 +360,20 @@ class Doctor(CliCase):
         self.assertIn('1/4', result.stdout)
         self.assertTrue(any(call[0] == 'aws' for call in self.calls()))
 
+    def test_doctor_reports_unshared_docker_paths(self):
+        self.write_environment()
+        settings = self.home / 'settings-store.json'
+        settings.write_text(json.dumps({'FilesharingDirectories': ['/nowhere']}))
+        result = self.run_cli('doctor', DOCKER_SHARE_SETTINGS=str(settings))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('File Sharing', result.stdout)
+        self.assertIn('切り分け', result.stdout)          # the AWS diagnosis still runs
+
+    def test_doctor_without_docker_desktop_settings_skips_the_check(self):
+        self.write_environment()
+        result = self.run_cli('doctor')
+        self.assertIn('確かめません', result.stdout)
+
     def test_doctor_stops_on_missing_tool(self):
         self.remove_tool('aws')
         self.write_environment()

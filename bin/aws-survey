@@ -873,10 +873,24 @@ cmd_doctor() {
     init_guidance
     return 1
   fi
+  load_env
+  ui_head "Docker Desktop がマウントする場所"
+  ui_text "本体（指示書と method/）・対象フォルダ（out/）・一時キーの置き場が File Sharing にあるか。"
+  if [ -f "$DOCKER_SHARE_SETTINGS" ]; then
+    if docker_check_shared "$AWS_SURVEY_HOME" "$AWS_SURVEY_DIR" "$AWS_DIR"; then
+      ui_ok "3 か所ともマウントできます"
+    else
+      ok=0
+    fi
+  else
+    ui_skip "Docker Desktop の設定が無いので確かめません"
+  fi
+  echo ""
   ui_head "一時キーを発行できない原因の切り分け"
   ui_text "AWS を読むだけで、何も変更しません。"
   echo ""
-  bash "$LIBEXEC_DIR/commands/doctor.sh"
+  bash "$LIBEXEC_DIR/commands/doctor.sh" || ok=0
+  [ "$ok" -eq 1 ]
 }
 
 cmd_help() { sed -n '2,23p' "$SELF" | sed 's/^# \{0,1\}//'; }

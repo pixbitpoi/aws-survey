@@ -77,6 +77,49 @@ class Launcher(unittest.TestCase):
         build = next(call for call in calls if call[0] == 'build')
         self.assertEqual(build[-3:], ['-f', f'{self.root}/Dockerfile', f'{self.root}/container'])
 
+    def write_share_settings(self, dirs):
+        settings = self.root / 'settings-store.json'
+        settings.write_text(json.dumps({'FilesharingDirectories': dirs}))
+        return str(settings)
+
+    def test_unshared_mount_stops_before_docker_with_guidance(self):
+        """Docker Desktop mounts only File Sharing paths: an unshared distribution stops run before docker."""
+        write_environment(self.root)
+        keys = self.root / 'keys'
+        keys.mkdir()
+        (keys / 'credentials').touch()
+        settings = self.write_share_settings(['/nowhere'])
+        result = self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root, AWS_DIR=str(keys),
+                                   DOCKER_SHARE_SETTINGS=settings)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.log.exists(), 'docker must not be called')
+        self.assertIn('File Sharing', result.stdout)
+        self.assertIn(str(self.root), result.stdout)
+        self.assertIn('Apply & restart', result.stdout)
+
+    def test_homebrew_keg_suggests_the_prefix(self):
+        write_environment(self.root)
+        keys = self.root / 'keys'
+        keys.mkdir()
+        (keys / 'credentials').touch()
+        settings = self.write_share_settings(['/Users', '/private'])
+        result = self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root, AWS_DIR=str(keys),
+                                   DOCKER_SHARE_SETTINGS=settings, AWS_SURVEY_HOME='/opt/homebrew/Cellar/aws-survey/0.2.0')
+        # the keg does not exist here: load-env refuses it first, unless the check is what we hit
+        if 'libexec/ がありません' not in result.stdout + result.stderr:
+            self.assertIn('/opt/homebrew', result.stdout)
+
+    def test_shared_mounts_proceed(self):
+        write_environment(self.root)
+        keys = self.root / 'keys'
+        keys.mkdir()
+        (keys / 'credentials').touch()
+        settings = self.write_share_settings(['/Users', '/private', '/tmp', str(self.root)])
+        result = self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root, AWS_DIR=str(keys),
+                                   DOCKER_SHARE_SETTINGS=settings)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.log.exists())
+
     def test_target_folder_and_keys_are_separate_from_the_distribution(self):
         target = self.root / 'targets/alpha'
         target.mkdir(parents=True)

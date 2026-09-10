@@ -107,6 +107,8 @@ ui_kv "アカウント" "$ACCOUNT_ID"
 ui_kv "リージョン" "$REGION"
 ui_kv "フェーズ" "$SURVEY_PHASE_DIR"
 echo ""
+# マウントする 3 か所（本体の指示書と method/、対象フォルダの out/、一時キー）が Docker Desktop から見えるか（load-env.sh）
+docker_check_shared "$AWS_SURVEY_HOME" "$AWS_SURVEY_DIR" "$AWS_DIR" || exit 1
 ui_head "1/3 コンテナのイメージを用意する（$IMAGE, ${awsarch}）"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || ui_text "初回は数分かかります。2 回目からは差分だけです。"
 build_image
