@@ -70,6 +70,13 @@ SSH_USER="${SSH_USER:-$(_get .ssh.user)}"
 SSH_USER="${SSH_USER:-diag}"
 [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || _die "environment.json の ssh.user が不正です: ${SSH_USER}（小文字英字か _ で始まり、小文字英数字 _ - で 32 字まで）"
 SSH_HOSTS="${SSH_HOSTS:-$(jq -r '.ssh.hosts // {} | keys | join(" ")' "$ENV_FILE")}"
+# 登録済みホストへ ssm:StartSession を許す顧客管理ポリシー（設計文書の第 6 節）。
+# role --create が作って調査用ロールに付け、credentials が --policy-arns に並べる。ssh.hosts が空なら使わない。
+DIAG_POLICY_NAME="diag-ssh-${SURVEY_NAME}"
+# 一時キーのロールセッション名の接頭辞。SSM のセッション ID は <ロールセッション名>-<乱数> になるので、
+# diag-ssh-<name> の ssm:TerminateSession / ResumeSession はこの接頭辞で自分のセッションに限る（${aws:userid} では一致しない）。
+SESSION_NAME_PREFIX="claude-survey"
+DIAG_POLICY_ARN="arn:aws:iam::${ACCOUNT_ID}:policy/${DIAG_POLICY_NAME}"
 
 # 案内文に書く CLI の名前。インストール済み（PATH 上に aws-survey がある）を前提に、常に短い名前にする。
 # 利用者に見せる「次に打つコマンド」はスクリプト名ではなくこれで組み立てる。

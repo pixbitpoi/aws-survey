@@ -1,8 +1,8 @@
 # 設計: EC2 の中を調べる（SSH over SSM + 診断ゲートウェイ）
 
 調査コンテナのエージェントが、対象 EC2 インスタンスの OS 内部（ログ・サービス状態・リソース状況）を
-調べられるようにする機能の設計。第 10 節の第 3 段まで実装済み（ホスト側の導入と登録）。
-IAM・コンテナ側・文書は未実装で、実装後は `security.md` と `README.md` に反映する。
+調べられるようにする機能の設計。第 10 節の第 4 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`）。
+コンテナ側・文書は未実装で、実装後は `security.md` と `README.md` に反映する。
 
 ## 1. 目標と方針
 
@@ -361,8 +361,11 @@ root で動く回数を最小にするため。
 `ssm:StartSession` は `ReadOnlyAccess` に無い。**Deny のみ**だった `session-guard.json` の設計は変えず、
 `--policy-arns` に顧客管理ポリシーを 1 つ足す。
 
-- `aws-survey role --create` が `diag-ssh-<name>` ポリシーを作り、調査用ロールにアタッチする。
-- `aws-survey credentials` が `--policy-arns` に `ReadOnlyAccess` と並べて渡す。
+- `aws-survey role --create` が `diag-ssh-<name>` ポリシーを作り、調査用ロールにアタッチする。冪等で、既にあれば内容を比べ、
+  違えば新しい版を既定にする（版は 5 つまでなので、既定でない版を先に消す）。`ssh.hosts` が空のときは作らない
+  （EC2 調査は任意機能。`ssh setup` の後にもう一度 `role --create` を打つ）。ロールを借りる経路（`existing_role` / `granted_role`）では
+  作れないので、管理者に渡す JSON とコマンドを表示して終わる。
+- `aws-survey credentials` が `--policy-arns` に `ReadOnlyAccess` と並べて渡す。`ssh.hosts` が空のときは渡さない（ポリシーが無くても発行できる）。
   ロール側とセッション側の両方に Allow が要る（有効な権限は両者の積）。
 
 ```json
@@ -383,7 +386,7 @@ root で動く回数を最小にするため。
     {
       "Effect": "Allow",
       "Action": ["ssm:TerminateSession", "ssm:ResumeSession"],
-      "Resource": "arn:aws:ssm:*:*:session/${aws:userid}-*"
+      "Resource": "arn:aws:ssm:*:*:session/claude-survey-*"
     }
   ]
 }
@@ -392,12 +395,32 @@ root で動く回数を最小にするため。
 `AWS-StartSSHSession` は 22 番ポートを生で通すだけで、認証は sshd が行う。IAM だけではシェルは取れない。
 `ssm:SendCommand` は与えない（導入はホストの元プロファイルの仕事）。
 
+セッションの終了・再開は自分のセッションに限る。SSM のセッション ID は `<ロールセッション名>-<乱数>` で、
+`credentials` が付けるロールセッション名 `claude-survey-<日時>` が接頭辞になる。AWS の例にある `${aws:userid}-*` は
+借りたロールでは `AROA…:claude-survey-<日時>` に展開されて一致しない（2026-09-10 の実測。`TerminateSession` が
+`AccessDeniedException` になり、接頭辞に変えて通った）。接頭辞は `load-env.sh` の 1 か所で持ち、`role` と `credentials` が共有する。
+
+`PackedPolicySize`（一時キー発行時の使用率）の実測（2026-09-10）:
+
+| `--policy-arns` | セッションポリシー | 使用率 |
+| --- | --- | --- |
+| `ReadOnlyAccess` | `session-guard.json`（Deny のみ） | 31% |
+| `ReadOnlyAccess` + `diag-ssh-<name>` | 同上 | 32〜33% |
+
+顧客管理ポリシーは ARN で渡すだけなので、ほとんど増えない。`session-guard.json` は触っていない。
+
 ## 7. 検証
 
 `aws-survey verify` に 2 項目を足す。
 
 - タグ無しのインスタンスに `start-session` が拒否される（`AccessDeniedException`）
 - `AWS-StartInteractiveCommand` / `AWS-StartPortForwardingSession` が拒否される
+
+`verify` の 6・7 項目目。`ssh.hosts` が空なら飛ばす。タグ無しのインスタンスは `describe-instances` で探し（`diag:ssh` が `<name>` でないもの）、
+無ければ飛ばす。`start-session` は API が通ると `session-manager-plugin` を起動して対話に入るので、プラグインの無い PATH で叩き、
+API の結果だけを見る（万一許可されていても CLI がセッションを作った直後に終了する）。2026-09-10 の実測では 3 つとも
+「no identity-based policy allows the ssm:StartSession action」で拒否され、対照実験（登録済みインスタンス + `AWS-StartSSHSession`）は
+API が通ってプラグインの探索まで進んだ。
 
 `aws-survey ssh verify <host>` は SSH 側の検証で、`docker run ... ec2 --selftest <host>` としてコンテナから打つ
 （ホストの Mac に session-manager-plugin を入れなくて済む）。確認するもの。
@@ -466,7 +489,9 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 3. `aws-survey ssh setup`（SSM 経由）と `known_hosts` の回収、`aws-survey ssh list`。**済**（実 EC2 の Amazon Linux 2023 で
    導入・冪等な再導入・`list` まで確認。SSM の上限は §4.3）。偽の `aws` で呼び出し順・引数・記録・失敗時に何も残さないことを
    見るのは `tests/test_ssh_setup.py`。
-4. IAM ポリシーと `role` / `credentials` / `verify` の追加。実 AWS が要る。`PackedPolicySize` を再確認する。
+4. IAM ポリシーと `role` / `credentials` / `verify` の追加。**済**（実 AWS で `role --create` → `credentials` → `verify` が通り、
+   `verify` の新 2 項目が拒否、既存 5 項目が崩れていないこと、`role --create` の冪等性（同じ内容・ずれた内容・2 回目）を確認。
+   `PackedPolicySize` は §6）。偽の `aws` での検証は `tests/test_ec2_iam.py`。
 5. Dockerfile・`ec2` ラッパー・フック・`test_guards.py`。
 6. `method/06`、`survey-status`、`security.md`、`README.md`。
 
@@ -477,5 +502,6 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 | `/bin/bash` と ForceCommand の組み合わせ | **確認済**（2026-09-10、実 EC2 の AL2023）。導入後に RunCommand で、`sshd -T -C user=diag` の実効値（ForceCommand・PermitTTY no・DisableForwarding yes・publickey のみ）と、一時鍵で `ssh diag@127.0.0.1` を打った結果（`uptime` 許可、`bash` 拒否、`-tt` は pty 割当て失敗、`cat /etc/ssh/sshd_config` 拒否パターン）を見た。一時鍵はその場で `authorized_keys` から戻した |
 | SSM パラメータの上限 | **実測済**（§4.3）。合計 97 KB。素のまま 64,859 バイトで通る |
 | 再起動後の `/run/diag.lock` | **確認済**（AL2023）。再起動後に `root:diag 660` で再作成され、ゲートウェイが動く |
-| AL2 の `requiretty` | 未確認（AL2023 では `/etc/sudoers` に `requiretty` が無いことを確認。AL2 の実機では確認していない）。sudoers に `Defaults:<user> !requiretty` を書いてある |
+| AL2 の `requiretty` | **確認済**（2026-09-10、一時的に作った AL2 の実機。作業後に終了）。素の AL2 の `/etc/sudoers` に `requiretty` は無い。全体に `Defaults requiretty` を足しても（`/etc/sudoers.d/` と `/etc/sudoers` 先頭の両方で試した）、`Defaults:<user> !requiretty` を持つログインユーザーからの `sudo diag-root` は tty 無しで通り、それを持たない対照ユーザーは「you must have a tty」で拒否された。確認は sshd と同じく sudo を経由せず `runuser` でログインユーザーになって行った（root からの `sudo -u <user>` は外側の sudo が requiretty に当たる） |
+| AL2 の Python 3.7 | **確認済**（同上）。ゲートウェイが `shlex.join`（3.8 以降）を使っていて自己確認で落ちたので `shlex.quote` の連結に直し、AL2 で導入と root 段（`dmesg` / `log`）が動くこと、`tests/test_gateway.py` が Python 3.7 でも通ることを見た |
 | session-manager-plugin の deb の arm64 対応 | 未確認（第 5 段） |

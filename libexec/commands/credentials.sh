@@ -81,14 +81,21 @@ echo ""
 # ---- 一時キーの発行 ----
 # --policy-arns は必須。session-guard.json は Deny しか書いていないため、
 # これを外すとセッションポリシー側に Allow が無くなり全 API が拒否される。
+# EC2 の中を調べる機能（ssh.hosts）があるときは、登録済みインスタンスへの SSH 接続だけを許す
+# diag-ssh-<name>（role --create が作る）を ReadOnlyAccess と並べる。無いときは渡さない（ポリシーが無くても発行できる）。
 ui_head "3/3 読み取り専用の一時キーを発行する（$((DURATION / 60)) 分）"
+extra_policy_arns=()
+if [ -n "$SSH_HOSTS" ]; then
+  extra_policy_arns+=("arn=$DIAG_POLICY_ARN")
+  ui_text "登録済みホスト（${SSH_HOSTS}）への SSH 接続を許す $DIAG_POLICY_NAME も付けます。"
+fi
 if ! json=$(
   aws sts assume-role \
     --profile "$PROFILE_SRC" \
     --role-arn "$ROLE_ARN" \
-    --role-session-name "claude-survey-$(date +%Y%m%d-%H%M%S)" \
+    --role-session-name "${SESSION_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)" \
     --duration-seconds "$DURATION" \
-    --policy-arns arn=arn:aws:iam::aws:policy/ReadOnlyAccess \
+    --policy-arns arn=arn:aws:iam::aws:policy/ReadOnlyAccess ${extra_policy_arns[@]+"${extra_policy_arns[@]}"} \
     --policy "$(jq -c . "$GUARD")" \
     --output json 2>&1
 ); then
@@ -102,6 +109,9 @@ if ! json=$(
       ui_text "libexec/session-guard.json の Action を減らしてください。" ;;
     *ExpiredToken*)
       ui_text "$PROFILE_SRC のログインが期限切れです。ログインし直してから、もう一度実行してください。" ;;
+    *"$DIAG_POLICY_NAME"*)
+      ui_text "EC2 の中を調べる権限（${DIAG_POLICY_NAME}）がまだ無いか、付いていません。"
+      ui_text "$AWS_SURVEY_CMD role --create で作って付けてから、もう一度実行してください。" ;;
     *"not authorized to perform: sts:AssumeRole"*|*AccessDenied*)
       ui_text "ロールを作った直後なら、IAM の反映待ちかもしれません。10 秒ほど待ってもう一度実行してください。"
       ui_text "それでも駄目なら信頼ポリシーを確認してください:"

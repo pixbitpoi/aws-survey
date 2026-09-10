@@ -424,8 +424,14 @@ cmd_setup() {
   ui_kv "config" "$SSH_CONFIG"
   ui_kv "known_hosts" "$KNOWN_HOSTS"
   echo ""
-  ui_text "調査コンテナからは ec2 $HOST_ALIAS <動詞> で使います（ラッパーと IAM ポリシーは後続の段で入ります）。"
+  ui_text "調査コンテナからは ec2 $HOST_ALIAS <動詞> で使います（ラッパーは後続の段で入ります）。"
   next_cmd "$AWS_SURVEY_CMD ssh list" "登録済みホストと導入状態を確かめます"
+  if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
+    also_cmd "$AWS_SURVEY_CMD role --create" "このインスタンスへの SSH 接続を許すポリシーを調査用ロールに付けます（初めての登録のとき）"
+  else
+    also_cmd "$AWS_SURVEY_CMD role --create" "SSH 接続を許すポリシーの JSON を表示します（管理者に付けてもらいます）"
+  fi
+  also_cmd "$AWS_SURVEY_CMD credentials" "その権限を含めて一時キーを発行し直し、$AWS_SURVEY_CMD verify で確かめます"
 }
 
 cmd_setup_print() {

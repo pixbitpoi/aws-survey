@@ -75,7 +75,8 @@ IAM の `--description` や `--role-session-name` に日本語を入れない。
 ## `session-guard.json` に項目を足すとき
 
 `PackedPolicySize` を確認する。上限は平文 2048 字ではなく圧縮後のサイズで、
-平文 1,020 字でも 114% 超過した実績がある（2026-09-08 の実測は 71%）。
+平文 1,020 字でも 114% 超過した実績がある（2026-09-08 の実測は 71%。2026-09-10 は `ReadOnlyAccess` と対で 31%、
+`diag-ssh-<name>` を並べて 32〜33%）。
 100% を超えると `PackedPolicyTooLarge` で発行できない。
 `aws-survey credentials` が発行時に使用率を表示する。
 
@@ -85,6 +86,11 @@ IAM の `--description` や `--role-session-name` に日本語を入れない。
 
 `--policy-arns arn=...ReadOnlyAccess` を外さないこと。
 `session-guard.json` は Deny しか書いていないため、外すと Allow がゼロになり全 API が拒否される。
+
+`environment.json` に `ssh.hosts` があるときは、その後ろに `diag-ssh-<name>`（`role --create` が作る顧客管理ポリシー。
+`DIAG_POLICY_ARN`）を並べる。空のときは渡さない（ポリシーが無くても発行できること）。ロールセッション名の接頭辞
+`SESSION_NAME_PREFIX` は `load-env.sh` が持ち、`diag-ssh-<name>` の `ssm:TerminateSession` / `ResumeSession` の資源
+（`session/<接頭辞>-*`）と一致していなければならない。片方だけ変えない。内容は `docs/design-ec2-ssh.md` の第 6 節。
 
 ## 資格情報の再発行を調査コンテナに移さない
 

@@ -6,6 +6,9 @@
 # 実体は libexec/commands/role.sh。通常は aws-survey 経由で呼ぶ。
 #
 # 判定は IAM のシミュレーション機能を使う。実行せずに「この操作は許可されるか」だけを見る。
+# environment.json に ssh.hosts（EC2 の中を調べる機能）があれば、登録済みインスタンスへの ssm:StartSession だけを
+# 許す顧客管理ポリシー diag-ssh-<name> も作ってロールに付ける（設計文書の第 6 節）。冪等。
+# ロールを借りる経路（existing_role / granted_role）では作れないので、管理者に渡す JSON を表示して終わる。
 # 表示は libexec/ui.sh の部品で組む。利用者向けの文に own_role などの内部の値名を書かない。
 set -uo pipefail
 
@@ -33,6 +36,72 @@ route_label() {
     "")            echo "未定" ;;
     *)             echo "$1" ;;
   esac
+}
+
+# EC2 の中を調べるための顧客管理ポリシー。許すのは diag:ssh=<name> タグ付きインスタンスへの
+# AWS-StartSSHSession だけ。ssm:SendCommand（導入）は元プロファイルの仕事で、ここには足さない。
+# セッションの終了・再開は自分のセッション（ID が <ロールセッション名>-<乱数>）に限る。
+diag_policy_json() {
+  jq -n --arg account "$ACCOUNT_ID" --arg name "$SURVEY_NAME" --arg session "$SESSION_NAME_PREFIX" '{
+    Version: "2012-10-17",
+    Statement: [
+      {Effect: "Allow", Action: "ssm:StartSession",
+       Resource: "arn:aws:ec2:*:\($account):instance/*",
+       Condition: {StringEquals: {"ssm:resourceTag/diag:ssh": $name}}},
+      {Effect: "Allow", Action: "ssm:StartSession",
+       Resource: "arn:aws:ssm:*:*:document/AWS-StartSSHSession"},
+      {Effect: "Allow", Action: ["ssm:TerminateSession", "ssm:ResumeSession"],
+       Resource: "arn:aws:ssm:*:*:session/\($session)-*"}
+    ]}'
+}
+
+# ポリシーを作る／内容を合わせる／ロールに付ける。何度実行しても同じ状態になる。
+ensure_diag_policy() {
+  local tmp ver cur
+  tmp=$(mktemp) || die "一時ファイルを作れません。"
+  diag_policy_json > "$tmp"
+  if ver=$(aws iam get-policy --profile "$PROFILE_SRC" --policy-arn "$DIAG_POLICY_ARN" \
+             --query Policy.DefaultVersionId --output text 2>/dev/null) && [ -n "$ver" ]; then
+    cur=$(aws iam get-policy-version --profile "$PROFILE_SRC" --policy-arn "$DIAG_POLICY_ARN" \
+            --version-id "$ver" --query PolicyVersion.Document --output json 2>/dev/null)
+    if [ "$(jq -cS . <<< "$cur" 2>/dev/null)" = "$(jq -cS . "$tmp")" ]; then
+      ui_ok "ポリシー $DIAG_POLICY_NAME はあります（内容も同じ）"
+    else
+      # 版は 5 つまでしか持てない。既定でない版を消してから、新しい版を既定にする
+      local v
+      for v in $(aws iam list-policy-versions --profile "$PROFILE_SRC" --policy-arn "$DIAG_POLICY_ARN" \
+                   --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null); do
+        [ "$v" != None ] || continue
+        aws iam delete-policy-version --profile "$PROFILE_SRC" --policy-arn "$DIAG_POLICY_ARN" --version-id "$v" >/dev/null 2>&1
+      done
+      aws iam create-policy-version --profile "$PROFILE_SRC" --policy-arn "$DIAG_POLICY_ARN" \
+        --policy-document "file://$tmp" --set-as-default >/dev/null \
+        || { rm -f "$tmp"; die "ポリシー $DIAG_POLICY_NAME を更新できませんでした。"; }
+      ui_ok "ポリシー $DIAG_POLICY_NAME の内容を合わせました"
+    fi
+  else
+    aws iam create-policy --profile "$PROFILE_SRC" --policy-name "$DIAG_POLICY_NAME" \
+      --policy-document "file://$tmp" --description "Session Manager SSH to tagged instances" \
+      --query Policy.Arn --output text >/dev/null \
+      || { rm -f "$tmp"; die "ポリシー $DIAG_POLICY_NAME を作れませんでした。"; }
+    ui_ok "ポリシー $DIAG_POLICY_NAME を作りました"
+  fi
+  rm -f "$tmp"
+  aws iam attach-role-policy --profile "$PROFILE_SRC" \
+    --role-name "$ROLE_NAME" --policy-arn "$DIAG_POLICY_ARN" >/dev/null \
+    || die "ポリシー $DIAG_POLICY_NAME をロールに付けられませんでした。"
+  ui_ok "$DIAG_POLICY_NAME を付けました（登録済みインスタンスへの SSH 接続だけを許します）"
+}
+
+# ロールを借りる経路では作れない。管理者に渡す形で表示する
+show_diag_policy_for_admin() {
+  ui_head "管理者に頼むもの（EC2 の中を調べる権限）"
+  ui_text "登録済みインスタンス（タグ diag:ssh=${SURVEY_NAME}）への SSH 接続だけを許すポリシーです。"
+  ui_text "次の内容で $DIAG_POLICY_NAME を作り、ロール $ROLE_NAME に付けてもらってください。"
+  ui_raw "$(diag_policy_json)"
+  ui_text "管理者が打つコマンドの例:"
+  ui_text "  aws iam create-policy --policy-name $DIAG_POLICY_NAME --policy-document file://diag-ssh.json"
+  ui_text "  aws iam attach-role-policy --role-name $ROLE_NAME --policy-arn $DIAG_POLICY_ARN"
 }
 
 if [ "$DO_CREATE" -eq 1 ]; then ui_title "aws-survey role --create"; else ui_title "aws-survey role"; fi
@@ -74,6 +143,12 @@ if role_json=$(aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME
     *ReadOnlyAccess*) ;;
     *) shortfalls+=("ReadOnlyAccess が付いていません") ;;
   esac
+  if [ -n "$SSH_HOSTS" ]; then
+    case "$attached" in
+      *"$DIAG_POLICY_ARN"*) ;;
+      *) shortfalls+=("EC2 の中を調べる権限（${DIAG_POLICY_NAME}）が付いていません") ;;
+    esac
+  fi
   if [ -n "$PRINCIPAL_ARN" ] && ! echo "$role_json" | jq -e --arg p "$PRINCIPAL_ARN" \
        '[.Role.AssumeRolePolicyDocument.Statement[] | select(.Effect=="Allow") | .Principal.AWS] | flatten | index($p) != null' >/dev/null 2>&1; then
     shortfalls+=("信頼ポリシーに自分（${PRINCIPAL_ARN}）が入っていません")
@@ -187,8 +262,15 @@ if [ -z "$AUTH_ROUTE" ]; then
   ROUTE_UNSET=1; AUTH_ROUTE=own_role
 fi
 if [ "$AUTH_ROUTE" != "own_role" ]; then
-  die "environment.json では「$(route_label "$AUTH_ROUTE")」になっています。作るものはありません。
-  借りるロールが使えるかは $AWS_SURVEY_CMD doctor で確かめてください。"
+  ui_warn "environment.json では「$(route_label "$AUTH_ROUTE")」になっています。ロールは作りません。"
+  ui_text "借りるロールが使えるかは $AWS_SURVEY_CMD doctor で確かめてください。"
+  if [ -n "$SSH_HOSTS" ]; then
+    echo ""
+    show_diag_policy_for_admin
+    ui_text "付いたら $AWS_SURVEY_CMD credentials で一時キーを発行し直します。"
+    exit 0
+  fi
+  exit 1
 fi
 
 if [ "$role_exists" -eq 1 ]; then ui_head "ロールを整えます"; else ui_head "ロールを作ります"; fi
@@ -234,6 +316,13 @@ aws iam attach-role-policy --profile "$PROFILE_SRC" \
   --role-name "$ROLE_NAME" --policy-arn "$RO_POLICY" >/dev/null \
   || die "ReadOnlyAccess を付けられませんでした。"
 ui_ok "ReadOnlyAccess を付けました"
+
+# EC2 の中を調べる機能（任意）。登録済みホストがあるときだけ、そこへの SSH 接続を許すポリシーを付ける
+if [ -n "$SSH_HOSTS" ]; then
+  ensure_diag_policy
+else
+  ui_skip "EC2 の中を調べる権限は付けていません（登録済みホストが無いため。$AWS_SURVEY_CMD ssh setup の後に、もう一度 role --create）"
+fi
 
 if [ "$ROUTE_UNSET" -eq 1 ]; then
   _tmp=$(mktemp) && jq '.auth.route = "own_role"' "$ENV_FILE" > "$_tmp" && mv "$_tmp" "$ENV_FILE" \

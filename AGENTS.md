@@ -28,6 +28,7 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 | `container/**`・`Dockerfile` | `.agents/rules/container.md` |
 | `bin/aws-survey`・`libexec/**`・`templates/`・接続設定 | `.agents/rules/credentials.md` |
 | `libexec/ec2/**`（EC2 に置く診断ゲートウェイと導入スクリプトの雛形）・`libexec/commands/ssh.sh`（SSM 経由の導入と登録） | `docs/design-ec2-ssh.md` の第 2 節（名前）・第 4 節（セットアップと EC2 に作るもの。SSM の上限の実測値は第 4.3 節）・第 5 節（仕様）。実装の段階と未確認事項は第 10 節。偽の `aws` での検証は `tests/test_ssh_setup.py` |
+| `diag-ssh-<name>` ポリシー（`role.sh` の作成・アタッチ、`credentials.sh` の `--policy-arns`、`verify.sh` の 6・7 項目目） | `.agents/rules/credentials.md` に加えて `docs/design-ec2-ssh.md` の第 6 節（ポリシーの内容と `PackedPolicySize` の実測）・第 7 節（検証）。偽の `aws` での検証は `tests/test_ec2_iam.py` |
 
 上の規則は新規ファイルにも適用する。`.agents/rules/` はどのエージェントも自動では読み込まない。この表に従って読む。
 `container/instructions/` は配布用の調査指示であり、開発中の自分の役割を切り替える指示ではない。
@@ -49,6 +50,8 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 
 - 対象固有の値は `environment.json` に置き、スクリプトは `libexec/load-env.sh` から読む。
 - `--policy-arns arn=...ReadOnlyAccess` を外さない。Deny のみのセッションポリシーと対で使う。
+  `diag-ssh-<name>` はその後ろに並べる任意の追加で、許すのは `diag:ssh=<name>` タグ付きインスタンスへの `AWS-StartSSHSession` だけ。
+  `ssm:SendCommand` を調査用ロールや一時キーに足さない。
 - 長期 AWS キー・元プロファイル・資格情報の再発行機能を調査コンテナに渡さない。
 - EC2 に残すもの（`libexec/ec2/`）の名前に「ai」「agent」「survey」を含めない。root 読み取り段は 5 動詞固定で、任意パスの読み取りを足さない。シェルを経由せず argv を list で渡す。
 - ガードはイメージへ焼き込み、root 所有を保つ。プロンプトだけを安全性の根拠にしない。

@@ -961,7 +961,8 @@ def audit(verb, args, decision):
     """journal record the caller cannot reach: `<user> <verb> <args> allow|deny:<reason>`."""
     if not shutil.which('logger'):
         return
-    message = f'{current_user()} {verb} {shlex.join(args)} {decision}'
+    # shlex.join は 3.8 以降。Amazon Linux 2 の 3.7 でも動くように quote で組む
+    message = f"{current_user()} {verb} {' '.join(shlex.quote(a) for a in args)} {decision}"
     subprocess.run(['logger', '-t', LOG_TAG, '--', message], env={'PATH': PATH},
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
