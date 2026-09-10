@@ -139,8 +139,9 @@ EC2 側で `journalctl -t diag-gateway` を読めば、何が要求され、何�
 
 `aws-survey ssh setup` の `--strict` で一般読み取り段を無効にし、登録済みログと固定診断だけにできます。
 `--deny <glob>` で、そのホスト固有の秘密の置き場を拒否パターンに足せます。
-後片付け（`ssh remove`）はまだありません。EC2 に置いたもの（ユーザー `diag`・`/usr/local/lib/diag/`・`/etc/diag/`・
-sshd と sudoers の設定・タグ）は手で外してください。
+後片付けは `aws-survey ssh remove <host>` です。EC2 に置いたもの（ユーザー `diag`・`/usr/local/lib/diag/`・`/etc/diag/`・
+sshd と sudoers の設定・ロック）を撤去し、タグと接続設定を消します。鍵は `aws-survey ssh rotate` で作り直せます
+（登録済みホスト全部に再導入し、全部に入ってから差し替えます）。
 
 ## 5. これで保証されないこと
 

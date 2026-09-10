@@ -124,6 +124,8 @@ class GeneratedScript(SshPrintCase):
         script = self.print_script('--user', 'ops_ro').stdout
         self.assertIn("DIAG_USER='ops_ro'\n", script)
         self.assertIn('Match User $DIAG_USER', script)
+        # sshd closes a connection whose client has gone away (an ssh killed mid-session leaves the SSM session open)
+        self.assertIn('    ClientAliveInterval 15\n    ClientAliveCountMax 3\n', script)
 
     def test_user_from_environment_json(self):
         self.write_environment({'ssh': {'user': 'reader', 'hosts': {}}})
@@ -152,6 +154,47 @@ class GeneratedScript(SshPrintCase):
         result = self.print_script()
         size = int(re.search(r'（(\d+) バイト）', result.stderr).group(1))
         self.assertEqual(size, len(result.stdout.encode()))
+
+
+class RemoveScript(SshPrintCase):
+    """`ssh remove --print <host>` writes the removal script (the reverse of the install) without aws."""
+
+    def print_remove(self, user='diag'):
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['ssh'] = {'user': 'diag', 'hosts': {'web1': {'instance_id': 'i-0123456789abcdef0', 'user': user,
+                                                              'installed_at': '2026-09-10T00:00:00+09:00',
+                                                              'logs': {}, 'deny': [], 'strict': False}}}
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_cli('ssh', 'remove', '--print', 'web1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result
+
+    def test_script_goes_to_stdout(self):
+        result = self.print_remove()
+        self.assertTrue(result.stdout.startswith('#!/usr/bin/env bash\n'))
+        self.assertIn('撤去スクリプトを標準出力に出しました', result.stderr)
+        self.assertEqual(subprocess.run(['bash', '-n'], input=result.stdout, capture_output=True, text=True).returncode, 0)
+
+    def test_removes_everything_the_install_creates(self):
+        script = self.print_remove(user='ops').stdout
+        self.assertIn("DIAG_USER='ops'", script)
+        for path in ('/usr/local/lib/diag', '/etc/diag', '/etc/ssh/sshd_config.d/diag.conf', '/etc/sudoers.d/diag',
+                     '/etc/tmpfiles.d/diag.conf', '/run/diag.lock'):
+            self.assertIn(path, script)
+        self.assertIn('userdel -r', script)
+        self.assertIn('sshd -t', script)
+        self.assertIn('systemctl reload', script)
+        self.assertIn('visudo -c', script)
+        self.assertIn('REMOVED clean', script)
+        self.assertIn('REMOVED leftover', script)
+        for word in ('ai', 'agent', 'survey', 'claude'):
+            self.assertNotRegex(script.lower(), r'(?<![a-z])' + word + r'(?![a-z])')
+
+    def test_print_touches_nothing(self):
+        self.print_remove()
+        after = json.loads((self.target / 'environment.json').read_text())
+        self.assertIn('web1', after['ssh']['hosts'])
+        self.assertFalse((self.home / '.aws-survey/smoke/ssh/config').exists())
 
 
 class HostSideValidation(SshPrintCase):
@@ -217,11 +260,16 @@ class WithoutAws(SshPrintCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('登録済みホストはありません', result.stdout)
 
-    def test_other_subcommands_say_so(self):
-        for sub in (['rotate'], ['remove', 'web1']):
-            result = self.run_cli('ssh', *sub)
-            self.assertNotEqual(result.returncode, 0, sub)
-            self.assertIn('まだ実装されていません', result.stdout, sub)
+    def test_rotate_and_remove_need_registered_hosts(self):
+        result = self.run_cli('ssh', 'rotate')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('登録済みホストがありません', result.stderr)
+        result = self.run_cli('ssh', 'remove', 'web1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('未登録のホスト', result.stderr)
+        result = self.run_cli('ssh', 'remove')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('<host>', result.stderr)
 
     def test_verify_needs_a_registered_host(self):
         result = self.run_cli('ssh', 'verify', 'web1')

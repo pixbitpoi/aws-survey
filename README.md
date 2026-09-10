@@ -154,6 +154,13 @@ $ aws-survey ssh verify web1       # 通るもの・塞がっているものを�
 $ aws-survey run
 ```
 
+後片付けと鍵の更新もコマンドで行います。
+
+```bash
+$ aws-survey ssh remove web1       # ユーザー・ゲートウェイ・sshd と sudoers の設定を EC2 から撤去し、タグと記録を消す
+$ aws-survey ssh rotate            # 鍵を作り直して、登録済みホスト全部に再導入する
+```
+
 調査コンテナの中では `ec2 <host> <動詞>` で使います。エージェントは `survey-status` に出るホストを見て、
 自分で `method/06_EC2の中を調べる.md` に従って進めます。
 

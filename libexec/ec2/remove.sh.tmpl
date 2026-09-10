@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Remove the diagnostic gateway and its login user. Run as root on the host. The reverse of the
+# install script, in the reverse order: sshd first (no new logins), then sudoers, the files,
+# and finally the user with its home directory.
+#
+# Idempotent: every step is skipped when there is nothing to remove, so a second run after a
+# partial failure finishes the job. The last line is "REMOVED clean" when nothing is left, or
+# "REMOVED leftover <path>..." (non-zero exit) when something could not be removed.
+set -euo pipefail
+umask 022
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+DIAG_USER='@@USER@@'
+LIB=/usr/local/lib/diag
+CONF_DIR=/etc/diag
+SSHD_CONFIG=/etc/ssh/sshd_config
+SSHD_DROPIN=/etc/ssh/sshd_config.d/diag.conf
+SUDOERS=/etc/sudoers.d/diag
+TMPFILES=/etc/tmpfiles.d/diag.conf
+LOCK=/run/diag.lock
+MARK_BEGIN='# diag begin (managed; do not edit between the markers)'
+MARK_END='# diag end'
+
+say()  { printf '[diag] %s\n' "$*"; }
+fail() { printf '[diag] error: %s\n' "$*" >&2; exit 1; }
+
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+[ "$(id -u)" -eq 0 ] || fail "run as root"
+case "$DIAG_USER" in
+  [a-z_]*) [ "${#DIAG_USER}" -le 32 ] || fail "user name too long" ;;
+  *) fail "invalid user name" ;;
+esac
+[ "$DIAG_USER" != root ] || fail "refusing to remove root"
+[ -f "$SSHD_CONFIG" ] || fail "$SSHD_CONFIG not found"
+
+# ---- 1. sshd: drop the Match block, keep the previous file if sshd -t rejects the result ----
+strip_marked_block() {
+  awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
+    $0 == b { skip = 1; next }
+    $0 == e { skip = 0; next }
+    !skip' "$1"
+}
+changed=0
+if [ -f "$SSHD_DROPIN" ]; then
+  cp -p "$SSHD_DROPIN" "$WORK/dropin.orig"
+  rm -f "$SSHD_DROPIN"
+  changed=1
+fi
+cp -p "$SSHD_CONFIG" "$WORK/sshd_config.orig"
+strip_marked_block "$SSHD_CONFIG" > "$WORK/sshd_config.new"
+if ! cmp -s "$WORK/sshd_config.new" "$SSHD_CONFIG"; then
+  cat "$WORK/sshd_config.new" > "$SSHD_CONFIG"
+  changed=1
+fi
+if [ "$changed" -eq 1 ]; then
+  if command -v sshd >/dev/null && ! sshd_check=$(sshd -t 2>&1); then
+    cp -p "$WORK/sshd_config.orig" "$SSHD_CONFIG"
+    [ ! -f "$WORK/dropin.orig" ] || cp -p "$WORK/dropin.orig" "$SSHD_DROPIN"
+    printf '%s\n' "$sshd_check" >&2
+    fail "sshd -t rejected the configuration without the diag block; previous files restored"
+  fi
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+    for unit in sshd ssh; do
+      if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        systemctl reload "$unit" || true
+        break
+      fi
+    done
+  fi
+  say "removed the sshd configuration for $DIAG_USER"
+else
+  say "sshd configuration: nothing to remove"
+fi
+
+# ---- 2. sudoers ----
+if [ -f "$SUDOERS" ]; then
+  rm -f "$SUDOERS"
+  if command -v visudo >/dev/null && ! visudo -c >/dev/null 2>&1; then
+    fail "visudo -c failed after removing $SUDOERS"
+  fi
+  say "removed $SUDOERS"
+fi
+
+# ---- 3. gateway, helper, configuration, lock ----
+for path in "$LIB" "$CONF_DIR"; do
+  [ ! -e "$path" ] || { rm -rf "$path"; say "removed $path"; }
+done
+for path in "$TMPFILES" "$LOCK"; do
+  [ ! -e "$path" ] || { rm -f "$path"; say "removed $path"; }
+done
+
+# ---- 4. user and home directory (the authorized key lives there) ----
+if id -u "$DIAG_USER" >/dev/null 2>&1; then
+  pkill -KILL -u "$DIAG_USER" 2>/dev/null || true
+  sleep 1
+  HOME_DIR=$(getent passwd "$DIAG_USER" | cut -d: -f6)
+  if userdel -r "$DIAG_USER" 2>"$WORK/userdel.err"; then
+    say "removed user $DIAG_USER"
+  else
+    cat "$WORK/userdel.err" >&2
+    id -u "$DIAG_USER" >/dev/null 2>&1 && fail "could not remove user $DIAG_USER"
+  fi
+  # userdel -r leaves the home when it is not owned by the user; make sure the key is gone.
+  case "$HOME_DIR" in
+    /home/?*) [ ! -d "$HOME_DIR" ] || { rm -rf "$HOME_DIR"; say "removed $HOME_DIR"; } ;;
+  esac
+else
+  say "user $DIAG_USER: nothing to remove"
+fi
+
+# ---- 5. what is left ----
+leftover=""
+for path in "$LIB" "$CONF_DIR" "$SSHD_DROPIN" "$SUDOERS" "$TMPFILES" "$LOCK"; do
+  [ ! -e "$path" ] || leftover="$leftover $path"
+done
+grep -qxF "$MARK_BEGIN" "$SSHD_CONFIG" && leftover="$leftover $SSHD_CONFIG(block)"
+id -u "$DIAG_USER" >/dev/null 2>&1 && leftover="$leftover user:$DIAG_USER"
+if [ -n "$leftover" ]; then
+  echo "REMOVED leftover$leftover"
+  exit 1
+fi
+echo "REMOVED clean"

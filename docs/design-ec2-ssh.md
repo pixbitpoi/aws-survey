@@ -1,9 +1,8 @@
 # 設計: EC2 の中を調べる（SSH over SSM + 診断ゲートウェイ）
 
 調査コンテナのエージェントが、対象 EC2 インスタンスの OS 内部（ログ・サービス状態・リソース状況）を
-調べられるようにする機能の設計。第 10 節の第 6 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`、
-調査コンテナの `ec2` ラッパーとフック、`aws-survey ssh verify`、文書と `survey-status`）。
-`rotate` / `remove` は未実装。
+調べられるようにする機能の設計。第 10 節の第 7 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`、
+調査コンテナの `ec2` ラッパーとフック、`aws-survey ssh verify`、文書と `survey-status`、鍵の作り直し `rotate` と後片付け `remove`）。
 
 ## 1. 目標と方針
 
@@ -99,8 +98,9 @@ aws-survey ssh setup <instance-id | Name タグ> [--alias <名前>] [--user <nam
 aws-survey ssh setup --print [...]          # 導入スクリプトを標準出力に出すだけ（手動実行用）
 aws-survey ssh list                         # 登録済みホストと導入状態
 aws-survey ssh verify <host>                # コンテナから自己診断を打つ（§7）
-aws-survey ssh rotate                       # 鍵を作り直し、登録済みホスト全部に再導入
-aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoers・ゲートウェイ・設定を撤去し、タグを外す
+aws-survey ssh rotate                       # 鍵を作り直し、登録済みホスト全部に再導入（§4.6）
+aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoers・ゲートウェイ・設定を撤去し、タグを外す（§4.6）
+aws-survey ssh remove --print <host>        # 撤去スクリプトを標準出力に出すだけ（手動実行用）
 ```
 
 - `--log` は root 読み取り段に登録するログ。一般ユーザーで読めるログには不要（§5.3）。
@@ -191,6 +191,8 @@ aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoe
 - `load-env.sh` は `SSH_USER` と `SSH_HOSTS`（alias の一覧）を読むだけ。
 - 記録は導入が成功し、タグが付いてから書く。途中で失敗したら environment.json・`config`・`known_hosts` には触れない。
   `config` は `ssh.hosts` 全体から毎回作り直し、`known_hosts` はそのインスタンスの行だけ入れ替える。
+- 鍵の作成日時は記録しない。鍵ファイルの更新日時がそのまま作成日時で（`rotate` は新しいファイルを移動するので日時が残る）、
+  `ssh list` はそれを表示する。
 
 ### 4.5 導入スクリプトが EC2 に作るもの
 
@@ -224,9 +226,12 @@ aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoe
        PermitUserRC no
        AuthenticationMethods publickey
        PasswordAuthentication no
+       ClientAliveInterval 15
+       ClientAliveCountMax 3
    ```
 
-   `sshd -t` で検証してから `systemctl reload sshd`。**restart ではなく reload**（既存セッションを落とさない）。
+   `ClientAliveInterval` / `ClientAliveCountMax` は、クライアント側の `ssh` が消えて応答が無くなった接続を sshd が閉じるため
+   （§7「セッションの終わり方」）。`sshd -t` で検証してから `systemctl reload sshd`。**restart ではなく reload**（既存セッションを落とさない）。
    検証に失敗したら書いた設定を戻して非ゼロで終わり、setup がそれを表示する。sftp サブシステム要求も
    ForceCommand に置き換わるため、scp / sftp は同時に塞がる。
    Ubuntu 24.04 のように sshd がソケット起動で常駐していないときは reload する対象が無く、次の接続から新しい設定が効く。
@@ -239,6 +244,39 @@ aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoe
 
 対応 OS は Amazon Linux 2 / 2023、Ubuntu 20.04 以降、Debian 11 以降。パッケージの導入はしない
 （`sar` が無ければ `sar` 動詞は「未導入」と返す。本番機に勝手に入れない）。
+
+### 4.6 rotate と remove
+
+どちらも `setup` と同じく元プロファイルで実行し、途中で失敗したら記録に触れない。
+
+**`ssh rotate`**（鍵の作り直し）。
+
+1. 新しい鍵を `$AWS_DIR/ssh/id_ed25519.next` に作る。いまの鍵はそのまま。
+2. `ssh.hosts` の全ホストへ別名順に、各ホストの記録（`user` / `logs` / `deny` / `strict`）と新しい公開鍵で導入スクリプトを組み立てて
+   送る（§4.2 の手順 4 と同じ。冪等な再導入）。SSM 管理下でない・RunCommand が失敗した・`HOSTKEY` 行が無い、のどれかで**そこで止める**。
+3. 全ホストに入ったら `.next` を `id_ed25519` に移し、`known_hosts` を入れ替え、各ホストの `installed_at` を更新する。
+   `config` は変わらない（鍵のパスは同じ）。起動中の調査コンテナは読み取り専用マウント越しに同じ場所を見ているので、次の接続から新しい鍵になる。
+4. 途中で止まったら `.next` を捨て、いまの鍵・記録・`config`・`known_hosts` は変えない。失敗までに新しい鍵になったホストは
+   いまの鍵では届かなくなるので、その別名を表示し、`ssh rotate` のやり直し（全ホストに入れ直す）か `ssh setup <host>`
+   （そのホストだけいまの鍵に戻す）を案内する。鍵を 2 本持たない（`.next` を残しても、コンテナに渡るのは `id_ed25519` だけ）。
+
+**`ssh remove <host>`**（後片付け）。`setup` の逆順で、EC2 側が済んでからタグと記録を消す。
+
+1. 別名から `instance_id` と `user` を引く。インスタンスが無い（terminated か `InvalidInstanceID.NotFound`）ときは EC2 側とタグを飛ばして記録だけ消す。
+   running でない・SSM 管理下でないときは止め、`remove --print <host>` で撤去スクリプトを書き出して手実行する道を案内する。
+2. 撤去スクリプト（`libexec/ec2/remove.sh.tmpl`。埋めるのはユーザー名だけ）を `AWS-RunShellScript` で root 実行する。
+   sshd の drop-in とマーカー付きブロックを消して `sshd -t`（失敗なら戻す）→ reload、`/etc/sudoers.d/diag` を消して `visudo -c`、
+   `/usr/local/lib/diag`・`/etc/diag`・`/etc/tmpfiles.d/diag.conf`・`/run/diag.lock` を消し、ユーザーのプロセスを止めてから
+   `userdel -r`（`authorized_keys` はホームごと消える）。最後に §4.5 の表の全部と `id <user>` を見て、残っていなければ
+   `REMOVED clean`、残っていれば `REMOVED leftover <パス>...` を出して非ゼロ。スクリプトは冪等で、やり直すと残ったものだけ消す。
+3. `REMOVED clean` を確かめてから `ec2 delete-tags`（`Key=diag:ssh,Value=<name>`）。
+4. `environment.json` の `ssh.hosts.<alias>` を消し、`known_hosts` からそのインスタンスの行を消し（同じインスタンスを別の別名でも
+   登録していれば残す）、`config` を作り直す。鍵は残す（次の `setup` がそのまま使う）。
+5. 最後のホストを消したときは、`diag-ssh-<name>` ポリシーが調査用ロールに付いたままでもタグ付きインスタンスが無いので何も許さないこと、
+   `credentials` の再発行（登録が無いときはポリシーを渡さない）と `role --create`（登録が無いときはポリシーを付けないが、
+   付いているものを外しもしない）を案内する。ポリシーそのものの detach / delete は利用者の判断で行う。
+
+EC2 側が失敗したらタグも記録も触らない。タグ外しが失敗したときは EC2 側は済んでいるので、同じコマンドのやり直しで続きから進む。
 
 ## 5. ゲートウェイの仕様
 
@@ -452,12 +490,18 @@ API が通ってプラグインの探索まで進んだ。
 `ssm:DescribeSessions` は `ReadOnlyAccess` に、`TerminateSession` は `diag-ssh-<name>` の自分の接頭辞にあり、一時キーで通る。
 `ssh verify` は自己診断のあと、元プロファイルが使えれば SSM 側にもセッションが残っていないことを見る。
 
-EC2 側の sshd からも切る案（検討のみ、未実施）。`Match User` ブロックに `ClientAliveInterval 15` と `ClientAliveCountMax 3` を置くと、
-クライアント側の `ssh` が先に消えて応答が無くなった接続を sshd が 45 秒ほどで閉じ、それを受けて SSM のセッションも終わる
-（正常経路と同じ「EC2 側が閉じて終わる」形に乗る）。`ec2` ラッパーの後片付けと重ねる二層目になり、ラッパーが動かなかった場合
-（コンテナごと落ちた、`describe-sessions` が失敗した）にも 10 分の放置を短くできる。ただし導入スクリプト（`libexec/ec2/install.sh.tmpl`）の
-変更で、登録済みホスト全部に再導入（冪等）が要る。コンテナ側の `config` にある `ServerAliveInterval 15` は逆方向（クライアントがサーバの無応答を検知する）で、
-この問題には効かない。`rotate` / `remove` を足す段で、再導入の機会と一緒に入れるのがよい。
+EC2 側の sshd からも切る（第 7 段で導入、2026-09-10 の実測）。`Match User` ブロックに `ClientAliveInterval 15` と `ClientAliveCountMax 3` を置いた。
+クライアント側の `ssh` を接続中に SIGKILL したとき、sshd は最後の応答から 45 秒ほどで `Timeout, client not responding` を出して接続を閉じ
+（接続開始から 69 秒。`vmstat --count 10` の出力を送り終えてから 15 秒 × 3 回）、sshd-session とゲートウェイのプロセスは EC2 から消える。
+**ただし SSM のセッションはそれでは終わらない。** EC2 側の ssm-session-worker は、消えたクライアントに送った出力の確認応答を待ったまま
+sshd からの EOF を読まず（正常経路で終了の起点になる `handleSSHDPortError` がこのセッションでは記録されない）、セッションは
+`Connected` のまま残る。終わるのはサービス側のアイドルタイムアウトで、セッション設定（`SSM-SessionManagerRunShell`）を持たない
+アカウントでは既定の 20 分（実測: 開始から 20 分 46 秒で `Terminated`。以前の「10 分ほど」は誤り）。
+
+つまり `ClientAliveInterval` が担うのは EC2 側の後片付け（sshd-session・ゲートウェイ・`/run/diag.lock` の解放）で、
+SSM 側の後片付けは `ec2` ラッパーの `terminate-session`（上）だけが持つ。ラッパーが動かなかった場合の SSM セッションは
+20 分の期限まで残る（`ssh verify` や次の `ec2` の実行が、自分の残したものを見つけて終了する）。
+コンテナ側の `config` にある `ServerAliveInterval 15` は逆方向（クライアントがサーバの無応答を検知する）で、この問題には効かない。
 
 ## 8. 調査コンテナ側
 
@@ -532,6 +576,12 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
    登録済みホストが出ること（端末では装飾付き、端末でないときは素の文字列、接続設定の無い対象では何も出ない）、
    調査コンテナの Claude Code に `method/06` を読ませて `ec2 <host>` の `help` / `uptime` / `services` / `ls` / `tail` を `out/<フェーズ>/raw/` に
    保存させ、監査ログに `ALLOW` が残り、`out/_環境/00_動作確認.md` に記録が書かれ、終了後に SSM のセッションが残らないことを確認）。
+7. `aws-survey ssh rotate` / `ssh remove`（§4.6）、`ssh list` の鍵の作成日時、導入スクリプトの `ClientAliveInterval`。**済**（2026-09-10、
+   実 EC2 の Amazon Linux 2023。`--log` 付きの再導入 → `ssh verify` が `log` を省略せず 19 項目通過 → `rotate` で鍵を差し替えて
+   `ssh verify` がもう一度通過 → `remove` が `REMOVED clean` で終わり、別の RunCommand で §4.5 の表の全部・ユーザー・グループ・
+   sshd の実効値（`forcecommand none`）・`visudo -c` を見て何も残っていないこと、タグが `Name` だけになったことを確認 → `setup` で戻した。
+   `ClientAliveInterval` の実測は §7）。偽の `aws` で呼び出し順・引数・失敗時に何も残さないことを見るのは `tests/test_ssh_setup.py`、
+   撤去スクリプトの中身は `tests/test_ssh_install.py`。
 
 実環境で未確認のまま完了扱いにしない項目と、いまの状態。
 
@@ -543,6 +593,6 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 | AL2 の `requiretty` | **確認済**（2026-09-10、一時的に作った AL2 の実機。作業後に終了）。素の AL2 の `/etc/sudoers` に `requiretty` は無い。全体に `Defaults requiretty` を足しても（`/etc/sudoers.d/` と `/etc/sudoers` 先頭の両方で試した）、`Defaults:<user> !requiretty` を持つログインユーザーからの `sudo diag-root` は tty 無しで通り、それを持たない対照ユーザーは「you must have a tty」で拒否された。確認は sshd と同じく sudo を経由せず `runuser` でログインユーザーになって行った（root からの `sudo -u <user>` は外側の sudo が requiretty に当たる） |
 | AL2 の Python 3.7 | **確認済**（同上）。ゲートウェイが `shlex.join`（3.8 以降）を使っていて自己確認で落ちたので `shlex.quote` の連結に直し、AL2 で導入と root 段（`dmesg` / `log`）が動くこと、`tests/test_gateway.py` が Python 3.7 でも通ることを見た |
 | session-manager-plugin の deb の arm64 対応 | **確認済**（2026-09-10、arm64 の Mac の Docker で `ubuntu_arm64` の deb を `node:22-bookworm-slim` に入れ、`aws ssm start-session` 経由の `ssh` が実 EC2 に届いた。x86_64 側は `ubuntu_64bit` に読み替えるだけで、未実行） |
-| ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。EC2 側の sshd に `ClientAliveInterval` を置いて sshd 側からも切る案は §7 に検討を書いた。導入スクリプトの変更になるので、`rotate` / `remove` の段で再導入と一緒に入れる） |
-| root 段の `log` 動詞（登録済みログ） | **実機では未確認**。`ssh verify` は登録済みログが無いホストでは `dmesg` で root 段を確かめて `log` を省略する。素の AL2023 には自動登録されるログが無く、`--log <名前>=<パス>` 付きで再導入（冪等）すれば見られる。動詞の解析と `--file` の照合は `tests/test_gateway.py` |
+| ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。第 7 段で sshd に `ClientAliveInterval 15` / `ClientAliveCountMax 3` を入れ、EC2 側のプロセスは 69 秒で消えることを実測したが、SSM のセッションはそれでは終わらず既定 20 分の期限まで残る。SSM 側の後片付けはラッパーだけが持つ） |
+| root 段の `log` 動詞（登録済みログ） | **確認済**（2026-09-10、AL2023）。root 専用の `/var/log/audit/audit.log*` を `--log` で登録して再導入し、`ssh verify` が `log <名前> --tail 3` を root 段で読めることを確認（省略 0）。動詞の解析と `--file` の照合は `tests/test_gateway.py` |
 | x86_64 の session-manager-plugin（`ubuntu_64bit`） | **未実行**。arm64 の `ubuntu_arm64` からアーキテクチャ名を読み替えるだけで、x86_64 の Mac では `aws-survey run` の初回ビルドで通る |

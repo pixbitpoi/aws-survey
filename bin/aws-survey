@@ -15,8 +15,10 @@
 #   aws-survey ssh setup <instance-id | Name タグ> [...]
 #                                   EC2 の中を調べるための診断ゲートウェイを SSM 経由で導入して登録する（libexec/commands/ssh.sh。任意の追加機能）
 #   aws-survey ssh setup --print [...]   その導入スクリプトを書き出すだけ（手動実行用）
-#   aws-survey ssh list             登録済みホストと導入状態
+#   aws-survey ssh list             登録済みホスト・鍵の作成日時・導入日時
 #   aws-survey ssh verify <host>    調査コンテナから実際に接続して、通るもの・塞がっているものを確かめる
+#   aws-survey ssh rotate           鍵を作り直して登録済みホスト全部に再導入する
+#   aws-survey ssh remove <host>    EC2 から撤去し、タグと記録を消す（remove --print <host> は撤去スクリプトを出すだけ）
 #
 #   共通オプション:  --dir <対象フォルダ>   既定はカレントディレクトリ（AWS_SURVEY_DIR でも指定可）
 #

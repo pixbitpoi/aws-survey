@@ -104,6 +104,8 @@ Match User $DIAG_USER
     PermitUserRC no
     AuthenticationMethods publickey
     PasswordAuthentication no
+    ClientAliveInterval 15
+    ClientAliveCountMax 3
 __DIAG_SSHD__
 
 # Keep a copy of whatever we are about to change so a failed `sshd -t` can put it back.

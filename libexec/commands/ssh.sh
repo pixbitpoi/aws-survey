@@ -5,16 +5,17 @@
 #                                   SSM 経由で導入する。元プロファイル（auth.source_profile）で実行し、
 #                                   成功したら $AWS_DIR/ssh/{config,known_hosts} と environment.json の ssh.hosts に記録する
 #   aws-survey ssh setup --print [...]   導入スクリプト（root で実行する 1 本の bash）を標準出力に出す。案内は標準エラー
-#   aws-survey ssh list                  登録済みホストと導入状態（AWS に届けばインスタンスの状態とタグも）
+#   aws-survey ssh list                  登録済みホスト・鍵の作成日時・導入日時（AWS に届けばインスタンスの状態とタグも）
 #   aws-survey ssh verify <host>         調査コンテナから ec2 --selftest <host> を打つ。通るもの・塞がっているもの・
 #                                   終了後に SSM セッションが残らないことを実際に接続して確かめる
-#   aws-survey ssh rotate                鍵の作り直しと再導入    （未実装）
-#   aws-survey ssh remove <host>         撤去                    （未実装）
+#   aws-survey ssh rotate                鍵を作り直し、登録済みホスト全部に再導入する。1 台でも失敗したら古い鍵と記録を残す
+#   aws-survey ssh remove <host>         EC2 からユーザー・sshd 設定・sudoers・ゲートウェイ・設定・tmpfiles・ロックを撤去し、
+#                                   タグを外して記録から消す。remove --print <host> は撤去スクリプトを出すだけ
 #
 # 鍵は $AWS_DIR/ssh/id_ed25519（対象ごとに 1 対、無ければ作る）。導入スクリプトに入るのは公開鍵だけ。
-# 導入スクリプトの雛形は libexec/ec2/install.sh.tmpl。EC2 に残るものの名前は diag で統一する（設計文書の第 2 節）。
-# 導入は元プロファイルの仕事で、ssm:SendCommand を調査用ロールや一時キーに足さない。
-# 途中で失敗したら何も記録しない（タグ付け・config・environment.json は導入が成功してから）。
+# 導入スクリプトの雛形は libexec/ec2/install.sh.tmpl、撤去は remove.sh.tmpl。EC2 に残るものの名前は diag で統一する
+# （設計文書の第 2 節）。導入と撤去は元プロファイルの仕事で、ssm:SendCommand を調査用ロールや一時キーに足さない。
+# 途中で失敗したら何も記録しない（タグ付け・config・environment.json は導入が成功してから。撤去も EC2 側が済んでから）。
 # 表示は libexec/ui.sh の部品で組む。
 set -uo pipefail
 
@@ -22,6 +23,7 @@ set -uo pipefail
 
 EC2_DIR="$LIBEXEC_DIR/ec2"
 TEMPLATE="$EC2_DIR/install.sh.tmpl"
+REMOVE_TEMPLATE="$EC2_DIR/remove.sh.tmpl"
 SSH_DIR="$AWS_DIR/ssh"
 KEY="$SSH_DIR/id_ed25519"
 SSH_CONFIG="$SSH_DIR/config"
@@ -36,11 +38,11 @@ SSH_PACK="${AWS_SURVEY_SSH_PACK:-0}"
 
 die() { ui_die "$@"; }
 
-usage() { sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,13p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ---- 引数 ----
 SUB="${1:-}"; [ $# -gt 0 ] && shift
-[ -n "$SUB" ] || { usage >&2; die "サブコマンドを指定してください（setup <対象> / setup --print / list / verify <host>）。"; }
+[ -n "$SUB" ] || { usage >&2; die "サブコマンドを指定してください（setup <対象> / setup --print / list / verify <host> / rotate / remove <host>）。"; }
 
 TARGET=""; PRINT=0; USER_OPT=""; ALIAS_OPT=""; STRICT=false
 LOGS_JSON='{}'; DENY_JSON='[]'
@@ -109,16 +111,24 @@ ensure_key() {
   ssh-keygen -q -t ed25519 -N '' -C diag -f "$KEY" || die "鍵を作れませんでした: $KEY"
   ui_ok "鍵を作りました: ${KEY}${C_DIM}（対象ごとに 1 対。コンテナには読み取り専用で渡ります）${C_RESET}" >&2
 }
+# 1 引数は秘密鍵のパス（省略時は $KEY）。PUBKEY を埋める
 read_pubkey() {
-  local line
-  line=$(head -n 1 "$KEY.pub")
+  local key="${1:-$KEY}" line
+  line=$(head -n 1 "$key.pub")
   case "$line" in
     "ssh-ed25519 "*) ;;
-    *) die "公開鍵が ssh-ed25519 ではありません: $KEY.pub" ;;
+    *) die "公開鍵が ssh-ed25519 ではありません: $key.pub" ;;
   esac
   PUBKEY="$(printf '%s' "$line" | cut -d' ' -f1,2) diag"
-  [[ "$PUBKEY" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+\ diag$ ]] || die "公開鍵の形式を読めません: $KEY.pub"
+  [[ "$PUBKEY" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+\ diag$ ]] || die "公開鍵の形式を読めません: $key.pub"
 }
+# ファイルの更新日時を ISO 8601（ローカル時刻）で。鍵の作成日時に使う（作った・差し替えた時刻がそのまま残る）
+file_mtime() {
+  local t
+  t=$(stat -c %Y "$1" 2>/dev/null) || t=$(stat -f %m "$1" 2>/dev/null) || { echo "不明"; return 0; }
+  { date -r "$t" +%Y-%m-%dT%H:%M:%S%z 2>/dev/null || date -d "@$t" +%Y-%m-%dT%H:%M:%S%z; } | sed -E 's/([0-9]{2})$/:\1/'
+}
+now_iso() { date +%Y-%m-%dT%H:%M:%S%z | sed -E 's/([0-9]{2})$/:\1/'; }
 
 # ---- 導入スクリプトの組み立て ----
 # 雛形の @@GATEWAY_PY@@ / @@DIAG_ROOT_PY@@ / @@CONF_JSON@@ の行を本文に置き換え、
@@ -142,6 +152,15 @@ render_install() {
         printf '%s\n' "$line" ;;
     esac
   done < "$TEMPLATE"
+}
+
+# 撤去スクリプト。埋めるのはユーザー名だけ
+render_remove() {
+  local line
+  shopt -u patsub_replacement 2>/dev/null || true
+  while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s\n' "${line//@@USER@@/$SSH_USER}"
+  done < "$REMOVE_TEMPLATE"
 }
 
 # 導入スクリプトを gzip + base64 で 1 つの heredoc に畳み、EC2 側で展開して実行する短い bash にする。
@@ -170,9 +189,11 @@ show_conf() {
   ui_kv "拒否パターン" "$(jq -r 'if length == 0 then "（追加なし）" else join(" ") end' <<< "$DENY_JSON")"
   ui_kv "strict" "$STRICT"
 }
+# 1 引数は使う秘密鍵（省略時は $KEY。無ければ作る）
 prepare_script() {
-  ensure_key
-  read_pubkey
+  local key="${1:-$KEY}"
+  [ "$key" != "$KEY" ] || ensure_key
+  read_pubkey "$key"
   build_conf
   SCRIPT=$(render_install) || die "導入スクリプトを組み立てられませんでした。"
   bash -n <(printf '%s\n' "$SCRIPT") || die "組み立てた導入スクリプトが bash として読めません。"
@@ -236,14 +257,21 @@ decide_alias() {
 }
 
 # SSM 管理下（PingStatus=Online）でなければ、必要なものを案内して終わる。ここは自動化しない。
-check_ssm() {
-  local out ping platform
+# SSM_PING / SSM_PLATFORM を埋める。Online なら 0
+ssm_online() {
+  local out
   out=$(src ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
           --query 'InstanceInformationList[0].{ping:PingStatus,platform:PlatformName,version:PlatformVersion,agent:AgentVersion}' 2>&1) \
     || { ui_raw "$out"; die "SSM の管理状態を読めません（ssm:DescribeInstanceInformation）。"; }
-  ping=$(jq -r '.ping // empty' <<< "$out")
-  platform=$(jq -r 'if .platform then "\(.platform) \(.version // "")  agent \(.agent // "?")" else "" end' <<< "$out")
-  if [ "$ping" != Online ]; then
+  SSM_PING=$(jq -r '.ping // empty' <<< "$out")
+  SSM_PLATFORM=$(jq -r 'if .platform then "\(.platform) \(.version // "")  agent \(.agent // "?")" else "" end' <<< "$out")
+  [ "$SSM_PING" = Online ]
+}
+check_ssm() {
+  local ping platform
+  ssm_online && { ui_ok "SSM 管理下（Online）  ${C_DIM}${SSM_PLATFORM}${C_RESET}"; return 0; }
+  ping="$SSM_PING"
+  {
     ui_err "SSM の管理下にありません（PingStatus: ${ping:-なし}）"
     echo ""
     ui_text "導入は SSM RunCommand で行うため、対象が SSM 管理下（Online）である必要があります。次を確かめてください。"
@@ -255,17 +283,17 @@ check_ssm() {
     ui_text "SSM を使えない対象には、スクリプトを書き出して root で手実行する方法があります。"
     also_cmd "$AWS_SURVEY_CMD ssh setup --print > install-diag.sh" "導入スクリプトを 1 本の bash として書き出します"
     exit 1
-  fi
-  ui_ok "SSM 管理下（Online）  ${C_DIM}${platform}${C_RESET}"
+  }
 }
 
 # AWS-RunShellScript で root 実行し、完了を待つ。COMMAND_ID / RUN_STATUS / RUN_STDOUT / RUN_STDERR を埋める。
-# 1 引数はスクリプト本文。送れなければ 2（大きすぎる）か 1 を返す。
+# 1 引数はスクリプト本文、2 引数は RunCommand のコメント（省略時は diag setup）。送れなければ 2（大きすぎる）か 1 を返す。
 send_and_wait() {
-  local script="$1" input cmd_id out status waited=0 rc=0
+  local script="$1" comment="${2:-diag setup}" input cmd_id out status waited=0 rc=0
+  RUN_STATUS=""; RUN_STDOUT=""; RUN_STDERR=""; SEND_ERROR=""
   # $(...) で受けたスクリプトは末尾の改行が落ちているので戻す
-  input=$(jq -n --arg id "$INSTANCE_ID" --arg script "$script"$'\n' --arg t "$SSM_TIMEOUT" \
-            '{DocumentName: "AWS-RunShellScript", InstanceIds: [$id], Comment: "diag setup",
+  input=$(jq -n --arg id "$INSTANCE_ID" --arg script "$script"$'\n' --arg t "$SSM_TIMEOUT" --arg c "$comment" \
+            '{DocumentName: "AWS-RunShellScript", InstanceIds: [$id], Comment: $c,
               Parameters: {commands: [$script], executionTimeout: [$t]}}')
   if ! out=$(src ssm send-command --cli-input-json "$input" 2>&1); then
     SEND_ERROR="$out"
@@ -283,7 +311,7 @@ send_and_wait() {
     case "$status" in
       Pending|InProgress|Delayed)
         [ "$waited" -lt "$SSM_TIMEOUT" ] || { RUN_STATUS=HostTimeout; return 1; }
-        ui_status "EC2 で導入スクリプトを実行中… ${status}（${waited} 秒）"
+        ui_status "EC2 でスクリプトを実行中… ${status}（${waited} 秒）"
         sleep "$SSM_POLL"; waited=$((waited + SSM_POLL)) ;;
       *) break ;;
     esac
@@ -300,7 +328,7 @@ send_and_wait() {
 collect_hostkeys() {
   HOSTKEY_LINES=$(printf '%s\n' "$RUN_STDOUT" | grep -E '^HOSTKEY (ssh-[a-z0-9-]+|ecdsa-sha2-[a-z0-9-]+) [A-Za-z0-9+/=]+$' \
                     | sed -E "s/^HOSTKEY /$INSTANCE_ID /") || true
-  [ -n "$HOSTKEY_LINES" ] || die "導入は成功しましたが、出力に HOSTKEY 行がありません。known_hosts を作れないため記録しません。"
+  [ -n "$HOSTKEY_LINES" ]
 }
 
 # $AWS_DIR/ssh/config を environment.json の ssh.hosts 全体から作り直す（コンテナの ssh -F が読む）
@@ -309,24 +337,25 @@ write_ssh_config() {
   tmp=$(mktemp) || die "一時ファイルを作れません。"
   {
     echo "# aws-survey が生成。手で直さない（aws-survey ssh setup で作り直す）"
-    jq -r --arg dir "$CONTAINER_SSH_DIR" --arg default_user "$SSH_USER" '
+    jq -r --arg dir "$CONTAINER_SSH_DIR" '
+      (.ssh.user // "diag") as $default_user |
       .ssh.hosts | to_entries[] | .key as $alias | .value |
       "\nHost \($alias)\n    HostName \(.instance_id)\n    User \(.user // $default_user)\n    IdentityFile \($dir)/id_ed25519\n    IdentitiesOnly yes\n    ProxyCommand aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p\n    StrictHostKeyChecking yes\n    UserKnownHostsFile \($dir)/known_hosts\n    BatchMode yes\n    RequestTTY no\n    ForwardAgent no\n    ServerAliveInterval 15"' "$ENV_FILE"
   } > "$tmp" || { rm -f "$tmp"; die "config を組み立てられません。"; }
   mv "$tmp" "$SSH_CONFIG" && chmod 644 "$SSH_CONFIG" || die "書き込めません: $SSH_CONFIG"
 }
 
-# known_hosts: このインスタンスの行を入れ替え、他のホストの行は残す
+# known_hosts: 1 引数のインスタンスの行を 2 引数の行（空なら削除だけ）に入れ替え、他のホストの行は残す
 write_known_hosts() {
-  local tmp
+  local id="${1:-$INSTANCE_ID}" lines="${2-$HOSTKEY_LINES}" tmp
   tmp=$(mktemp) || die "一時ファイルを作れません。"
-  { [ ! -f "$KNOWN_HOSTS" ] || grep -v -E "^$INSTANCE_ID " "$KNOWN_HOSTS"; printf '%s\n' "$HOSTKEY_LINES"; } > "$tmp"
+  { [ ! -f "$KNOWN_HOSTS" ] || grep -v -E "^$id " "$KNOWN_HOSTS"; [ -z "$lines" ] || printf '%s\n' "$lines"; } > "$tmp"
   mv "$tmp" "$KNOWN_HOSTS" && chmod 644 "$KNOWN_HOSTS" || die "書き込めません: $KNOWN_HOSTS"
 }
 
 record_host() {
   local tmp now
-  now=$(date +%Y-%m-%dT%H:%M:%S%z | sed -E 's/([0-9]{2})$/:\1/')
+  now=$(now_iso)
   tmp=$(mktemp) || die "一時ファイルを作れません。"
   jq --arg a "$HOST_ALIAS" --arg id "$INSTANCE_ID" --arg user "$SSH_USER" --arg now "$now" \
      --argjson logs "$LOGS_JSON" --argjson deny "$DENY_JSON" --argjson strict "$STRICT" '
@@ -334,6 +363,41 @@ record_host() {
      .ssh.hosts = (.ssh.hosts // {}) |
      .ssh.hosts[$a] = {instance_id: $id, user: $user, installed_at: $now, logs: $logs, deny: $deny, strict: $strict}' \
      "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE" || { rm -f "$tmp"; die "environment.json に記録できません。"; }
+}
+
+# 導入スクリプトを INSTANCE_ID に送って完了を待つ。素のまま送り、大きさで拒否されたら畳んで送り直す。FORM に送った形が入る
+run_install() {
+  local script="$1" rc=2 packed packed_bytes
+  FORM=plain
+  if [ "$SSH_PACK" = 1 ]; then
+    ui_text "AWS_SURVEY_SSH_PACK=1: 最初から gzip + base64 に畳んで送ります。"
+  else
+    send_and_wait "$script"; rc=$?
+  fi
+  if [ "$rc" -eq 2 ]; then
+    if [ "$SSH_PACK" != 1 ]; then
+      ui_warn "素のスクリプトは SSM のパラメータ上限に掛かりました。gzip + base64 に畳んで送り直します。"
+      ui_raw "$(printf '%s\n' "$SEND_ERROR" | head -3)"
+    fi
+    packed=$(pack_install "$script") || die "スクリプトを圧縮できません（gzip / base64 が要ります）。"
+    packed_bytes=$(printf '%s\n' "$packed" | wc -c | tr -d ' ')
+    ui_kv "圧縮後" "${packed_bytes} バイト"
+    FORM=packed
+    send_and_wait "$packed"; rc=$?
+  fi
+  return "$rc"
+}
+show_install_failure() {
+  if [ -n "${RUN_STATUS:-}" ]; then
+    ui_err "導入スクリプトが失敗しました（${RUN_STATUS}）"
+    [ -z "${RUN_STDOUT:-}" ] || ui_raw "$(printf '%s\n' "$RUN_STDOUT" | tail -20)"
+    [ -z "${RUN_STDERR:-}" ] || ui_raw "$(printf '%s\n' "$RUN_STDERR" | tail -20)"
+    ui_text "sshd と sudoers は元に戻しています。ゲートウェイの置き場（/usr/local/lib/diag）は残ることがありますが、ログインは有効になっていません。"
+    ui_text "原因を直して同じコマンドを実行すれば、続きから導入し直せます（冪等）。"
+  else
+    ui_err "RunCommand を送れませんでした"
+    ui_raw "$SEND_ERROR"
+  fi
 }
 
 cmd_setup() {
@@ -375,39 +439,10 @@ cmd_setup() {
   echo ""
 
   ui_head "4/5 EC2 で root 実行する（AWS-RunShellScript）"
-  local form=plain rc=2 packed packed_bytes
-  if [ "$SSH_PACK" = 1 ]; then
-    ui_text "AWS_SURVEY_SSH_PACK=1: 最初から gzip + base64 に畳んで送ります。"
-  else
-    send_and_wait "$SCRIPT"; rc=$?
-  fi
-  if [ "$rc" -eq 2 ]; then
-    if [ "$SSH_PACK" != 1 ]; then
-      ui_warn "素のスクリプトは SSM のパラメータ上限に掛かりました。gzip + base64 に畳んで送り直します。"
-      ui_raw "$(printf '%s\n' "$SEND_ERROR" | head -3)"
-    fi
-    packed=$(pack_install "$SCRIPT") || die "スクリプトを圧縮できません（gzip / base64 が要ります）。"
-    packed_bytes=$(printf '%s\n' "$packed" | wc -c | tr -d ' ')
-    ui_kv "圧縮後" "${packed_bytes} バイト"
-    form=packed
-    send_and_wait "$packed"; rc=$?
-  fi
-  if [ "$rc" -ne 0 ]; then
-    if [ -n "${RUN_STATUS:-}" ]; then
-      ui_err "導入スクリプトが失敗しました（${RUN_STATUS}）"
-      [ -z "${RUN_STDOUT:-}" ] || ui_raw "$(printf '%s\n' "$RUN_STDOUT" | tail -20)"
-      [ -z "${RUN_STDERR:-}" ] || ui_raw "$(printf '%s\n' "$RUN_STDERR" | tail -20)"
-      ui_text "sshd と sudoers は元に戻しています。ゲートウェイの置き場（/usr/local/lib/diag）は残ることがありますが、ログインは有効になっていません。"
-      ui_text "原因を直して同じコマンドを実行すれば、続きから導入し直せます（冪等）。"
-    else
-      ui_err "RunCommand を送れませんでした"
-      ui_raw "$SEND_ERROR"
-    fi
-    die "何も記録していません（タグ・config・environment.json）。"
-  fi
-  ui_ok "導入スクリプトが成功しました${C_DIM}（送った形: ${form}）${C_RESET}"
+  run_install "$SCRIPT" || { show_install_failure; die "何も記録していません（タグ・config・environment.json）。"; }
+  ui_ok "導入スクリプトが成功しました${C_DIM}（送った形: ${FORM}）${C_RESET}"
   ui_raw "$(printf '%s\n' "$RUN_STDOUT" | grep -E '^\[diag\]' | tail -12)"
-  collect_hostkeys
+  collect_hostkeys || die "導入は成功しましたが、出力に HOSTKEY 行がありません。known_hosts を作れないため記録しません。"
   ui_kv "ホスト鍵" "$(printf '%s\n' "$HOSTKEY_LINES" | wc -l | tr -d ' ') 件"
   echo ""
 
@@ -458,7 +493,11 @@ cmd_list() {
   ui_title "aws-survey ssh list"
   ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
   ui_kv "ログインユーザー" "$SSH_USER"
-  ui_kv "鍵" "$([ -f "$KEY.pub" ] && echo "$KEY" || echo "（まだ無い）")"
+  if [ -f "$KEY" ]; then
+    ui_kv "鍵" "$KEY  ${C_DIM}作成 $(file_mtime "$KEY")${C_RESET}"
+  else
+    ui_kv "鍵" "（まだ無い。ssh setup で作られます）"
+  fi
   local n
   n=$(jq -r '.ssh.hosts // {} | length' "$ENV_FILE")
   if [ "$n" -eq 0 ]; then
@@ -505,6 +544,8 @@ cmd_list() {
   echo ""
   ui_kv "config" "$([ -f "$SSH_CONFIG" ] && echo "$SSH_CONFIG" || echo "（無い。ssh setup で作られます）")"
   ui_kv "known_hosts" "$([ -f "$KNOWN_HOSTS" ] && echo "$KNOWN_HOSTS" || echo "（無い）")"
+  also_cmd "$AWS_SURVEY_CMD ssh rotate" "鍵を作り直して、登録済みホスト全部に再導入します"
+  also_cmd "$AWS_SURVEY_CMD ssh remove <host>" "そのホストから撤去し、タグと記録を消します"
 }
 
 # ---- verify ----
@@ -597,19 +638,259 @@ cmd_verify() {
   return "$rc"
 }
 
-not_implemented() {
-  ui_title "aws-survey ssh $1"
-  ui_warn "$2 はまだ実装されていません。"
-  ui_text "いま使えるのは $AWS_SURVEY_CMD ssh setup（導入）・setup --print（スクリプトの書き出し）・list（一覧）・verify（検証）です。"
-  exit 1
+# ---- rotate ----
+# 新しい鍵を別名（id_ed25519.next）で作り、登録済みホスト全部に再導入（冪等）してから差し替える。
+# 1 台でも失敗したらそこで止め、新しい鍵は捨てて古い鍵・記録・config を残す（半端な状態を残さない方針は setup と同じ）。
+# 失敗までに新しい鍵になったホストは古い鍵では届かなくなるので、どれがそうかを表示する。
+load_host() {  # 1 引数の別名から INSTANCE_ID / SSH_USER / LOGS_JSON / DENY_JSON / STRICT を埋める
+  local rec
+  rec=$(jq -c --arg a "$1" '.ssh.hosts[$a] // empty' "$ENV_FILE")
+  [ -n "$rec" ] || die "未登録のホストです: ${1}（登録済み: ${SSH_HOSTS:-なし}）"
+  INSTANCE_ID=$(jq -r '.instance_id' <<< "$rec")
+  valid_instance_id "$INSTANCE_ID" || die "environment.json の ssh.hosts.$1.instance_id が不正です: $INSTANCE_ID"
+  SSH_USER=$(jq -r --arg d "$SSH_USER" '.user // $d' <<< "$rec")
+  valid_user "$SSH_USER" || die "environment.json の ssh.hosts.$1.user が不正です: $SSH_USER"
+  LOGS_JSON=$(jq -c '.logs // {}' <<< "$rec")
+  DENY_JSON=$(jq -c '.deny // []' <<< "$rec")
+  STRICT=$(jq -r '.strict // false' <<< "$rec")
+}
+
+cmd_rotate() {
+  [ $# -eq 0 ] || die "rotate に引数はありません（登録済みホスト全部に再導入します）。"
+  [ -n "$SSH_HOSTS" ] || die "登録済みホストがありません。鍵は $AWS_SURVEY_CMD ssh setup が作ります。"
+  command -v aws >/dev/null || die "aws コマンドが見つかりません。"
+  command -v ssh-keygen >/dev/null || die "ssh-keygen が見つかりません（鍵を作れません）。"
+  [ -f "$TEMPLATE" ] || die "導入スクリプトの雛形がありません: $TEMPLATE"
+  local hosts n
+  hosts=$(jq -r '.ssh.hosts | keys[]' "$ENV_FILE")
+  n=$(printf '%s\n' "$hosts" | wc -l | tr -d ' ')
+  # trap から参照するので local にしない
+  NEW_KEY="$SSH_DIR/id_ed25519.next"
+  ROTATE_WORK=$(mktemp -d) || die "一時ディレクトリを作れません。"
+  # 途中で止まったら新しい鍵は残さない（差し替え後は既に移動済みで、消すものが無い）
+  trap 'rm -rf "$ROTATE_WORK" "$NEW_KEY" "$NEW_KEY.pub"' EXIT
+  local new_key="$NEW_KEY" work="$ROTATE_WORK"
+
+  ui_title "aws-survey ssh rotate"
+  ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
+  ui_kv "アカウント" "$ACCOUNT_ID"
+  ui_kv "リージョン" "$REGION"
+  ui_kv "いまの鍵" "$([ -f "$KEY" ] && echo "$KEY  ${C_DIM}作成 $(file_mtime "$KEY")${C_RESET}" || echo "（無い）")"
+  ui_kv "登録済みホスト" "$(printf '%s' "$hosts" | tr '\n' ' ')  ${C_DIM}（${n} 台）${C_RESET}"
+  echo ""
+
+  ui_head "1/4 元プロファイル $PROFILE_SRC で再導入する"
+  ui_text "再導入（SSM RunCommand）は強い権限の仕事です。調査用の一時キーには渡しません。"
+  check_source_profile
+  echo ""
+
+  ui_head "2/4 新しい鍵"
+  mkdir -p "$SSH_DIR" && chmod 700 "$SSH_DIR" || die "鍵の置き場を作れません: $SSH_DIR"
+  rm -f "$new_key" "$new_key.pub"
+  ssh-keygen -q -t ed25519 -N '' -C diag -f "$new_key" || die "鍵を作れませんでした: $new_key"
+  ui_ok "新しい鍵を作りました: ${new_key}${C_DIM}（全ホストに入るまで、いまの鍵はそのままです）${C_RESET}"
+  echo ""
+
+  ui_head "3/4 登録済みホスト全部に再導入する（${n} 台）"
+  local alias i=0 done_hosts=() failed_host="" rc
+  for alias in $hosts; do
+    i=$((i + 1))
+    load_host "$alias"
+    ui_text "[$i/$n] $alias  $INSTANCE_ID  user $SSH_USER"
+    if ! ssm_online; then
+      ui_err "$alias は SSM の管理下にありません（PingStatus: ${SSM_PING:-なし}）"
+      failed_host="$alias"; break
+    fi
+    prepare_script "$new_key"
+    if ! run_install "$SCRIPT"; then
+      show_install_failure
+      failed_host="$alias"; break
+    fi
+    if ! collect_hostkeys; then
+      ui_err "$alias の出力に HOSTKEY 行がありません"
+      failed_host="$alias"; break
+    fi
+    printf '%s\n' "$HOSTKEY_LINES" > "$work/$INSTANCE_ID"
+    done_hosts+=("$alias")
+    ui_ok "$alias に新しい鍵を入れました${C_DIM}（送った形: ${FORM}）${C_RESET}"
+  done
+  echo ""
+
+  ui_head "4/4 鍵と記録の差し替え"
+  if [ -n "$failed_host" ]; then
+    rm -f "$new_key" "$new_key.pub"
+    ui_err "$failed_host で失敗したので、鍵は差し替えていません（いまの鍵・config・known_hosts・environment.json はそのまま）"
+    if [ "${#done_hosts[@]}" -gt 0 ]; then
+      ui_warn "新しい鍵になったホスト: ${done_hosts[*]}"
+      ui_text "この鍵は捨てたので、上のホストにはいまの鍵では届きません。原因を直して、次のどちらかで揃えてください。"
+      next_cmd "$AWS_SURVEY_CMD ssh rotate" "もう一度、新しい鍵を全ホストに入れ直します"
+      also_cmd "$AWS_SURVEY_CMD ssh setup <host>" "そのホストだけ、いまの鍵で再導入します（1 台ずつ）"
+    else
+      ui_text "どのホストも変わっていません。原因を直して、もう一度実行してください。"
+      next_cmd "$AWS_SURVEY_CMD ssh rotate" "もう一度、新しい鍵を全ホストに入れ直します"
+    fi
+    exit 1
+  fi
+  mv "$new_key" "$KEY" && mv "$new_key.pub" "$KEY.pub" && chmod 600 "$KEY" && chmod 644 "$KEY.pub" \
+    || die "鍵を差し替えられませんでした: $KEY"
+  ui_ok "鍵を差し替えました: ${KEY}${C_DIM}（作成 $(file_mtime "$KEY")）${C_RESET}"
+  local tmp now id
+  now=$(now_iso)
+  for alias in "${done_hosts[@]}"; do
+    id=$(jq -r --arg a "$alias" '.ssh.hosts[$a].instance_id' "$ENV_FILE")
+    write_known_hosts "$id" "$(cat "$work/$id")"
+    tmp=$(mktemp) || die "一時ファイルを作れません。"
+    jq --arg a "$alias" --arg now "$now" '.ssh.hosts[$a].installed_at = $now' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE" \
+      || { rm -f "$tmp"; die "environment.json に記録できません。"; }
+  done
+  write_ssh_config
+  ui_ok "environment.json の導入日時を更新しました（${n} 台）"
+  ui_kv "known_hosts" "$KNOWN_HOSTS"
+  echo ""
+  ui_text "調査コンテナには次の起動から新しい鍵が渡ります（起動中のコンテナは読み取り専用マウント越しに同じ場所を見ています）。"
+  next_cmd "$AWS_SURVEY_CMD ssh verify <host>" "新しい鍵で実際に接続できることを確かめます"
+}
+
+# ---- remove ----
+# setup の逆順。EC2 側の撤去（RunCommand）が済んでからタグを外し、記録・config・known_hosts から消す。
+# EC2 側で失敗したらタグも記録も触らない（同じコマンドで続きからやり直せる。撤去スクリプトは冪等）。
+cmd_remove() {
+  local host="" print=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --print) print=1; shift ;;
+      -*) die "remove の不明なオプション: $1" ;;
+      *) [ -z "$host" ] || die "ホストは 1 つだけ指定してください: $host と $1"; host="$1"; shift ;;
+    esac
+  done
+  [ -n "$host" ] || die "remove には <host>（ssh list に出る別名）を 1 つ指定してください。"
+  [ -f "$REMOVE_TEMPLATE" ] || die "撤去スクリプトの雛形がありません: $REMOVE_TEMPLATE"
+  load_host "$host"
+  local script
+  script=$(render_remove) || die "撤去スクリプトを組み立てられませんでした。"
+  bash -n <(printf '%s\n' "$script") || die "組み立てた撤去スクリプトが bash として読めません。"
+
+  if [ "$print" -eq 1 ]; then
+    exec 3>&1 1>&2
+    ui_title "aws-survey ssh remove --print"
+    ui_kv "ホスト" "$host  ${C_DIM}${INSTANCE_ID}  user ${SSH_USER}${C_RESET}"
+    printf '%s\n' "$script" >&3
+    ui_ok "撤去スクリプトを標準出力に出しました"
+    ui_text "対象の EC2 に root で実行してください。最後の行が REMOVED clean なら何も残っていません。"
+    ui_text "タグ diag:ssh と、このフォルダの記録（environment.json・config・known_hosts）は消していません。"
+    return 0
+  fi
+  command -v aws >/dev/null || die "aws コマンドが見つかりません。"
+
+  ui_title "aws-survey ssh remove"
+  ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
+  ui_kv "アカウント" "$ACCOUNT_ID"
+  ui_kv "リージョン" "$REGION"
+  ui_kv "ホスト" "$host  ${C_DIM}${INSTANCE_ID}  user ${SSH_USER}${C_RESET}"
+  echo ""
+
+  ui_head "1/4 元プロファイル $PROFILE_SRC で撤去する"
+  ui_text "撤去（SSM RunCommand）は強い権限の仕事です。調査用の一時キーには渡しません。"
+  check_source_profile
+  echo ""
+
+  ui_head "2/4 対象と SSM の管理状態"
+  local out state gone=0
+  if out=$(src ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+             --query 'Reservations[].Instances[].{id:InstanceId,state:State.Name}' 2>&1); then
+    state=$(jq -r '.[0].state // "terminated"' <<< "$out")
+  else
+    case "$out" in
+      *InvalidInstanceID.NotFound*|*InvalidInstanceID.Malformed*) state=terminated ;;
+      *) ui_raw "$out"; die "インスタンス $INSTANCE_ID を読めません。" ;;
+    esac
+  fi
+  if [ "$state" = terminated ]; then
+    gone=1
+    ui_warn "インスタンス $INSTANCE_ID はもうありません（terminated）。EC2 側の撤去とタグ外しは省き、記録だけ消します。"
+  else
+    ui_kv "インスタンス" "${INSTANCE_ID}  ${C_DIM}${state}${C_RESET}"
+    [ "$state" = running ] || die "インスタンスが running ではありません（${state}）。起動してから実行するか、撤去スクリプトを手で実行してください: $AWS_SURVEY_CMD ssh remove --print $host"
+    if ! ssm_online; then
+      ui_err "SSM の管理下にありません（PingStatus: ${SSM_PING:-なし}）"
+      ui_text "撤去は SSM RunCommand で行います。SSM を使えないなら、撤去スクリプトを書き出して root で手実行してください。"
+      also_cmd "$AWS_SURVEY_CMD ssh remove --print $host > remove-diag.sh" "撤去スクリプトを 1 本の bash として書き出します"
+      exit 1
+    fi
+    ui_ok "SSM 管理下（Online）  ${C_DIM}${SSM_PLATFORM}${C_RESET}"
+  fi
+  echo ""
+
+  ui_head "3/4 EC2 で撤去スクリプトを root 実行する（AWS-RunShellScript）"
+  if [ "$gone" -eq 1 ]; then
+    ui_skip "インスタンスが無いので省きます"
+  else
+    if ! send_and_wait "$script" "diag remove"; then
+      if [ -n "${RUN_STATUS:-}" ]; then
+        ui_err "撤去スクリプトが失敗しました（${RUN_STATUS}）"
+        [ -z "${RUN_STDOUT:-}" ] || ui_raw "$(printf '%s\n' "$RUN_STDOUT" | tail -20)"
+        [ -z "${RUN_STDERR:-}" ] || ui_raw "$(printf '%s\n' "$RUN_STDERR" | tail -20)"
+        ui_text "撤去スクリプトは冪等です。原因を直して同じコマンドを実行すれば、残ったものだけ消して続きへ進みます。"
+      else
+        ui_err "RunCommand を送れませんでした"
+        ui_raw "$SEND_ERROR"
+      fi
+      die "タグと記録（environment.json・config・known_hosts）はそのままです。"
+    fi
+    if ! printf '%s\n' "$RUN_STDOUT" | grep -qx 'REMOVED clean'; then
+      ui_err "撤去スクリプトは終わりましたが、EC2 に残っているものがあります"
+      ui_raw "$(printf '%s\n' "$RUN_STDOUT" | grep -E '^(\[diag\]|REMOVED)' | tail -20)"
+      die "タグと記録はそのままです。残ったものを確かめて、同じコマンドをもう一度実行してください。"
+    fi
+    ui_ok "EC2 から撤去しました（REMOVED clean）"
+    ui_raw "$(printf '%s\n' "$RUN_STDOUT" | grep -E '^\[diag\]' | tail -12)"
+  fi
+  echo ""
+
+  ui_head "4/4 タグと記録"
+  if [ "$gone" -eq 1 ]; then
+    ui_skip "タグ diag:ssh=$SURVEY_NAME はインスタンスと一緒に消えています"
+  else
+    if ! out=$(src ec2 delete-tags --resources "$INSTANCE_ID" --tags "Key=diag:ssh,Value=$SURVEY_NAME" 2>&1); then
+      ui_raw "$out"
+      die "タグ diag:ssh=$SURVEY_NAME を外せませんでした。EC2 側の撤去は済んでいるので、同じコマンドをもう一度実行すればここからやり直せます。"
+    fi
+    ui_ok "タグを外しました: diag:ssh=$SURVEY_NAME"
+  fi
+  local tmp others
+  tmp=$(mktemp) || die "一時ファイルを作れません。"
+  jq --arg a "$host" 'del(.ssh.hosts[$a])' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE" \
+    || { rm -f "$tmp"; die "environment.json から消せませんでした。"; }
+  # 同じインスタンスを別の別名でも登録しているときは、known_hosts の行を残す
+  others=$(jq -r --arg id "$INSTANCE_ID" '.ssh.hosts | to_entries | map(select(.value.instance_id == $id)) | length' "$ENV_FILE")
+  [ "$others" -gt 0 ] || [ ! -f "$KNOWN_HOSTS" ] || write_known_hosts "$INSTANCE_ID" ""
+  write_ssh_config
+  ui_ok "environment.json・config・known_hosts から消しました: $host"
+  echo ""
+  local remaining
+  remaining=$(jq -r '.ssh.hosts | keys | join(" ")' "$ENV_FILE")
+  if [ -n "$remaining" ]; then
+    ui_kv "残っている登録" "$remaining"
+    next_cmd "$AWS_SURVEY_CMD ssh list" "登録済みホストと導入状態を確かめます"
+  else
+    ui_text "登録済みホストが無くなりました。鍵（${KEY}）は残しています（次の ssh setup がそのまま使います）。"
+    ui_text "ポリシー ${DIAG_POLICY_NAME} は調査用ロールに付いたままですが、タグ付きのインスタンスが無いので何も許しません。"
+    next_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めない一時キーを発行し直します（登録が無いときは ${DIAG_POLICY_NAME} を渡しません）"
+    if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
+      also_cmd "$AWS_SURVEY_CMD role --create" "ロールの状態を確かめます（登録が無いときは ${DIAG_POLICY_NAME} を付けず、付いているものは外しません）"
+      ui_text "ポリシーそのものを片付けるなら、元プロファイルで detach-role-policy（ロール ${ROLE_NAME}）してから delete-policy します: $DIAG_POLICY_ARN"
+    else
+      also_cmd "$AWS_SURVEY_CMD role --create" "管理者に渡した ${DIAG_POLICY_NAME} が要らなくなったことを伝えるために、ロールの状態を確かめます"
+    fi
+  fi
 }
 
 case "$SUB" in
   setup)  cmd_setup "$@" ;;
   list)   cmd_list "$@" ;;
   verify) cmd_verify "$@" ;;
-  rotate) not_implemented rotate "鍵の作り直しと再導入" ;;
-  remove) not_implemented remove "撤去" ;;
+  rotate) cmd_rotate "$@" ;;
+  remove) cmd_remove "$@" ;;
   -h|--help|help) usage ;;
   *) usage >&2; die "ssh の不明なサブコマンド: $SUB" ;;
 esac
