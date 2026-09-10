@@ -24,7 +24,20 @@ flowchart LR
     K --> C["調査用コンテナに ro マウント"]
 ```
 
-信頼ポリシーは `environment.json` の `auth.principal_arn` から生成し、`auth.mfa_required` が true なら `aws:MultiFactorAuthPresent` の条件を付けます。
+信頼ポリシー（調査用ロールを借りられる相手の名簿）は `environment.json` の `auth.principal_arn` から生成し、`auth.mfa_required` が true なら `aws:MultiFactorAuthPresent` の条件を付けます。
+Identity Center に MFA でログインしたセッションにもこの条件の値は付くので、条件を付けても借りられます。
+
+`aws-survey init` では、借りられる相手を次から選びます。
+
+| 選択肢 | `principal_arn` に入る値 | 借りられる人 |
+| --- | --- | --- |
+| 自分だけ（既定） | いまのログインの ARN（Identity Center ならセッションの ARN、IAM ユーザーならユーザーの ARN） | あなただけ |
+| 同じロールでログインした人なら誰でも | パス付きのロール ARN（Identity Center なら同じ権限セットでログインした人） | そのロールを借りている人全員 |
+| 手で入力 | 任意の ARN | その ARN が表す相手 |
+
+既にあるロールの信頼ポリシーと `principal_arn` の書き方が違っても、`principal_arn` の相手がその範囲に含まれていれば
+（例: 信頼ポリシーがロール ARN で、`principal_arn` がそのロールのセッション ARN）、`aws-survey role` は不足として扱いません。
+`aws-survey role --create` を実行すると、信頼ポリシーは `principal_arn` の書き方に書き換わります。
 
 削っている読み取り API は次のとおりです。すべて「読み取り」ですが、機密が出るか、実害があります。
 

@@ -491,6 +491,47 @@ choose_profile_menu() {
   trap - EXIT
 }
 
+# 3 問目。いまのログイン（sts get-caller-identity の Arn）から、調査用ロールを貸す相手を番号で選ばせて I_ARN に入れる。
+# 選択肢は「自分だけ」（その Arn）、ロールを借りてログインしているときの「同じロールでログインした人なら誰でも」
+# （パス付きのロール ARN）、「手で入力」。パス付きのロール ARN は iam get-role で取る。Arn から組み立てるとパスが落ち、
+# 信頼ポリシーが MalformedPolicyDocument で拒否される。読めなければその選択肢を出さない。
+PICK_MAX=0
+valid_pick() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le "$PICK_MAX" ]; }
+choose_principal() {
+  local me="$1" who="" role="" role_arn="" pick=""
+  local -a arns=()
+  case "$me" in
+    arn:*:sts::*:assumed-role/*/*) role=${me#*:assumed-role/}; who=${role#*/}; role=${role%%/*} ;;
+    arn:*:iam::*:user/*)           who="IAM ユーザー ${me##*/}" ;;
+    *) ask I_ARN "principal_arn" "$me" valid_arn; return 0 ;;
+  esac
+  ui_text "次から番号で選んでください。"
+  arns+=("$me")
+  ui_text "  1) 自分だけ（${who}）"
+  ui_text "     $me"
+  if [ -n "$role" ]; then
+    if role_arn=$(aws iam get-role --profile "$I_PROFILE" --role-name "$role" --query Role.Arn --output text 2>/dev/null) \
+       && valid_arn "$role_arn"; then
+      arns+=("$role_arn")
+      ui_text "  2) $(ui_role_audience "$role")"
+      ui_text "     $role_arn"
+    else
+      ui_text "  （ロール $role の ARN を読めないため、「同じロールでログインした人なら誰でも」は選べません）"
+    fi
+  fi
+  arns+=("")
+  ui_text "  ${#arns[@]}) ARN を手で入力する"
+  PICK_MAX=${#arns[@]}
+  ask pick "番号" "1" valid_pick
+  I_ARN=${arns[pick-1]}
+  if [ -z "$I_ARN" ]; then
+    ask I_ARN "principal_arn" "" valid_arn
+  else
+    ui_erase 1
+    ui_ok "principal_arn: ${C_BOLD}${I_ARN}${C_RESET}"
+  fi
+}
+
 default_name() {
   local b; b=$(basename "$AWS_SURVEY_DIR")
   if valid_name "$b"; then echo "$b"; else echo "survey"; fi
@@ -555,18 +596,18 @@ init_interactive() {
   choose_profile "$profiles"
 
   echo ""
-  ui_head "3/9 principal_arn"
-  ui_text "$I_PROFILE の実体（IAM ユーザーか SSO のロール）。信頼ポリシーに入ります。"
+  ui_head "3/9 principal_arn（調査用ロールを誰に貸すか）"
+  ui_text "調査用ロールの信頼ポリシー（そのロールを借りられる相手の名簿）に書く相手を決めます。"
   arn_def=""; acct_def=""
   if ident=$(aws sts get-caller-identity --profile "$I_PROFILE" --output json 2>/dev/null); then
     arn_def=$(printf '%s' "$ident" | jq -r '.Arn // empty')
     acct_def=$(printf '%s' "$ident" | jq -r '.Account // empty')
-    ui_kv "sts get-caller-identity" "$arn_def"
+    ui_kv "いまのログイン" "$arn_def"
   else
     ui_warn "$I_PROFILE で sts get-caller-identity が通りません（未ログインか期限切れ）。手で入力するか、"
     ui_text "別の端末でログインし直してから、もう一度 $CMD_NAME init を実行してください。"
   fi
-  ask I_ARN "principal_arn" "$arn_def" valid_arn
+  choose_principal "$arn_def"
 
   echo ""
   ui_head "4/9 account_id"

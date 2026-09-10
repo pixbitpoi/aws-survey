@@ -35,6 +35,15 @@ ui_status_done() { [ "$UI_TTY" = 1 ] || return 0; printf '\r\033[K'; }
 # 秒数を読める長さにする。ui_duration <秒>
 ui_duration() { [ "$1" -lt 60 ] && { echo "$1 秒"; return 0; }; echo "$(( $1 / 60 )) 分 $(( $1 % 60 )) 秒"; }
 
+# ロールの名前か ARN から「誰に貸すか」を言い換える。Identity Center のロール（AWSReservedSSO_<権限セット>_<識別子>）は権限セット名で言う
+ui_role_audience() {
+  local r="${1##*/}" ps
+  case "$r" in
+    AWSReservedSSO_*_*) ps=${r#AWSReservedSSO_}; echo "権限セット ${ps%_*} でログインした人なら誰でも" ;;
+    *) echo "ロール ${r} を借りている人なら誰でも" ;;
+  esac
+}
+
 # 表示幅。3 バイト文字（日本語）を幅 2 とみなす
 ui_width() {
   local chars bytes

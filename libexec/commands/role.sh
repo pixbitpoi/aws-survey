@@ -38,6 +38,31 @@ route_label() {
   esac
 }
 
+# セッション ARN（arn:…:sts::<ID>:assumed-role/<ロール>/<人>）から、借りているロールの名前を取り出す
+principal_role() { local r="${1#*:assumed-role/}"; printf '%s' "${r%%/*}"; }
+
+# principal_arn の相手が、信頼ポリシーの貸す相手（改行区切りの Principal.AWS）に含まれるか。
+#   exact   そのまま載っている
+#   role    principal_arn がセッション ARN で、借りているロール（パスは問わない）が載っている
+#   account principal_arn のアカウント全体（:root かアカウント ID）が載っている
+#   none    含まれない
+principal_coverage() {
+  local me="$1" list="$2" p part acct
+  if printf '%s\n' "$list" | grep -qxF -- "$me"; then echo exact; return 0; fi
+  part=${me#arn:}; part=${part%%:*}
+  acct=$(printf '%s' "$me" | cut -d: -f5)
+  case "$me" in
+    arn:*:sts::*:assumed-role/*/*)
+      while IFS= read -r p; do
+        case "$p" in
+          "arn:$part:iam::$acct:role/"*) [ "${p##*/}" != "$(principal_role "$me")" ] || { echo role; return 0; } ;;
+        esac
+      done <<< "$list" ;;
+  esac
+  if printf '%s\n' "$list" | grep -qxF -e "arn:$part:iam::$acct:root" -e "$acct"; then echo account; return 0; fi
+  echo none
+}
+
 # EC2 の中を調べるための顧客管理ポリシー。許すのは diag:ssh=<name> タグ付きインスタンスへの
 # AWS-StartSSHSession だけ。ssm:SendCommand（導入）は元プロファイルの仕事で、ここには足さない。
 # セッションの終了・再開は自分のセッション（ID が <ロールセッション名>-<乱数>）に限る。
@@ -149,13 +174,28 @@ if role_json=$(aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME
       *) shortfalls+=("EC2 の中を調べる権限（${DIAG_POLICY_NAME}）が付いていません") ;;
     esac
   fi
-  if [ -n "$PRINCIPAL_ARN" ] && ! echo "$role_json" | jq -e --arg p "$PRINCIPAL_ARN" \
-       '[.Role.AssumeRolePolicyDocument.Statement[] | select(.Effect=="Allow") | .Principal.AWS] | flatten | index($p) != null' >/dev/null 2>&1; then
-    shortfalls+=("信頼ポリシーに自分（${PRINCIPAL_ARN}）が入っていません")
+  # 貸す相手は文字の一致ではなく「principal_arn の相手が含まれるか」で見る。含まれていれば書き方の違いは不足にしない
+  trust_principals=$(echo "$role_json" | jq -r '[.Role.AssumeRolePolicyDocument.Statement[] | select(.Effect=="Allow")
+                       | .Principal | objects | .AWS // empty] | flatten | .[] | strings' 2>/dev/null)
+  if [ -n "$PRINCIPAL_ARN" ]; then
+    case "$(principal_coverage "$PRINCIPAL_ARN" "$trust_principals")" in
+      exact)
+        ui_ok "あなたはこのロールを借りられます（信頼ポリシーの貸す相手が environment.json と同じです）" ;;
+      role)
+        ui_ok "あなたはこのロールを借りられます"
+        ui_text "信頼ポリシーは「$(ui_role_audience "$(principal_role "$PRINCIPAL_ARN")")」に貸す書き方で、"
+        ui_text "environment.json の「自分だけ」より広い範囲です。このままでも使えます。"
+        ui_text "自分だけに絞るなら $AWS_SURVEY_CMD role --create で書き換えます。" ;;
+      account)
+        ui_ok "あなたはこのロールを借りられます"
+        ui_text "信頼ポリシーはアカウント全体に貸す書き方です。借りられるかは、あなた側の権限で決まります。" ;;
+      *)
+        shortfalls+=("信頼ポリシーの貸す相手に、あなた（${PRINCIPAL_ARN}）が入っていません。このままでは借りられません") ;;
+    esac
   fi
   if [ "$MFA_REQUIRED" = "true" ] && ! echo "$role_json" | jq -e \
        '[.Role.AssumeRolePolicyDocument.Statement[] | .Condition.Bool."aws:MultiFactorAuthPresent"] | index("true") != null' >/dev/null 2>&1; then
-    shortfalls+=("信頼ポリシーに MFA の条件がありません")
+    shortfalls+=("environment.json では MFA 必須ですが、信頼ポリシーに「MFA 済みの人だけ」という条件がありません")
   fi
   for sf in "${shortfalls[@]}"; do ui_warn "$sf"; done
 else
@@ -170,8 +210,13 @@ sim_src="$who"
 can_create=""
 case "$who" in
   *:assumed-role/*)
-    ui_warn "ログイン元がすでに借りたロールのため、シミュレーションの対象を特定できません。"
-    ui_text "判定は飛ばします。実際に $AWS_SURVEY_CMD role --create を試した結果で判断してください。"
+    # 借りたロールのセッションは simulate-principal-policy の対象に指定できない
+    if [ "$role_exists" -eq 1 ]; then
+      ui_skip "ロールはもうあるので、この確認は要りません"
+    else
+      ui_skip "この確認は飛ばします（ロールを借りた状態でログインしているため、確認する相手を指定できません）"
+      ui_text "作れるかどうかは、$AWS_SURVEY_CMD role --create を実際に試して判断してください。"
+    fi
     sim_src="" ;;
 esac
 if [ -n "$sim_src" ]; then
@@ -222,9 +267,9 @@ if [ "$DO_CREATE" -eq 0 ]; then
       next_cmd "$AWS_SURVEY_CMD credentials" "読み取り専用の一時キーを発行します"
     fi
   elif [ "$role_exists" -eq 1 ]; then
-    ui_warn "ロールはありますが、不足があります（上の ⚠）"
+    ui_warn "ロールはありますが、environment.json と合っていないところがあります（上の ⚠）"
     echo ""
-    next_cmd "$AWS_SURVEY_CMD role --create" "不足を補います（ReadOnlyAccess を付け、信頼ポリシーを environment.json の内容に合わせます）"
+    next_cmd "$AWS_SURVEY_CMD role --create" "合っていないところを直します（信頼ポリシーを environment.json の内容に書き換え、足りないポリシーを付けます。ロールは作り直しません）"
   else
     case "$can_create" in
       yes)

@@ -67,6 +67,16 @@
 「ロールの用意のしかた（自分で作る / 既存のロールを借りる / 管理者に信頼してもらう）」のように言い換え、
 値名は利用者が `environment.json` を手で直す場面でだけ添える。「次に打つコマンド」は `next_cmd` で、説明は「何をするか」を書く。
 
+## 信頼ポリシーの貸す相手（`principal_arn`）
+
+`init` の 3 問目は、いまのログイン（`sts get-caller-identity`）から「自分だけ」と、ロールを借りてログインしているときの
+「同じロールでログインした人なら誰でも」を番号の選択肢に出す（`choose_principal`）。後者のパス付きロール ARN は `iam get-role` で取る。
+セッション ARN から `arn:aws:iam::<ID>:role/<名前>` と組み立てるとパス（Identity Center なら `aws-reserved/sso.amazonaws.com/<region>/`）が落ち、
+信頼ポリシーが `MalformedPolicyDocument` で拒否される（2026-09-10 に実環境で発生）。
+`role` の判定は文字の一致ではなく「`principal_arn` の相手が貸す相手に含まれるか」で見る（`principal_coverage`）。
+含まれるが書き方が違うだけなら不足にしない。含まれないときと、MFA 必須なのに条件が無いときだけ不足にする。
+Identity Center に MFA でログインしたセッションには `aws:MultiFactorAuthPresent` が付く（2026-09-11 に実測。条件付きでも借りられる）。
+
 ## AWS の API に渡す文字列
 
 IAM の `--description` や `--role-session-name` に日本語を入れない。IAM は ASCII と Latin-1 しか受け付けず、

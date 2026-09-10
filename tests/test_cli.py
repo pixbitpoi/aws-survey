@@ -39,14 +39,21 @@ elif argv[:2] == ["configure", "get"]:
     else:
         sys.exit(1)
 elif "get-caller-identity" in argv:
-    print("arn:aws:iam::000000000000:user/fake" if "--query" in argv
-          else json.dumps({"Arn": "arn:aws:iam::000000000000:user/fake", "Account": "000000000000"}))
+    arn = os.environ.get("FAKE_CALLER_ARN", "arn:aws:iam::000000000000:user/fake")
+    print(arn if "--query" in argv else json.dumps({"Arn": arn, "Account": "000000000000"}))
 elif "get-role" in argv:
-    if "json" in argv:
+    name = argv[argv.index("--role-name") + 1] if "--role-name" in argv else ""
+    if name.startswith("AWSReservedSSO_"):
+        if os.environ.get("FAKE_NO_GET_ROLE"):
+            sys.exit(254)
+        print("arn:aws:iam::000000000000:role/aws-reserved/sso.amazonaws.com/test-region/" + name)
+    elif "json" in argv:
+        statement = {"Effect": "Allow", "Action": "sts:AssumeRole",
+                     "Principal": {"AWS": os.environ.get("FAKE_TRUST_PRINCIPAL", "arn:aws:iam::000000000000:user/fake")}}
+        if not os.environ.get("FAKE_TRUST_NO_MFA"):
+            statement["Condition"] = {"Bool": {"aws:MultiFactorAuthPresent": "true"}}
         print(json.dumps({"Role": {"Arn": "arn:aws:iam::000000000000:role/fake-role", "MaxSessionDuration": 3600,
-                                   "AssumeRolePolicyDocument": {"Statement": [{"Effect": "Allow",
-                                       "Principal": {"AWS": "arn:aws:iam::000000000000:user/fake"}, "Action": "sts:AssumeRole",
-                                       "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"}}}]}}}))
+                                   "AssumeRolePolicyDocument": {"Statement": [statement]}}}))
     else:
         print("arn:aws:iam::000000000000:role/fake-role")
 elif argv[:2] == ["iam", "list-attached-role-policies"]:
@@ -67,6 +74,11 @@ import json, os, sys
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps(["docker"] + sys.argv[1:]) + "\\n")
 '''
+
+# Identity Center でログインしたときの身元と、その権限セットのロール（パス付き）
+SSO_CALLER = 'arn:aws:sts::000000000000:assumed-role/AWSReservedSSO_AdministratorAccess_0123456789abcdef/alice'
+SSO_ROLE = ('arn:aws:iam::000000000000:role/aws-reserved/sso.amazonaws.com/test-region/'
+            'AWSReservedSSO_AdministratorAccess_0123456789abcdef')
 
 
 def iso(dt):
@@ -527,6 +539,40 @@ class Init(CliCase):
         self.assertEqual(len(sts), 1)
         self.assertIn('sso-prof', sts[0])
 
+    def init_sso(self, pick, *typed, **extra):
+        # name, profile(2=sso-prof), 貸す相手の番号, [手入力の ARN], account, mfa, refresh, region, duration, role
+        answers = ['', '2', pick, *typed, '', '', '', '', '3600', '']
+        return self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_ARN=SSO_CALLER, **extra)
+
+    def test_interactive_sso_defaults_to_only_me(self):
+        result = self.init_sso('')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1) 自分だけ（alice）', result.stdout)
+        self.assertIn('2) 権限セット AdministratorAccess でログインした人なら誰でも', result.stdout)
+        self.assertIn('3) ARN を手で入力する', result.stdout)
+        config = json.loads((self.target / 'environment.json').read_text())
+        self.assertEqual(config['auth']['principal_arn'], SSO_CALLER)
+        self.assertEqual(config['auth']['mfa_required'], False)
+
+    def test_interactive_sso_can_lend_to_the_whole_permission_set(self):
+        result = self.init_sso('2')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = json.loads((self.target / 'environment.json').read_text())
+        # パス付きのロール ARN は組み立てずに get-role で取る（パスが落ちると信頼ポリシーが拒否される）
+        self.assertEqual(config['auth']['principal_arn'], SSO_ROLE)
+        get_role = [c for c in self.calls() if 'get-role' in c]
+        self.assertEqual(len(get_role), 1)
+        self.assertIn('sso-prof', get_role[0])
+
+    def test_interactive_sso_without_get_role_offers_only_me_or_typing(self):
+        result = self.init_sso('2', 'arn:aws:iam::000000000000:role/typed', FAKE_NO_GET_ROLE='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ARN を読めないため', result.stdout)
+        self.assertNotIn('権限セット', result.stdout)
+        self.assertIn('2) ARN を手で入力する', result.stdout)
+        config = json.loads((self.target / 'environment.json').read_text())
+        self.assertEqual(config['auth']['principal_arn'], 'arn:aws:iam::000000000000:role/typed')
+
     def test_interactive_hides_base_profile_when_mfa_destination_exists(self):
         # 一覧に <名>-mfa があるとき、元の <名> は候補に出ず、番号は残った候補で振り直される
         profiles = 'fake-src\\nsso-prof\\nbase\\nbase-mfa'
@@ -647,15 +693,50 @@ class Role(CliCase):
         self.assertIn('aws-survey credentials', result.stdout)
         self.assertNotIn('role --create', result.stdout)
 
-    def test_existing_role_with_wrong_principal_lists_shortfall(self):
+    def use_principal(self, principal):
         self.write_environment()
         config = json.loads((self.target / 'environment.json').read_text())
-        config['auth']['principal_arn'] = 'arn:aws:iam::000000000000:user/someone-else'
+        config['auth']['principal_arn'] = principal
         (self.target / 'environment.json').write_text(json.dumps(config))
+
+    def test_existing_role_with_wrong_principal_lists_shortfall(self):
+        self.use_principal('arn:aws:iam::000000000000:user/someone-else')
         result = self.run_cli('role')
-        self.assertIn('信頼ポリシーに自分', result.stdout)
-        self.assertIn('不足があります', result.stdout)
+        self.assertIn('信頼ポリシーの貸す相手に、あなた', result.stdout)
+        self.assertIn('このままでは借りられません', result.stdout)
+        self.assertIn('合っていないところがあります', result.stdout)
         self.assertIn('aws-survey role --create', result.stdout)
+
+    def test_role_lent_to_the_permission_set_covers_my_session(self):
+        # 信頼ポリシーはロールの形、environment.json はセッションの形。書き方は違うが借りられるので不足にしない
+        self.use_principal(SSO_CALLER)
+        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=SSO_ROLE)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('あなたはこのロールを借りられます', result.stdout)
+        self.assertIn('権限セット AdministratorAccess でログインした人なら誰でも', result.stdout)
+        self.assertIn('ロールはもうあるので、この確認は要りません', result.stdout)
+        self.assertIn('ロールは用意できています', result.stdout)
+        self.assertNotIn('⚠', result.stdout)
+
+    def test_role_lent_to_another_permission_set_does_not_cover_me(self):
+        self.use_principal(SSO_CALLER)
+        other = SSO_ROLE.replace('AdministratorAccess', 'ViewOnlyAccess')
+        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=other)
+        self.assertIn('このままでは借りられません', result.stdout)
+
+    def test_role_lent_to_the_account_covers_me(self):
+        self.write_environment()
+        result = self.run_cli('role', FAKE_TRUST_PRINCIPAL='arn:aws:iam::000000000000:root')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('アカウント全体に貸す書き方', result.stdout)
+        self.assertNotIn('⚠', result.stdout)
+
+    def test_missing_mfa_condition_is_still_a_shortfall(self):
+        self.use_principal(SSO_CALLER)
+        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=SSO_ROLE, FAKE_TRUST_NO_MFA='1')
+        self.assertIn('あなたはこのロールを借りられます', result.stdout)
+        self.assertIn('「MFA 済みの人だけ」という条件がありません', result.stdout)
+        self.assertIn('合っていないところがあります', result.stdout)
 
 
 class Chain(CliCase):
