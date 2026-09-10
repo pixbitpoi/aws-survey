@@ -28,7 +28,7 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 | `container/**`・`Dockerfile` | `.agents/rules/container.md` |
 | `bin/aws-survey`・`libexec/**`・`templates/`・接続設定 | `.agents/rules/credentials.md` |
 | `libexec/ec2/**`（EC2 に置く診断ゲートウェイと導入スクリプトの雛形）・`libexec/commands/ssh.sh`（SSM 経由の導入と登録、`ssh verify`） | `docs/design-ec2-ssh.md` の第 2 節（名前）・第 4 節（セットアップと EC2 に作るもの。SSM の上限の実測値は第 4.3 節）・第 5 節（仕様）。実装の段階と未確認事項は第 10 節。偽の `aws` での検証は `tests/test_ssh_setup.py`、`ssh verify` は偽の `docker` で `tests/test_ssh_install.py` |
-| `container/ec2`（調査コンテナの `ec2` ラッパーと `--selftest`）・フックの `ec2` / `ssh` の判定・`Dockerfile` の session-manager-plugin | `.agents/rules/container.md` に加えて `docs/design-ec2-ssh.md` の第 7 節（自己診断の項目と SSM セッションの終わり方）・第 8 節（コンテナ側の部品とフックの判定）。通る例・落ちる例は `tests/test_guards.py`、配置は `tests/test_launcher.py` |
+| `container/ec2`（調査コンテナの `ec2` ラッパーと `--selftest`）・フックの `ec2` / `ssh` の判定・`Dockerfile` の session-manager-plugin・`container/method/06_EC2の中を調べる.md`・`survey-status` の登録済みホスト表示 | `.agents/rules/container.md` に加えて `docs/design-ec2-ssh.md` の第 7 節（自己診断の項目と SSM セッションの終わり方）・第 8 節（コンテナ側の部品とフックの判定）。通る例・落ちる例は `tests/test_guards.py`、配置は `tests/test_launcher.py`。`method/06` はゲートウェイの動詞（第 5 節）と食い違わせない |
 | `diag-ssh-<name>` ポリシー（`role.sh` の作成・アタッチ、`credentials.sh` の `--policy-arns`、`verify.sh` の 6・7 項目目） | `.agents/rules/credentials.md` に加えて `docs/design-ec2-ssh.md` の第 6 節（ポリシーの内容と `PackedPolicySize` の実測）・第 7 節（検証）。偽の `aws` での検証は `tests/test_ec2_iam.py` |
 
 上の規則は新規ファイルにも適用する。`.agents/rules/` はどのエージェントも自動では読み込まない。この表に従って読む。

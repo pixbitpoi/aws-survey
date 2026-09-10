@@ -110,7 +110,8 @@ README を表示するコマンドは無く、`brew home` は formula の `homep
 6. 入れた実行ファイルで通しを確認する（実 AWS と Docker が要る）。空のフォルダで
    `aws-survey` → `init` → `role --create` → `credentials` → `verify` → `run` まで進むこと、
    `aws-survey status` の「本体」が `libexec` を指すことを見る。EC2 の中を調べる機能を出すときは、
-   `ssh setup` → `role --create` → `credentials` → `ssh verify <host>` も見る（SSM 管理下の EC2 が要る）。
+   `ssh setup` → `role --create` → `credentials` → `ssh verify <host>` も見て、`run` のコンテナの `survey-status` に
+   登録済みホストが出ることを確かめる（SSM 管理下の EC2 が要る）。
 
 開発版は `brew install --HEAD pixbitpoi/tap/aws-survey` で入る。formula の確認に使う。
 

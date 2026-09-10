@@ -1,8 +1,8 @@
 # 設計: EC2 の中を調べる（SSH over SSM + 診断ゲートウェイ）
 
 調査コンテナのエージェントが、対象 EC2 インスタンスの OS 内部（ログ・サービス状態・リソース状況）を
-調べられるようにする機能の設計。第 10 節の第 5 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`、
-調査コンテナの `ec2` ラッパーとフック、`aws-survey ssh verify`）。文書（`method/06`・`survey-status`・`security.md`・`README.md`）は第 6 段で、
+調べられるようにする機能の設計。第 10 節の第 6 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`、
+調査コンテナの `ec2` ラッパーとフック、`aws-survey ssh verify`、文書と `survey-status`）。
 `rotate` / `remove` は未実装。
 
 ## 1. 目標と方針
@@ -452,6 +452,13 @@ API が通ってプラグインの探索まで進んだ。
 `ssm:DescribeSessions` は `ReadOnlyAccess` に、`TerminateSession` は `diag-ssh-<name>` の自分の接頭辞にあり、一時キーで通る。
 `ssh verify` は自己診断のあと、元プロファイルが使えれば SSM 側にもセッションが残っていないことを見る。
 
+EC2 側の sshd からも切る案（検討のみ、未実施）。`Match User` ブロックに `ClientAliveInterval 15` と `ClientAliveCountMax 3` を置くと、
+クライアント側の `ssh` が先に消えて応答が無くなった接続を sshd が 45 秒ほどで閉じ、それを受けて SSM のセッションも終わる
+（正常経路と同じ「EC2 側が閉じて終わる」形に乗る）。`ec2` ラッパーの後片付けと重ねる二層目になり、ラッパーが動かなかった場合
+（コンテナごと落ちた、`describe-sessions` が失敗した）にも 10 分の放置を短くできる。ただし導入スクリプト（`libexec/ec2/install.sh.tmpl`）の
+変更で、登録済みホスト全部に再導入（冪等）が要る。コンテナ側の `config` にある `ServerAliveInterval 15` は逆方向（クライアントがサーバの無応答を検知する）で、
+この問題には効かない。`rotate` / `remove` を足す段で、再導入の機会と一緒に入れるのがよい。
+
 ## 8. 調査コンテナ側
 
 ### 8.1 追加する部品
@@ -521,7 +528,10 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
    `ssh verify` の自己診断 18 項目が通過、終了後に SSM のセッションが残らないことを確認。異常終了時にセッションが残る挙動と
    その対処は §7）。フックの通る例・落ちる例と `ec2` ラッパーの引数の渡し方は `tests/test_guards.py`、イメージへの配置は
    `tests/test_launcher.py`、`ssh verify` の呼び出しは偽の `docker` で `tests/test_ssh_install.py`。
-6. `method/06`、`survey-status`、`security.md`、`README.md`。
+6. `method/06`、`survey-status`、`security.md`、`README.md`。**済**（2026-09-10。`aws-survey run` のコンテナで `survey-status` に
+   登録済みホストが出ること（端末では装飾付き、端末でないときは素の文字列、接続設定の無い対象では何も出ない）、
+   調査コンテナの Claude Code に `method/06` を読ませて `ec2 <host>` の `help` / `uptime` / `services` / `ls` / `tail` を `out/<フェーズ>/raw/` に
+   保存させ、監査ログに `ALLOW` が残り、`out/_環境/00_動作確認.md` に記録が書かれ、終了後に SSM のセッションが残らないことを確認）。
 
 実環境で未確認のまま完了扱いにしない項目と、いまの状態。
 
@@ -533,4 +543,6 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 | AL2 の `requiretty` | **確認済**（2026-09-10、一時的に作った AL2 の実機。作業後に終了）。素の AL2 の `/etc/sudoers` に `requiretty` は無い。全体に `Defaults requiretty` を足しても（`/etc/sudoers.d/` と `/etc/sudoers` 先頭の両方で試した）、`Defaults:<user> !requiretty` を持つログインユーザーからの `sudo diag-root` は tty 無しで通り、それを持たない対照ユーザーは「you must have a tty」で拒否された。確認は sshd と同じく sudo を経由せず `runuser` でログインユーザーになって行った（root からの `sudo -u <user>` は外側の sudo が requiretty に当たる） |
 | AL2 の Python 3.7 | **確認済**（同上）。ゲートウェイが `shlex.join`（3.8 以降）を使っていて自己確認で落ちたので `shlex.quote` の連結に直し、AL2 で導入と root 段（`dmesg` / `log`）が動くこと、`tests/test_gateway.py` が Python 3.7 でも通ることを見た |
 | session-manager-plugin の deb の arm64 対応 | **確認済**（2026-09-10、arm64 の Mac の Docker で `ubuntu_arm64` の deb を `node:22-bookworm-slim` に入れ、`aws ssm start-session` 経由の `ssh` が実 EC2 に届いた。x86_64 側は `ubuntu_64bit` に読み替えるだけで、未実行） |
-| ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。EC2 側の sshd に `ClientAliveInterval` を置いて sshd 側からも切る案は、導入スクリプトの変更になるので第 6 段以降で検討） |
+| ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。EC2 側の sshd に `ClientAliveInterval` を置いて sshd 側からも切る案は §7 に検討を書いた。導入スクリプトの変更になるので、`rotate` / `remove` の段で再導入と一緒に入れる） |
+| root 段の `log` 動詞（登録済みログ） | **実機では未確認**。`ssh verify` は登録済みログが無いホストでは `dmesg` で root 段を確かめて `log` を省略する。素の AL2023 には自動登録されるログが無く、`--log <名前>=<パス>` 付きで再導入（冪等）すれば見られる。動詞の解析と `--file` の照合は `tests/test_gateway.py` |
+| x86_64 の session-manager-plugin（`ubuntu_64bit`） | **未実行**。arm64 の `ubuntu_arm64` からアーキテクチャ名を読み替えるだけで、x86_64 の Mac では `aws-survey run` の初回ビルドで通る |

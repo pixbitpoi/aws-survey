@@ -7,6 +7,7 @@
 
 SESSION_FILE=/home/node/.aws-claude/session.json
 CRED_FILE=/home/node/.aws-claude/credentials
+SSH_CONFIG=/home/node/.aws-claude/ssh/config
 
 # プロファイル・リージョン・アカウント・フェーズ。資格情報があるときだけ最後に出す。
 show_context() {
@@ -15,6 +16,18 @@ show_context() {
   [ -n "$account" ] && line="$line ・ アカウント $account"
   [ -n "${SURVEY_PHASE_DIR:-}" ] && line="$line ・ フェーズ $SURVEY_PHASE_DIR"
   sui_text "$line"
+  show_hosts
+}
+
+# EC2 の中を調べられるホスト。接続設定（ro マウント）に Host があるときだけ出す。無い対象では何も出さない。
+show_hosts() {
+  local hosts
+  [ -f "$SSH_CONFIG" ] || return 0
+  hosts=$(awk '$1 == "Host" { print $2 }' "$SSH_CONFIG" 2>/dev/null | tr '\n' ' ')
+  hosts="${hosts% }"
+  [ -n "$hosts" ] || return 0
+  sui_line "EC2 の中を調べられるホスト: $hosts"
+  sui_note "ec2 <host> help で動詞の一覧。作法は method/06_EC2の中を調べる.md"
 }
 
 echo
