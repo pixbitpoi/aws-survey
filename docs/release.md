@@ -40,7 +40,7 @@ formula と `tests/test_distribution.py` の `INCLUDED_HIDDEN` を揃えるこ�
 | --- | --- |
 | `bin/aws-survey` | 入口。keg では `libexec/aws-survey` へ移され、`bin` には env ラッパーが置かれる |
 | `libexec/` | ホスト側の実装。各スクリプトと `session-guard.json`、EC2 へ導入する診断ゲートウェイと導入スクリプトの雛形（`ec2/`。`aws-survey ssh setup` が組み立てて SSM で送る。`--print` で書き出しだけもできる） |
-| `container/`・`Dockerfile` | 調査コンテナへ渡る資材と、そのビルド定義。ビルド文脈は `container/` |
+| `container/`・`Dockerfile` | 調査コンテナへ渡る資材と、そのビルド定義。ビルド文脈は `container/`。EC2 の中を調べる `ec2` ラッパー（`container/ec2`）と、その実体の openssh-client・session-manager-plugin はイメージに入るので、ホストには要らない |
 | `templates/` | `init` が使う `environment.json` の雛形 |
 
 | 入らないもの | 理由 |
@@ -74,6 +74,8 @@ README を表示するコマンドは無く、`brew home` は formula の `homep
 - AWS CLI v2 は `depends_on` にしない。公式インストーラーで入れている環境と二重になるため、caveats で案内する
   （[aws-login](https://github.com/pixbitpoi/aws-login) の formula と同じ扱い）。
 - Docker は cask なので `depends_on` にしない。有無は `aws-survey doctor` と引数なし実行が見る。
+- session-manager-plugin はホストに要らない。`aws-survey ssh verify` も調査コンテナの中から接続する。
+  ホスト側で要るのは `ssh-keygen`（`ssh setup` が鍵を作る。macOS に標準で入っている）だけ。
 
 ## 手順
 
@@ -107,7 +109,8 @@ README を表示するコマンドは無く、`brew home` は formula の `homep
 
 6. 入れた実行ファイルで通しを確認する（実 AWS と Docker が要る）。空のフォルダで
    `aws-survey` → `init` → `role --create` → `credentials` → `verify` → `run` まで進むこと、
-   `aws-survey status` の「本体」が `libexec` を指すことを見る。
+   `aws-survey status` の「本体」が `libexec` を指すことを見る。EC2 の中を調べる機能を出すときは、
+   `ssh setup` → `role --create` → `credentials` → `ssh verify <host>` も見る（SSM 管理下の EC2 が要る）。
 
 開発版は `brew install --HEAD pixbitpoi/tap/aws-survey` で入る。formula の確認に使う。
 

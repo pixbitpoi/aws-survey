@@ -3,6 +3,7 @@
     "defaultMode": "default",
     "allow": [
       "Bash(aws:*)",
+      "Bash(ec2:*)",
       "Bash(jq:*)",
       "Bash(survey-status:*)",
       "Bash(ls:*)",
@@ -32,6 +33,10 @@
       "Bash(wget:*)",
       "Bash(chmod:*)",
       "Bash(chown:*)",
+      "Bash(ssh:*)",
+      "Bash(scp:*)",
+      "Bash(sftp:*)",
+      "Bash(session-manager-plugin:*)",
       "Edit(//home/node/aws-survey/out/_環境/aws-audit.log)",
       "Read(//home/node/.aws-claude/**)",
       "Read(//home/node/aws-survey/.claude/**)",

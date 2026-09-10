@@ -6,6 +6,9 @@
 #   - aws を含むコマンドは「単独の aws コマンド」であることを必須にし、
 #     bash -c / python3 -c / パイプ / コマンド連結による迂回を封じる。
 #   - AWS 側のセッションポリシーと二重に、危険な読み取り API を塞ぐ。
+#   - EC2 の中を調べる入口は ec2 ラッパーだけ。ssh / scp / sftp / session-manager-plugin の
+#     直接実行は拒否し、ec2 は aws と同じ「単独コマンド・保存は > out/… だけ」の規則で通す。
+#     EC2 側の境界は IAM・sshd・ゲートウェイにあり、ここは事故防止の層。
 #
 # 終了コード: 0=許可, 2=拒否（stderr の内容が Claude に返る）
 
@@ -36,7 +39,8 @@ deny() {
 コマンド: $norm
 
 このセッションは AWS の読み取り専用調査に限定されています。
-・aws は単独で実行してください（パイプ・連結・$() は不可）
+・aws と ec2 は単独で実行してください（パイプ・連結・\$() は不可）
+・EC2 の中は ec2 <host> <動詞> [引数...] で調べます（ssh / scp / sftp の直接実行は不可）
 ・生の JSON を保存するときは次の形が使えます:
     aws ec2 describe-instances --max-items 100 > out/${PHASE}/raw/raw-ec2.json
   保存先は out/ 配下（サブフォルダ可・.. は不可）・拡張子は json / txt / csv のみです。
@@ -51,7 +55,7 @@ has() { printf '%s' "$norm" | grep -qE -- "$1"; }
 
 # ---- 1. 常に禁止（aws に言及していなくても） ----
 has '(^|[^[:alnum:]_./-])sudo([^[:alnum:]_-]|$)' && deny "sudo は使用できません"
-has '\.aws(-claude)?/(credentials|config)'        && deny "AWS 認証情報ファイルへのアクセスは禁止です"
+has '\.aws(-claude)?/(credentials|config|ssh)'    && deny "AWS 認証情報・SSH 鍵のファイルへのアクセスは禁止です"
 has 'aws-readonly-guard|settings\.local\.json|settings\.json' && deny "ガード設定そのものへの操作は禁止です"
 # 監査ログは、この環境自身が付ける記録。中から手を加えられないことが前提になっている。
 # 注意: 下の 2. の単語境界は「aws-audit.log」に掛からない（aws の直後がハイフンのため）。
@@ -60,12 +64,30 @@ has 'aws-audit' && deny "監査ログへの操作は禁止です"
 has 'AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|PROFILE|SHARED_CREDENTIALS_FILE|CONFIG_FILE)=' \
   && deny "AWS 認証関連の環境変数は変更できません"
 
-# ---- 2. aws に言及していなければ、通常の権限設定に委ねる ----
-if ! has '(^|[^[:alnum:]_-])(aws|awscli|boto3)([^[:alnum:]_-]|$)'; then
+# ---- 2. EC2 の中を調べる経路 ----
+# 入口は ec2 ラッパーだけ。ssh / scp / sftp / session-manager-plugin をコマンドの位置
+# （行頭・; & | ( ` $( の後ろ・env / exec / xargs / sh -c などの後ろ）に書いたものは拒否する。
+# 引数の中の語（grep の --pattern ssh など）までは見ない。ここは事故防止の層で、
+# 直接 ssh を打っても EC2 側ではゲートウェイしか動かない。
+Q="'\""  # 引用符 2 種（正規表現の文字クラスに入れる）
+CMDPOS="(^|[;&|(\`{]|\\\$\\(|(^|[[:space:]])(env|exec|xargs|nohup|nice|command|eval|time|then|do|else)[[:space:]]|(^|[[:space:]])(ba|z|da|k)?sh[[:space:]]+-c[[:space:]])[[:space:]]*[$Q]?[[:space:]]*"
+has "${CMDPOS}(ssh|scp|sftp|session-manager-plugin)([[:space:]]|$|[$Q])" \
+  && deny "ssh / scp / sftp / session-manager-plugin は直接実行できません。EC2 の中は ec2 <host> <動詞> で調べます（一覧: ec2 <host> help）"
+# ec2 は行頭に書いた単独コマンドだけ。他の位置に出てきたら迂回として拒否する（aws ec2 … は aws の規則が見る）。
+case "$norm" in
+  ec2|ec2\ *) EC2=1 ;;
+  *) EC2=0
+     if ! has '(^|[^[:alnum:]_-])aws([^[:alnum:]_-]|$)' && has "${CMDPOS}ec2([[:space:]]|$)"; then
+       deny "ec2 は単独のコマンドとしてのみ実行できます（bash -c / パイプ / 連結の経由は不可）"
+     fi ;;
+esac
+
+# ---- 3. aws にも ec2 にも言及していなければ、通常の権限設定に委ねる ----
+if [ "$EC2" -eq 0 ] && ! has '(^|[^[:alnum:]_-])(aws|awscli|boto3)([^[:alnum:]_-]|$)'; then
   exit 0
 fi
 
-# ---- 3. 以降は aws 関連。単独コマンドのみ許可 ----
+# ---- 4. 以降は aws / ec2 関連。単独コマンドのみ許可 ----
 # 例外として、末尾の「> out/.../名前.json」だけは通す。
 # 生の JSON をファイルに落とせないと、出力が必ずエージェントの文脈を経由してしまい
 # トークンを浪費するため。out/ 以外は root 所有で書き込めないので、書ける場所は増えない。
@@ -79,6 +101,18 @@ if [[ "$norm" =~ ^(.*[^[:space:]\>])[[:space:]]*\>[[:space:]]*(out/[^[:space:]\;
     *..*|*//*) deny "保存先のパスに .. や // は使えません" ;;
   esac
   body="${BASH_REMATCH[1]}"
+fi
+
+if [ "$EC2" -eq 1 ]; then
+  # ec2 <host> <動詞> [引数...]。動詞と引数の検証は EC2 側のゲートウェイが行う。ここでは形だけ見る。
+  printf '%s' "$body" | grep -qE -- '[;&|<>`]|\$\(' \
+    && deny "ec2 での連結・パイプ・リダイレクトは禁止です（保存は「> out/…/名前.txt」の形だけ使えます）"
+  case "$body" in
+    ec2\ --selftest*|ec2\ --list|ec2\ --help|ec2\ -h|ec2) log "ALLOW"; exit 0 ;;
+    ec2\ -*) deny "ec2 にオプションはありません（ec2 <host> <動詞> [引数...]）" ;;
+    ec2\ *\ *) log "ALLOW"; exit 0 ;;
+    *) deny "ec2 は ec2 <host> <動詞> [引数...] の形で実行します（一覧: ec2 <host> help）" ;;
+  esac
 fi
 
 printf '%s' "$body" | grep -qE -- '[;&|<>`]|\$\(' \
@@ -95,12 +129,12 @@ case "$svc" in
   --*) deny "グローバルオプションはサービス名の後ろに書いてください（例: aws ec2 describe-vpcs --region ...）" ;;
 esac
 
-# ---- 4. プロファイルの固定 ----
+# ---- 5. プロファイルの固定 ----
 if has '--profile' && ! has '--profile[ =]claude-ro([^[:alnum:]-]|$)'; then
   deny "--profile は claude-ro のみ指定できます"
 fi
 
-# ---- 5. 危険な読み取り API（セッションポリシーと二重の防御） ----
+# ---- 6. 危険な読み取り API（セッションポリシーと二重の防御） ----
 DANGER='get-secret-value|batch-get-secret-value'
 DANGER="$DANGER"'|get-parameter|get-parameters|get-parameters-by-path'
 DANGER="$DANGER"'|receive-message'
@@ -114,7 +148,7 @@ if printf '%s' "$op" | grep -qE "^($DANGER)$"; then
 fi
 [ "$svc" = "kms" ] && [ "$op" = "sign" ] && deny "kms sign は禁止です"
 
-# ---- 6. サービス個別の制限 ----
+# ---- 7. サービス個別の制限 ----
 case "$svc" in
   s3)
     [ "$op" = "ls" ] || deny "aws s3 は ls のみ許可です（cp/sync/mv/rm は不可）"
@@ -129,7 +163,7 @@ case "$svc" in
     deny "サービス名を指定してください" ;;
 esac
 
-# ---- 7. オペレーションは読み取り系の動詞のみ ----
+# ---- 8. オペレーションは読み取り系の動詞のみ ----
 if ! printf '%s' "$op" | grep -qE '^(describe|list|get|lookup|search|batch-get|batch-describe|estimate|validate|simulate|check|preview|view|test|generate)-'; then
   case "$op" in
     help) ;;

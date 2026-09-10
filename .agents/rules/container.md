@@ -49,7 +49,7 @@
 | --- | --- | --- |
 | `container/method/` | ディレクトリのマウント | その場で効く |
 | `container/instructions/survey-agents.md` と `survey-claude.md` | 単一ファイルのマウント | 再起動が要る。エディタがファイルを置き換えるとコンテナ側は古いまま |
-| `container/settings.json` / `codex/` / `hooks/` / `bashrc` / `survey-status` / `survey-ui.sh` | イメージに焼き込み | 再ビルドが要る（`aws-survey run` が毎回ビルドする） |
+| `container/settings.json` / `codex/` / `hooks/` / `bashrc` / `survey-status` / `survey-ui.sh` / `ec2` | イメージに焼き込み | 再ビルドが要る（`aws-survey run` が毎回ビルドする） |
 
 コンテナへ渡るものは `container/` だけではない。対象フォルダの `out/` はディレクトリのマウントなので
 双方向にその場で効き（目的と規則・システム概要を直せば調査エージェントがすぐ読む）、`environment.json` の
@@ -81,6 +81,8 @@
 Claude 側の 2 経路が揃っていることは `tests/test_guards.py` の `AuditLogPermissions` が確認する。
 
 - 共通の AWS 許可・拒否規則は `hooks/aws-readonly-guard.sh` に置く。Codex 側へ複製しない。
+  EC2 の中を調べる経路（`ec2` は単独コマンドだけ通す、`ssh` / `scp` / `sftp` / `session-manager-plugin` の直接実行は拒否）も同じ場所。
+  `ec2` ラッパー（`container/ec2`）はガードと同じく root 所有でイメージへ焼き込む。仕様と自己診断は `docs/design-ec2-ssh.md` の第 7・8 節。
 - Codex の対応範囲: 通常コマンドは単独実行で、引用符内の `jq` フィルタは使える。
   インタプリタや MCP ツールの追加は対応範囲外。`unified_exec` は無効のまま（理由は `codex/*.toml` のコメント）。
 - 管理設定・フックはイメージへ root 所有で焼き込む。マウントに移していないことは

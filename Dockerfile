@@ -1,6 +1,7 @@
 # AWS インフラ構成調査専用コンテナ
 #
-# 必要なのは AWS CLI・jq・Claude Code・Codex CLI。
+# 必要なのは AWS CLI・jq・Claude Code・Codex CLI。EC2 の中を調べる機能のために
+# openssh-client と session-manager-plugin（aws ssm start-session の実体）も入れる。
 #   - 非 root ユーザーで動作し、sudo は入れない
 #   - 設定とフックは root 所有にして、コンテナ内から書き換えられないようにする
 #
@@ -11,15 +12,23 @@ FROM node:22-bookworm-slim
 
 ARG AWSCLI_ARCH=aarch64
 
+# session-manager-plugin は AWS が deb で配る。アーキテクチャの名前が AWS CLI と違うので、ここで読み替える。
+# deb は依存パッケージを持たないので dpkg -i で入る。arm64 の deb は 2026-09-10 に arm64 の Mac で動作を確認した。
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl unzip jq git less python3 ripgrep \
+ && apt-get install -y --no-install-recommends ca-certificates curl unzip jq git less python3 ripgrep openssh-client \
  && curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${AWSCLI_ARCH}.zip" -o /tmp/awscliv2.zip \
  && unzip -q /tmp/awscliv2.zip -d /tmp \
  && /tmp/aws/install \
  && rm -rf /tmp/aws /tmp/awscliv2.zip \
+ && case "$AWSCLI_ARCH" in aarch64) smp=ubuntu_arm64 ;; x86_64) smp=ubuntu_64bit ;; *) echo "unknown arch $AWSCLI_ARCH" >&2; exit 1 ;; esac \
+ && curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/${smp}/session-manager-plugin.deb" -o /tmp/smp.deb \
+ && dpkg -i /tmp/smp.deb \
+ && rm -f /tmp/smp.deb \
  && apt-get purge -y --auto-remove unzip \
  && rm -rf /var/lib/apt/lists/* \
- && aws --version
+ && aws --version \
+ && session-manager-plugin --version \
+ && ssh -V
 
 # Codex はバージョンを固定する。ガードは Codex 固有の機能契約（allow_managed_hooks_only・
 # managed_dir・unified_exec）に乗っているため、勝手に上がるとフックが静かに外れうる。
@@ -61,11 +70,14 @@ COPY hooks/aws-readonly-guard.sh /etc/codex/hooks/aws-readonly-guard.sh
 COPY survey-status /usr/local/bin/survey-status
 COPY survey-ui.sh  /usr/local/lib/survey-ui.sh
 COPY bashrc        /home/node/.bashrc
+# ec2 ラッパー: 登録済み EC2 の診断ゲートウェイに 1 コマンドを送る唯一の入口。root 所有で焼き込む。
+# 鍵と接続設定（~/.aws-claude/ssh/）は一時キーと同じ読み取り専用マウントで届く。
+COPY ec2           /usr/local/bin/ec2
 RUN chown -R root:root /home/node/aws-survey \
  && chmod -R go-w      /home/node/aws-survey \
  && chmod 755          /home/node/aws-survey/.claude/hooks/aws-readonly-guard.sh \
  && chown node:node    /home/node/aws-survey/out \
- && chmod 755          /usr/local/bin/survey-status \
+ && chmod 755          /usr/local/bin/survey-status /usr/local/bin/ec2 \
  && chown node:node    /home/node/.bashrc
 
 # Claude Code の状態ディレクトリ。イメージ側で node 所有にしておかないと、

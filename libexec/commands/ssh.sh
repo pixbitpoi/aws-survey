@@ -6,7 +6,8 @@
 #                                   成功したら $AWS_DIR/ssh/{config,known_hosts} と environment.json の ssh.hosts に記録する
 #   aws-survey ssh setup --print [...]   導入スクリプト（root で実行する 1 本の bash）を標準出力に出す。案内は標準エラー
 #   aws-survey ssh list                  登録済みホストと導入状態（AWS に届けばインスタンスの状態とタグも）
-#   aws-survey ssh verify <host>         コンテナからの自己診断  （未実装）
+#   aws-survey ssh verify <host>         調査コンテナから ec2 --selftest <host> を打つ。通るもの・塞がっているもの・
+#                                   終了後に SSM セッションが残らないことを実際に接続して確かめる
 #   aws-survey ssh rotate                鍵の作り直しと再導入    （未実装）
 #   aws-survey ssh remove <host>         撤去                    （未実装）
 #
@@ -35,11 +36,11 @@ SSH_PACK="${AWS_SURVEY_SSH_PACK:-0}"
 
 die() { ui_die "$@"; }
 
-usage() { sed -n '4,11p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ---- 引数 ----
 SUB="${1:-}"; [ $# -gt 0 ] && shift
-[ -n "$SUB" ] || { usage >&2; die "サブコマンドを指定してください（setup <対象> / setup --print / list）。"; }
+[ -n "$SUB" ] || { usage >&2; die "サブコマンドを指定してください（setup <対象> / setup --print / list / verify <host>）。"; }
 
 TARGET=""; PRINT=0; USER_OPT=""; ALIAS_OPT=""; STRICT=false
 LOGS_JSON='{}'; DENY_JSON='[]'
@@ -424,7 +425,7 @@ cmd_setup() {
   ui_kv "config" "$SSH_CONFIG"
   ui_kv "known_hosts" "$KNOWN_HOSTS"
   echo ""
-  ui_text "調査コンテナからは ec2 $HOST_ALIAS <動詞> で使います（ラッパーは後続の段で入ります）。"
+  ui_text "調査コンテナからは ec2 $HOST_ALIAS <動詞> で使います（一覧: ec2 $HOST_ALIAS help）。"
   next_cmd "$AWS_SURVEY_CMD ssh list" "登録済みホストと導入状態を確かめます"
   if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
     also_cmd "$AWS_SURVEY_CMD role --create" "このインスタンスへの SSH 接続を許すポリシーを調査用ロールに付けます（初めての登録のとき）"
@@ -432,6 +433,7 @@ cmd_setup() {
     also_cmd "$AWS_SURVEY_CMD role --create" "SSH 接続を許すポリシーの JSON を表示します（管理者に付けてもらいます）"
   fi
   also_cmd "$AWS_SURVEY_CMD credentials" "その権限を含めて一時キーを発行し直し、$AWS_SURVEY_CMD verify で確かめます"
+  also_cmd "$AWS_SURVEY_CMD ssh verify $HOST_ALIAS" "一時キーを発行し直したあと、調査コンテナから実際に接続して確かめます"
 }
 
 cmd_setup_print() {
@@ -505,17 +507,107 @@ cmd_list() {
   ui_kv "known_hosts" "$([ -f "$KNOWN_HOSTS" ] && echo "$KNOWN_HOSTS" || echo "（無い）")"
 }
 
+# ---- verify ----
+# 調査コンテナのイメージ（aws-survey run と同じもの）を用意し、一時キーと鍵を読み取り専用で渡して
+# ec2 --selftest <host> を打つ。ホストの Mac に session-manager-plugin は要らない。
+# 中の判定（ゲートウェイの拒否・sshd の制限・セッションの後片付け）はラッパーが持ち、ここは結果を読むだけ。
+# 終わったら元プロファイルが使えるときだけ、SSM 側にセッションが残っていないことをもう一度見る。
+cmd_verify() {
+  [ $# -eq 1 ] || die "verify には <host>（ssh list に出る別名）を 1 つ指定してください。"
+  local host="$1" id user
+  id=$(jq -r --arg a "$host" '.ssh.hosts[$a].instance_id // empty' "$ENV_FILE")
+  [ -n "$id" ] || die "未登録のホストです: ${host}（登録済み: ${SSH_HOSTS:-なし}）"
+  user=$(jq -r --arg a "$host" '.ssh.hosts[$a].user // empty' "$ENV_FILE")
+  ui_title "aws-survey ssh verify"
+  ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
+  ui_kv "ホスト" "$host  ${C_DIM}${id}  user ${user:-$SSH_USER}${C_RESET}"
+  ui_text "調査コンテナから実際に接続し、通るもの・塞がっているもの・終了後にセッションが残らないことを確かめます。"
+  echo ""
+
+  ui_head "1/3 一時キーと鍵"
+  [ -f "$AWS_DIR/credentials" ] || { ui_err "一時キーがありません"; next_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めて一時キーを発行します"; exit 1; }
+  [ -f "$SSH_CONFIG" ] && [ -f "$KEY" ] || die "接続設定か鍵がありません（${SSH_DIR}）。$AWS_SURVEY_CMD ssh setup で作られます。"
+  local exp now
+  exp=$(jq -r '.expiration // empty' "$AWS_DIR/session.json" 2>/dev/null)
+  if [ -n "$exp" ]; then
+    now=$(date -u +%Y-%m-%dT%H:%M:%S)
+    if [[ "${exp:0:19}" < "$now" ]]; then
+      ui_err "一時キーは期限切れです（${exp}）"
+      next_cmd "$AWS_SURVEY_CMD credentials" "一時キーを発行し直します"
+      exit 1
+    fi
+    ui_ok "一時キー ${C_DIM}（$exp まで）${C_RESET}"
+  else
+    ui_ok "一時キー ${C_DIM}（期限は不明）${C_RESET}"
+  fi
+  ui_ok "鍵と接続設定 ${C_DIM}$SSH_DIR${C_RESET}"
+  echo ""
+
+  ui_head "2/3 調査コンテナのイメージを用意する"
+  command -v docker >/dev/null || die "docker コマンドが見つかりません。"
+  local arch awsarch image out
+  arch=$(uname -m)
+  case "$arch" in
+    arm64|aarch64) awsarch=aarch64 ;;
+    x86_64|amd64)  awsarch=x86_64  ;;
+    *) die "未対応のアーキテクチャ: $arch" ;;
+  esac
+  image="${SURVEY_NAME}:latest"
+  ui_status "docker build（初回は数分かかります）…"
+  if ! out=$(docker build -q --build-arg "AWSCLI_ARCH=$awsarch" -t "$image" -f "$AWS_SURVEY_HOME/Dockerfile" "$AWS_SURVEY_HOME/container" 2>&1); then
+    ui_status_done
+    ui_err "イメージのビルドに失敗しました"
+    ui_raw "$(printf '%s\n' "$out" | tail -20)"
+    exit 1
+  fi
+  ui_status_done
+  ui_ok "イメージ $image ${C_DIM}（${awsarch}）${C_RESET}"
+  echo ""
+
+  ui_head "3/3 コンテナから ec2 --selftest $host を打つ"
+  local rc=0
+  docker run --rm \
+    -v "$AWS_DIR:/home/node/.aws-claude:ro" \
+    -e TZ=Asia/Tokyo \
+    -e "AWS_DEFAULT_REGION=$REGION" \
+    "$image" ec2 --selftest "$host" 2>&1 | sed 's/^/    /' || rc=${PIPESTATUS[0]}
+  echo ""
+  # 元プロファイルで読めるなら、SSM 側にこの対象へのセッションが残っていないことをもう一度見る
+  if command -v aws >/dev/null && aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --output text >/dev/null 2>&1; then
+    sleep 2
+    out=$(aws --profile "$PROFILE_SRC" --region "$REGION" --output text ssm describe-sessions --state Active \
+            --filters "key=Target,value=$id" \
+            --query "Sessions[?starts_with(SessionId, \`${SESSION_NAME_PREFIX}-\`)].[SessionId, StartDate]" 2>/dev/null) || out=''
+    if [ -z "$out" ]; then
+      ui_ok "SSM のセッションは残っていません（元プロファイルで確認）"
+    else
+      ui_err "SSM のセッションが残っています"
+      ui_raw "$out"
+      rc=1
+    fi
+  else
+    ui_skip "元プロファイル $PROFILE_SRC が使えないため、SSM 側のセッションの確認は省きました"
+  fi
+  echo ""
+  if [ "$rc" -eq 0 ]; then
+    ui_ok "検証が通りました。調査コンテナからは ec2 $host <動詞> で使えます（一覧: ec2 $host help）"
+  else
+    ui_err "検証に失敗した項目があります（上の ✗ を見てください）"
+  fi
+  return "$rc"
+}
+
 not_implemented() {
   ui_title "aws-survey ssh $1"
   ui_warn "$2 はまだ実装されていません。"
-  ui_text "いま使えるのは $AWS_SURVEY_CMD ssh setup（導入）・setup --print（スクリプトの書き出し）・list（一覧）です。"
+  ui_text "いま使えるのは $AWS_SURVEY_CMD ssh setup（導入）・setup --print（スクリプトの書き出し）・list（一覧）・verify（検証）です。"
   exit 1
 }
 
 case "$SUB" in
   setup)  cmd_setup "$@" ;;
   list)   cmd_list "$@" ;;
-  verify) not_implemented verify "コンテナからの自己診断" ;;
+  verify) cmd_verify "$@" ;;
   rotate) not_implemented rotate "鍵の作り直しと再導入" ;;
   remove) not_implemented remove "撤去" ;;
   -h|--help|help) usage ;;

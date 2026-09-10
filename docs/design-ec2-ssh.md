@@ -1,8 +1,9 @@
 # 設計: EC2 の中を調べる（SSH over SSM + 診断ゲートウェイ）
 
 調査コンテナのエージェントが、対象 EC2 インスタンスの OS 内部（ログ・サービス状態・リソース状況）を
-調べられるようにする機能の設計。第 10 節の第 4 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`）。
-コンテナ側・文書は未実装で、実装後は `security.md` と `README.md` に反映する。
+調べられるようにする機能の設計。第 10 節の第 5 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`、
+調査コンテナの `ec2` ラッパーとフック、`aws-survey ssh verify`）。文書（`method/06`・`survey-status`・`security.md`・`README.md`）は第 6 段で、
+`rotate` / `remove` は未実装。
 
 ## 1. 目標と方針
 
@@ -423,15 +424,33 @@ API の結果だけを見る（万一許可されていても CLI がセッシ�
 API が通ってプラグインの探索まで進んだ。
 
 `aws-survey ssh verify <host>` は SSH 側の検証で、`docker run ... ec2 --selftest <host>` としてコンテナから打つ
-（ホストの Mac に session-manager-plugin を入れなくて済む）。確認するもの。
+（ホストの Mac に session-manager-plugin を入れなくて済む）。イメージは `run` と同じ Dockerfile から作り、渡すのは
+一時キーと鍵の読み取り専用マウントとリージョンだけ（`out/` も指示書も渡さない）。自己診断が確認するもの。
 
 - `ec2 <host> uptime` が通る
-- `ssh <host> bash`、`ssh <host> 'uptime; id'`、`ssh <host> 'cat /etc/passwd'`、`ssh -t <host>`、`ssh -L`、`sftp <host>` が拒否される
-- `ec2 <host> cat /etc/shadow` が OS 権限で失敗し、`ec2 <host> cat /etc/ssh/sshd_config` が拒否パターンで失敗する
-- `ec2 <host> ls /home/<user>/.ssh` は一覧が出るが、`cat` すると拒否される
-- `ec2 <host> log messages --tail 3` が root 段で読める（登録が効いている）
-- `ec2 <host> proc 1 environ` が拒否される
-- `--strict` のホストでは `ec2 <host> cat /etc/hosts` が拒否される
+- `ec2 <host> ls /home/<user>/.ssh` は一覧が出るが、`authorized_keys` を `cat` すると拒否パターンで落ちる
+- root 読み取り段が動く: 登録済みログがあれば `log <名前> --tail 3`、無いホストでは `dmesg --lines 3`
+  （Amazon Linux 2023 の素の状態には `/var/log/messages` が無く、自動登録されるログが無い）
+- `cat /etc/hosts` が読める。`--strict` のホストでは strict の理由で拒否される
+- ゲートウェイの拒否: `cat /etc/ssh/sshd_config`（拒否パターン）、`proc 1 environ`、未知の動詞 `bash`、
+  `'uptime; id'`（`uptime;` という未知の動詞になる）、`cat /etc/shadow`。加えて `stat /etc/shadow` で OS の権限
+  （`0000`）を見る
+- 直接の `ssh` でもゲートウェイしか動かない: `ssh <host> bash`、`ssh <host> 'uptime; id'` が `denied:` で終わる。
+  `ssh -tt` は pty を割り当てられない（PermitTTY no）。`ssh -R` と `ssh -W`（`-L` と同じ direct-tcpip）は拒否される
+  （DisableForwarding yes）。`sftp <host>` は使えない（サブシステム要求も ForceCommand に置き換わる）
+- 終わったあとに SSM のセッションが残っていない（下の「セッションの終わり方」）
+
+`ssh <host> 'cat /etc/passwd'` のような「直接の `ssh` に読める内容を頼む」形は、EC2 側では `ec2` 経由と同じ扱いになる
+（`/etc/passwd` は一般読み取り段で読める）。これを止めるのはコンテナのフック（§8.2）で、`tests/test_guards.py` が見る。
+
+**セッションの終わり方**（2026-09-10 の実測）。SSM のセッションは、ゲートウェイが終わって EC2 側の sshd が接続を閉じることで
+終わる（正常経路は 1 秒ほどで `Terminated`）。session-manager-plugin は stdio モード（`AWS-StartSSHSession`）では自分から
+`TerminateSession` を呼ばず、標準入力が閉じても SIGHUP を受けても呼ばない。そのため `ssh` が接続の段階で異常終了したとき
+（終了コード 255。転送の拒否・pty の拒否・鍵の不一致・切断など）は、セッションが `Connected` のまま残る。放置しても 10 分ほどで
+サービス側が終了させるが、`ec2` ラッパーは 255 で終わったときに、自分（同じ一時キー = `Owner`）がその対象に開始時刻の
+60 秒前以降に開いた `Active` なセッションを `describe-sessions` で探して `terminate-session` する（`Terminating` 中のものは数えない）。
+`ssm:DescribeSessions` は `ReadOnlyAccess` に、`TerminateSession` は `diag-ssh-<name>` の自分の接頭辞にあり、一時キーで通る。
+`ssh verify` は自己診断のあと、元プロファイルが使えれば SSM 側にもセッションが残っていないことを見る。
 
 ## 8. 調査コンテナ側
 
@@ -439,9 +458,9 @@ API が通ってプラグインの探索まで進んだ。
 
 | 部品 | 置き場 | 役割 |
 | --- | --- | --- |
-| `session-manager-plugin` と `openssh-client` | `Dockerfile` | `aws ssm start-session` の実体。AWS の deb を arch 別に入れる |
-| `ec2` ラッパー | `container/ec2` → `/usr/local/bin/ec2`（root 所有） | `ssh -F ~/.aws-claude/ssh/config -- <host> <argv>` を組む。オプションは一切受け取らず、`<host>` は config の `Host` と照合 |
-| フックの追加 | `container/hooks/aws-readonly-guard.sh` | `ssh` / `scp` / `sftp` / `session-manager-plugin` の直接実行を拒否。`ec2 ` で始まる単独コマンドは、`aws` と同じ「`> out/…` だけ許す」規則で通す。監査ログに記録 |
+| `session-manager-plugin` と `openssh-client` | `Dockerfile` | `aws ssm start-session` の実体。AWS の deb を arch 別に入れる（`AWSCLI_ARCH` の `aarch64` → `ubuntu_arm64`、`x86_64` → `ubuntu_64bit`。deb に依存パッケージは無く `dpkg -i` で入る） |
+| `ec2` ラッパー | `container/ec2` → `/usr/local/bin/ec2`（root 所有） | `ssh -F ~/.aws-claude/ssh/config -- <host> <argv>` を組む。オプションは一切受け取らず、`<host>` は config の `Host` と照合。`--list`（ホスト一覧）と `--selftest <host>`（§7）だけが例外。異常終了時に残った SSM セッションを終了する（§7） |
+| フックの追加 | `container/hooks/aws-readonly-guard.sh`・`codex-guard.py`・`settings.json` | `ssh` / `scp` / `sftp` / `session-manager-plugin` の直接実行を拒否。`ec2 ` で始まる単独コマンドは、`aws` と同じ「`> out/…` だけ許す」規則で通す。監査ログに記録。Codex 側は `ec2` を `aws` と同じく Bash ガードへ委ねる。`settings.json` は `Bash(ec2:*)` を allow、`ssh` / `scp` / `sftp` / `session-manager-plugin` を deny に足す（フックと二重） |
 | `method/06_EC2の中を調べる.md` | `container/method/` | 動詞の使い方。`ls` / `find` で場所を突き止めてから `tail` / `grep`、大きい出力は `raw/` に落とす、の作法 |
 | `survey-status` | `container/survey-status` | 登録済みホストを表示 |
 
@@ -463,9 +482,14 @@ exec ssh -F "$HOME/.aws-claude/ssh/config" -- "$host" "$(printf '%q ' "$@")"
 ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 ```
 
-- `ec2` は単独コマンドのみ。パイプ・連結・`$()` は `aws` と同じ理由で拒否（保存は `> out/…` だけ）。
-- `ssh`、`scp`、`sftp`、`session-manager-plugin`、`aws ssm start-session` は常に拒否（後者は `start-` が読み取り動詞でないため既に落ちる）。
-- `.aws-claude/ssh` への言及は、既存の `credentials|config` の判定に `ssh/` を足して拒否する。
+- `ec2` は行頭に書いた単独コマンドのみ。パイプ・連結・`$()` は `aws` と同じ理由で拒否（保存は `> out/…` だけ）。
+  行頭以外のコマンドの位置（`;` `&` `|` `(` `` ` `` `$(` の後ろ、`env` / `exec` / `xargs` / `sh -c` などの後ろ）に
+  `ec2` が出てきたら迂回として拒否する。`aws ec2 …` は `aws` の規則が見る。
+- `ssh`、`scp`、`sftp`、`session-manager-plugin` は、同じ「コマンドの位置」にあれば常に拒否。引数の中の語
+  （`grep ssh out/…`、`ec2 <host> grep … --pattern ssh`、`ec2 <host> service sshd`）は見ない。
+  `aws ssm start-session` は `start-` が読み取り動詞でないため既に落ちる。
+- `.aws-claude/ssh` への言及は、既存の `credentials|config` の判定に `ssh` を足して拒否する。
+- ここは事故防止の層。直接 `ssh` を打っても EC2 側ではゲートウェイしか動かない（§7 で確かめる）。
 
 ## 9. security.md に足すこと
 
@@ -492,7 +516,11 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 4. IAM ポリシーと `role` / `credentials` / `verify` の追加。**済**（実 AWS で `role --create` → `credentials` → `verify` が通り、
    `verify` の新 2 項目が拒否、既存 5 項目が崩れていないこと、`role --create` の冪等性（同じ内容・ずれた内容・2 回目）を確認。
    `PackedPolicySize` は §6）。偽の `aws` での検証は `tests/test_ec2_iam.py`。
-5. Dockerfile・`ec2` ラッパー・フック・`test_guards.py`。
+5. Dockerfile・`ec2` ラッパー・フック・`test_guards.py`・`aws-survey ssh verify`。**済**（2026-09-10、arm64 の Mac と
+   実 EC2 の Amazon Linux 2023。`aws-survey run` のコンテナから `ec2 <host> uptime` が通り、§7 の拒否側がすべて落ち、
+   `ssh verify` の自己診断 18 項目が通過、終了後に SSM のセッションが残らないことを確認。異常終了時にセッションが残る挙動と
+   その対処は §7）。フックの通る例・落ちる例と `ec2` ラッパーの引数の渡し方は `tests/test_guards.py`、イメージへの配置は
+   `tests/test_launcher.py`、`ssh verify` の呼び出しは偽の `docker` で `tests/test_ssh_install.py`。
 6. `method/06`、`survey-status`、`security.md`、`README.md`。
 
 実環境で未確認のまま完了扱いにしない項目と、いまの状態。
@@ -504,4 +532,5 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 | 再起動後の `/run/diag.lock` | **確認済**（AL2023）。再起動後に `root:diag 660` で再作成され、ゲートウェイが動く |
 | AL2 の `requiretty` | **確認済**（2026-09-10、一時的に作った AL2 の実機。作業後に終了）。素の AL2 の `/etc/sudoers` に `requiretty` は無い。全体に `Defaults requiretty` を足しても（`/etc/sudoers.d/` と `/etc/sudoers` 先頭の両方で試した）、`Defaults:<user> !requiretty` を持つログインユーザーからの `sudo diag-root` は tty 無しで通り、それを持たない対照ユーザーは「you must have a tty」で拒否された。確認は sshd と同じく sudo を経由せず `runuser` でログインユーザーになって行った（root からの `sudo -u <user>` は外側の sudo が requiretty に当たる） |
 | AL2 の Python 3.7 | **確認済**（同上）。ゲートウェイが `shlex.join`（3.8 以降）を使っていて自己確認で落ちたので `shlex.quote` の連結に直し、AL2 で導入と root 段（`dmesg` / `log`）が動くこと、`tests/test_gateway.py` が Python 3.7 でも通ることを見た |
-| session-manager-plugin の deb の arm64 対応 | 未確認（第 5 段） |
+| session-manager-plugin の deb の arm64 対応 | **確認済**（2026-09-10、arm64 の Mac の Docker で `ubuntu_arm64` の deb を `node:22-bookworm-slim` に入れ、`aws ssm start-session` 経由の `ssh` が実 EC2 に届いた。x86_64 側は `ubuntu_64bit` に読み替えるだけで、未実行） |
+| ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。EC2 側の sshd に `ClientAliveInterval` を置いて sshd 側からも切る案は、導入スクリプトの変更になるので第 6 段以降で検討） |

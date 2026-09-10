@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# ec2 — 登録済みの EC2 ホストの診断ゲートウェイに、1 つのコマンドを送る。
+#
+#   ec2 <host> <動詞> [引数...]     例: ec2 web1 uptime / ec2 web1 tail /var/log/messages --lines 100
+#   ec2 <host> help                 使える動詞の一覧（ゲートウェイが返す）
+#   ec2 --list                      この環境で使えるホスト
+#   ec2 --selftest <host>           接続と制限が期待どおりかを確かめる
+#
+# 接続は SSH over SSM（aws ssm start-session）。鍵と接続設定は ~/.aws-claude/ssh/ にあり、
+# この環境からは読むことしかできない。EC2 側はゲートウェイが動詞と引数を検証し、
+# シェルを経由せずに実行する。この環境では ssh / scp / sftp を直接は使えない。
+#
+# オプションは受け取らない。<host> は接続設定の Host 名と照合し、それ以外は ssh に渡さない。
+# 動詞と引数は 1 本の文字列にして送る（%q で量子化し、ゲートウェイが shlex で戻す）。
+# 出力は保存できる:  ec2 <host> tail /var/log/messages > out/<フェーズ>/raw/web1-messages.txt
+#
+# SSM のセッションは、ゲートウェイが終わって EC2 側の sshd が接続を閉じることで終わる。
+# ssh が接続の段階で異常終了したとき（終了コード 255。転送の拒否・鍵の不一致・切断など）は
+# EC2 側が閉じる機会が無く、セッションが Connected のまま残るので、自分（同じ一時キー）が
+# この対象に対して開始時刻以降に開いたセッションを探して終了する。プラグインは stdio モードでは
+# 自分からセッションを終了しない（2026-09 に確認）。
+set -uo pipefail
+
+SSH_DIR="$HOME/.aws-claude/ssh"
+CONFIG="$SSH_DIR/config"
+
+usage() { sed -n '4,7p' "$0" | sed 's/^# \{0,1\}//'; }
+die() { printf 'ec2: %s\n' "$*" >&2; exit 2; }
+
+[ -f "$CONFIG" ] || die "接続設定がありません: ${CONFIG}（EC2 の中を調べる機能は、この対象では用意されていません）"
+
+hosts() { awk '$1 == "Host" { print $2 }' "$CONFIG"; }
+host_field() { awk -v h="$1" -v k="$2" '$1 == "Host" { cur = $2 } $1 == k && cur == h { print $2; exit }' "$CONFIG"; }
+known_host() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || return 1
+  hosts | grep -qxF -- "$1"
+}
+
+# ---- 残ったセッションの後片付け ----
+# 終了したセッション ID をファイルに残す（$(...) の中で呼ばれても親から数えられるように）
+REAP_LOG=$(mktemp 2>/dev/null || echo /dev/null)
+trap 'rm -f "$REAP_LOG"' EXIT
+owner() { [ -n "${OWNER:-}" ] || OWNER=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null); printf '%s' "${OWNER:-}"; }
+# 自分がこの対象に $2（UTC, %Y-%m-%dT%H:%M:%S）以降に開いた Active なセッションの ID を出す
+lingering() {
+  local target since who
+  target=$(host_field "$1" HostName); since="$2"; who=$(owner)
+  [ -n "$target" ] && [ -n "$who" ] || return 0
+  # 正常に終わった直前の接続は Terminating として数秒見えることがある。それは数えない
+  aws ssm describe-sessions --state Active --filters "key=Target,value=$target" "key=Owner,value=$who" \
+      --query 'Sessions[].[SessionId, StartDate, Status]' --output text 2>/dev/null \
+    | awk -v since="$since" '$3 != "Terminating" { start = substr($2, 1, 19); if (start >= since) print $1 }'
+}
+reap() {
+  local id n=0
+  for id in $(lingering "$1" "$2"); do
+    aws ssm terminate-session --session-id "$id" >/dev/null 2>&1 && { n=$((n + 1)); printf '%s\n' "$id" >> "$REAP_LOG"; }
+  done
+  [ "$n" -eq 0 ] || printf 'ec2: 接続が異常終了したため、残った SSM セッション %d 件を終了しました\n' "$n" >&2
+}
+utcnow() { date -u +%Y-%m-%dT%H:%M:%S; }
+
+# ssh を 1 回打つ。$1 がホスト、$2 以降は ssh の引数（ホスト名より前に置くもの）と、-- のあとの 1 本の文字列。
+# 呼び出し側が組み立てる。異常終了（255）なら後片付けをして、その終了コードを返す。
+connect() {
+  local host="$1"; shift
+  local since rc
+  since=$(date -u -d '60 seconds ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || utcnow)
+  ssh -F "$CONFIG" "$@"; rc=$?
+  [ "$rc" -ne 255 ] || reap "$host" "$since"
+  return "$rc"
+}
+
+# 位置固定で ssh に渡す。$1 がホスト、残りがゲートウェイへの 1 本の文字列。
+remote() {
+  local host="$1"; shift
+  local cmd
+  cmd=$(printf '%q ' "$@")
+  connect "$host" -- "$host" "${cmd% }"
+}
+
+# ---- 自己診断 ----
+# 通るべきものが通り、塞いであるものが塞がっていることを、実際に接続して確かめる。
+# 期待と違う項目があれば非ゼロで終わる。ホスト側の記録（journal）にも各要求が残る。
+selftest() {
+  local host="$1" user pass=0 fail=0 skip=0 out rc started reaped
+  known_host "$host" || die "未登録のホストです: ${host}（ec2 --list）"
+  user=$(host_field "$host" User)
+  started=$(date -u -d '60 seconds ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || utcnow)
+  ok()   { printf '  ✔ %s\n' "$1"; pass=$((pass + 1)); }
+  ng()   { printf '  ✗ %s\n' "$1"; [ -z "${2:-}" ] || printf '%s\n' "$2" | sed 's/^/      /' | head -5; fail=$((fail + 1)); }
+  skip() { printf '  － %s\n' "$1"; skip=$((skip + 1)); }
+  first() { printf '%s\n' "$1" | head -1; }
+
+  printf '◆ ec2 --selftest %s\n' "$host"
+  printf '    host %s  user %s  config %s\n' "$host" "${user:-?}" "$CONFIG"
+  echo ""
+
+  echo "◆ 通るもの"
+  out=$(remote "$host" uptime 2>&1); rc=$?
+  if [ $rc -eq 0 ] && [ -n "$out" ]; then ok "uptime が通る: $(first "$out")"; else ng "uptime が通らない (exit $rc)" "$out"; return 1; fi
+
+  out=$(remote "$host" ls "/home/$user/.ssh" 2>&1); rc=$?
+  if [ $rc -eq 0 ] && printf '%s' "$out" | grep -q authorized_keys; then ok "ls /home/$user/.ssh は一覧が出る"; else ng "ls /home/$user/.ssh (exit $rc)" "$out"; fi
+
+  out=$(remote "$host" logs 2>&1); rc=$?
+  local logname
+  logname=$(printf '%s\n' "$out" | awk -F: '/^[A-Za-z0-9][A-Za-z0-9_.-]*: \// { print $1; exit }')
+  if [ $rc -ne 0 ]; then ng "logs (exit $rc)" "$out"
+  elif [ -z "$logname" ]; then skip "登録済みログが無いので root 段の log は確かめない"
+  else
+    out=$(remote "$host" log "$logname" --tail 3 2>&1); rc=$?
+    if [ $rc -eq 0 ]; then ok "log $logname --tail 3 が root 段で読める"; else ng "log $logname --tail 3 (exit $rc)" "$out"; fi
+  fi
+
+  # root 読み取り段（sudo diag-root）が動くこと。登録済みログが無いホストでも dmesg で確かめられる
+  out=$(remote "$host" dmesg --lines 3 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then ok "dmesg --lines 3 が root 段で読める"; else ng "dmesg --lines 3 (exit $rc)" "$out"; fi
+
+  out=$(remote "$host" cat /etc/hosts 2>&1); rc=$?
+  if [ $rc -eq 0 ]; then ok "cat /etc/hosts が読める（一般読み取り段が有効）"
+  elif printf '%s' "$out" | grep -q 'strict mode'; then ok "cat /etc/hosts は拒否される（strict のホスト）"
+  else ng "cat /etc/hosts (exit $rc)" "$out"; fi
+  echo ""
+
+  echo "◆ 塞がっているもの（ゲートウェイ）"
+  expect_denied() {  # 1: 説明, 残り: 動詞と引数。exit 2 と denied: の行を期待する
+    local label="$1"; shift
+    out=$(remote "$host" "$@" 2>&1); rc=$?
+    if [ $rc -eq 2 ] && printf '%s' "$out" | grep -q '^denied:'; then ok "$label: $(first "$out")"; else ng "$label が拒否されない (exit $rc)" "$out"; fi
+  }
+  expect_denied "cat /etc/ssh/sshd_config（拒否パターン）" cat /etc/ssh/sshd_config
+  expect_denied "cat /home/$user/.ssh/authorized_keys（拒否パターン）" cat "/home/$user/.ssh/authorized_keys"
+  expect_denied "proc 1 environ" proc 1 environ
+  expect_denied "未知の動詞 bash" bash
+  expect_denied "連結 'uptime; id'" 'uptime;' id
+  expect_denied "cat /etc/shadow" cat /etc/shadow
+  # /etc/shadow は拒否パターンにもあるが、パターンに無くても OS の権限で読めないことを stat で見る
+  out=$(remote "$host" stat /etc/shadow 2>&1); rc=$?
+  if [ $rc -eq 0 ] && printf '%s' "$out" | grep -qE 'Access: \(0[0-6]00/'; then ok "/etc/shadow は OS の権限で $user に読めない: $(printf '%s\n' "$out" | grep -oE 'Access: \([^)]*\)' | head -1)"
+  else ng "stat /etc/shadow (exit $rc)" "$out"; fi
+  echo ""
+
+  echo "◆ 塞がっているもの（ssh の直接利用）"
+  # ForceCommand: 直接の ssh でもゲートウェイしか動かない
+  out=$(connect "$host" -- "$host" bash 2>&1); rc=$?
+  if [ $rc -eq 2 ] && printf '%s' "$out" | grep -q '^denied:'; then ok "ssh $host bash: $(first "$out")"; else ng "ssh $host bash が拒否されない (exit $rc)" "$out"; fi
+  out=$(connect "$host" -- "$host" 'uptime; id' 2>&1); rc=$?
+  if [ $rc -eq 2 ] && printf '%s' "$out" | grep -q '^denied:'; then ok "ssh $host 'uptime; id': $(first "$out")"; else ng "ssh $host 'uptime; id' が拒否されない (exit $rc)" "$out"; fi
+  # PermitTTY no: 端末を要求しても割り当てられない
+  out=$(connect "$host" -tt -- "$host" uptime 2>&1 </dev/null); rc=$?
+  if printf '%s' "$out" | grep -qi 'PTY allocation request failed'; then ok "ssh -tt: 端末は割り当てられない"; else ng "ssh -tt: 端末の拒否が見えない (exit $rc)" "$out"; fi
+  # DisableForwarding yes: ポート転送（-L / -W が使う direct-tcpip と、-R のリモート転送）
+  out=$(connect "$host" -o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 -- "$host" uptime 2>&1); rc=$?
+  if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi 'forwarding failed'; then ok "ssh -R: リモート転送は拒否される"; else ng "ssh -R が拒否されない (exit $rc)" "$out"; fi
+  out=$(connect "$host" -W 127.0.0.1:22 -- "$host" 2>&1 </dev/null); rc=$?
+  if [ $rc -ne 0 ] && printf '%s' "$out" | grep -qi 'administratively prohibited\|open failed'; then ok "ssh -W（-L と同じ経路）: 転送は拒否される"; else ng "ssh -W が拒否されない (exit $rc)" "$out"; fi
+  # sftp サブシステムも ForceCommand に置き換わる
+  out=$(sftp -F "$CONFIG" -b /dev/null -- "$host" 2>&1 </dev/null); rc=$?
+  if [ $rc -ne 0 ]; then ok "sftp $host: 使えない (exit $rc)"; else ng "sftp $host が通ってしまう" "$out"; fi
+  echo ""
+
+  echo "◆ 後片付け"
+  # 上の異常終了で残ったセッションは connect が終了している。ここでは、この自己診断が開いたものが残っていないことを見る
+  sleep 2
+  out=$(lingering "$host" "$started"); rc=$?
+  if [ -n "$out" ]; then
+    reap "$host" "$started"
+    ng "SSM セッションが残っていた（$(printf '%s\n' "$out" | wc -l | tr -d ' ') 件。終了した）" "$out"
+  else
+    reaped=$(wc -l < "$REAP_LOG" | tr -d ' ')
+    ok "SSM セッションは残っていない$([ "${reaped:-0}" -eq 0 ] || printf '（異常終了した接続の %d 件はその場で終了した）' "$reaped")"
+  fi
+  echo ""
+
+  printf '◆ 結果  通過 %d / 失敗 %d / 省略 %d\n' "$pass" "$fail" "$skip"
+  [ "$fail" -eq 0 ]
+}
+
+# ---- 入口 ----
+case "${1:-}" in
+  ""|-h|--help) usage; exit 0 ;;
+  --list) hosts; exit 0 ;;
+  --selftest)
+    [ $# -eq 2 ] || die "--selftest には <host> を 1 つ指定します"
+    selftest "$2"; exit $? ;;
+  -*) die "オプションは受け取りません: $1（使い方: ec2 <host> <動詞> [引数...]）" ;;
+esac
+
+HOST="$1"; shift
+known_host "$HOST" || die "未登録のホストです: ${HOST}（使えるホスト: $(hosts | tr '\n' ' '))"
+[ $# -ge 1 ] || die "動詞を指定してください（一覧: ec2 $HOST help）"
+remote "$HOST" "$@"
+exit $?

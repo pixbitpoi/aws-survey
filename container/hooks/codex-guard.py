@@ -72,7 +72,8 @@ def check(event):
     tokens = list(lexer)
     if not tokens:
         deny('空のコマンドです。')
-    if tokens[0] == 'aws':
+    # aws and ec2 share one policy (single command, `> out/...` only); it lives in the Bash guard.
+    if tokens[0] in {'aws', 'ec2'}:
         result = subprocess.run(['bash', str(AWS_GUARD)], input=json.dumps(event), text=True, capture_output=True)
         if result.returncode != 0:
             deny(result.stderr or 'AWS コマンドの検査に失敗しました。')

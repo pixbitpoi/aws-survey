@@ -229,7 +229,7 @@ class BakedNotMounted(unittest.TestCase):
     """
 
     GUARD_SOURCES = ['settings.json', 'hooks/aws-readonly-guard.sh', 'hooks/codex-guard.py',
-                     'codex/config.toml', 'codex/requirements.toml']
+                     'codex/config.toml', 'codex/requirements.toml', 'ec2']
 
     def test_guards_are_copied_into_the_image(self):
         baked = re.findall(r'^COPY\s+(\S+)', (ROOT / 'Dockerfile').read_text(), re.MULTILINE)
@@ -293,6 +293,42 @@ class CliInstallLayout(unittest.TestCase):
     def test_the_npm_prefix_is_not_handed_to_the_agent(self):
         self.assertNotRegex(self.dockerfile, r'chown[^\n]*node[^\n]*/usr/local',
                             'a writable npm prefix would let the agent replace the CLI')
+
+
+class Ec2Layout(unittest.TestCase):
+    """The EC2 path is baked into the image: the ec2 wrapper, openssh-client and the SSM plugin.
+
+    The wrapper is the only entry to the diagnostic gateway and is root-owned like the guards.
+    The plugin is what `aws ssm start-session` execs, so it has to be present for the right
+    architecture (AWS names it differently from the CLI: ubuntu_arm64 / ubuntu_64bit). The
+    keys and config reach the container through the same read-only mount as the temporary
+    credentials, so no extra mount may appear for them.
+    """
+
+    def setUp(self):
+        self.dockerfile = (ROOT / 'Dockerfile').read_text()
+        self.launcher = (ROOT / 'libexec/commands/run.sh').read_text()
+
+    def test_the_wrapper_is_copied_and_executable(self):
+        self.assertIn('COPY ec2           /usr/local/bin/ec2', self.dockerfile)
+        self.assertRegex(self.dockerfile, r'chmod 755[^\n]*/usr/local/bin/ec2')
+        self.assertTrue(os.access(ROOT / 'container/ec2', os.X_OK))
+
+    def test_ssh_client_and_plugin_are_installed_per_architecture(self):
+        self.assertIn('openssh-client', self.dockerfile)
+        self.assertIn('aarch64) smp=ubuntu_arm64', self.dockerfile)
+        self.assertIn('x86_64) smp=ubuntu_64bit', self.dockerfile)
+        self.assertIn('session-manager-downloads/plugin/latest/${smp}/session-manager-plugin.deb', self.dockerfile)
+        self.assertIn('session-manager-plugin --version', self.dockerfile)
+
+    def test_keys_arrive_through_the_credentials_mount_only(self):
+        self.assertIn('-v "$AWS_DIR:/home/node/.aws-claude:ro"', self.launcher)
+        self.assertNotIn('/ssh:', self.launcher, 'keys must not get a mount of their own')
+
+    def test_the_wrapper_names_nothing_about_the_survey(self):
+        text = (ROOT / 'container/ec2').read_text()
+        for word in ['libexec', 'environment.json', '.agents']:
+            self.assertNotIn(word, text, f'{word} is host-side and must not be described to the container')
 
 
 class RegionIsNotBaked(unittest.TestCase):

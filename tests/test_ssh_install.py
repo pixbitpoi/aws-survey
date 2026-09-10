@@ -218,10 +218,15 @@ class WithoutAws(SshPrintCase):
         self.assertIn('登録済みホストはありません', result.stdout)
 
     def test_other_subcommands_say_so(self):
-        for sub in (['verify', 'web1'], ['rotate'], ['remove', 'web1']):
+        for sub in (['rotate'], ['remove', 'web1']):
             result = self.run_cli('ssh', *sub)
             self.assertNotEqual(result.returncode, 0, sub)
             self.assertIn('まだ実装されていません', result.stdout, sub)
+
+    def test_verify_needs_a_registered_host(self):
+        result = self.run_cli('ssh', 'verify', 'web1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('未登録のホスト', result.stderr)
 
     def test_unknown_subcommand(self):
         result = self.run_cli('ssh', 'bogus')
@@ -252,3 +257,80 @@ class LoadEnv(SshPrintCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Verify(SshPrintCase):
+    """`aws-survey ssh verify <host>` runs the self-test inside the survey container.
+
+    Checked with a fake docker: the image is built from the same Dockerfile and context as
+    `run`, the container gets only the read-only key mount and the region, the command is
+    `ec2 --selftest <host>`, and its exit code is the result. Without aws on PATH the SSM-side
+    check is skipped, not failed. An expired temporary key stops before docker is touched.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.write_environment({'ssh': {'user': 'diag', 'hosts': {'web1': {
+            'instance_id': 'i-0123456789abcdef0', 'user': 'diag', 'installed_at': '2026-09-10T12:00:00+09:00',
+            'logs': {}, 'deny': [], 'strict': False}}}})
+        keys = self.keys.parent
+        (keys / 'credentials').write_text('[claude-ro]\n')
+        (self.keys / 'config').write_text('Host web1\n    HostName i-0123456789abcdef0\n    User diag\n')
+        self.session(expiration='2099-01-01T00:00:00+00:00')
+        self.log = self.home / 'docker.jsonl'
+        docker = self.bin / 'docker'
+        docker.write_text('#!/usr/bin/env python3\nimport json, os, sys\n'
+                          'open(os.environ["FAKE_LOG"], "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                          'print("sha256:fake" if sys.argv[1] == "build" else "selftest output")\n'
+                          'sys.exit(int(os.environ.get("FAKE_EXIT", "0")) if sys.argv[1] == "run" else 0)\n')
+        docker.chmod(0o755)
+
+    def session(self, expiration):
+        (self.keys.parent / 'session.json').write_text(json.dumps({'expiration': expiration, 'duration_seconds': 3600}))
+
+    def run_verify(self, *args, **extra):
+        env = {'FAKE_LOG': str(self.log), **extra}
+        original = self.run_cli
+        def run_cli(*a):
+            base = {'PATH': str(self.bin), 'HOME': str(self.home), 'LANG': os.environ.get('LANG', 'C.UTF-8'), 'TZ': 'UTC'}
+            base.update(env)
+            return subprocess.run([str(CLI), '--dir', str(self.target), *a], capture_output=True, text=True,
+                                  errors='replace', env=base)
+        return run_cli('ssh', 'verify', *args)
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def test_runs_the_selftest_in_the_container(self):
+        result = self.run_verify('web1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        build, run = self.calls()
+        self.assertEqual(build[0], 'build')
+        self.assertEqual(build[-3:], ['-f', f'{ROOT}/Dockerfile', f'{ROOT}/container'])
+        self.assertIn('smoke:latest', build)
+        self.assertEqual(run[0], 'run')
+        self.assertIn(f'{self.keys.parent}:/home/node/.aws-claude:ro', run)
+        self.assertIn('AWS_DEFAULT_REGION=test-region', run)
+        self.assertEqual(run[-3:], ['ec2', '--selftest', 'web1'])
+        self.assertNotIn('/home/node/aws-survey/out', ' '.join(run), 'verify must not mount out/')
+        self.assertIn('selftest output', result.stdout)
+        self.assertIn('省きました', result.stdout)
+
+    def test_selftest_failure_is_the_result(self):
+        result = self.run_verify('web1', FAKE_EXIT='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('失敗した項目', result.stdout)
+
+    def test_expired_key_stops_before_docker(self):
+        self.session(expiration='2020-01-01T00:00:00+00:00')
+        result = self.run_verify('web1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('期限切れ', result.stdout)
+        self.assertIn('credentials', result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_missing_key_stops_before_docker(self):
+        (self.keys.parent / 'credentials').unlink()
+        result = self.run_verify('web1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls(), [])
