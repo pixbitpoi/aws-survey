@@ -635,9 +635,9 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 | 再起動後の `/run/diag.lock` | **確認済**（AL2023）。再起動後に `root:diag 660` で再作成され、ゲートウェイが動く |
 | AL2 の `requiretty` | **確認済**（2026-09-10、一時的に作った AL2 の実機。作業後に終了）。素の AL2 の `/etc/sudoers` に `requiretty` は無い。全体に `Defaults requiretty` を足しても（`/etc/sudoers.d/` と `/etc/sudoers` 先頭の両方で試した）、`Defaults:<user> !requiretty` を持つログインユーザーからの `sudo diag-root` は tty 無しで通り、それを持たない対照ユーザーは「you must have a tty」で拒否された。確認は sshd と同じく sudo を経由せず `runuser` でログインユーザーになって行った（root からの `sudo -u <user>` は外側の sudo が requiretty に当たる） |
 | AL2 の Python 3.7 | **確認済**（同上）。ゲートウェイが `shlex.join`（3.8 以降）を使っていて自己確認で落ちたので `shlex.quote` の連結に直し、AL2 で導入と root 段（`dmesg` / `log`）が動くこと、`tests/test_gateway.py` が Python 3.7 でも通ることを見た |
-| session-manager-plugin の deb の arm64 対応 | **確認済**（2026-09-10、arm64 の Mac の Docker で `ubuntu_arm64` の deb を `node:22-bookworm-slim` に入れ、`aws ssm start-session` 経由の `ssh` が実 EC2 に届いた。x86_64 側は `ubuntu_64bit` に読み替えるだけで、未実行） |
+| session-manager-plugin の deb の arm64 対応 | **確認済**（2026-09-10、arm64 の Mac の Docker で `ubuntu_arm64` の deb を `node:22-bookworm-slim` に入れ、`aws ssm start-session` 経由の `ssh` が実 EC2 に届いた） |
 | ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。第 7 段で sshd に `ClientAliveInterval 15` / `ClientAliveCountMax 3` を入れ、EC2 側のプロセスは 69 秒で消えることを実測したが、SSM のセッションはそれでは終わらず既定 20 分の期限まで残る。第 8 段でラッパーに起動時の層を足し、ラッパーごと消えた場合も次の `ec2` が終了することを実測） |
 | `remove` の `diag-ssh-<name>` の片付け | **確認済**（2026-09-10、第 8 段。detach → 版の削除 → delete が通り、`NoSuchEntity` を確認。古い一時キーは全拒否になる） |
 | 調査コンテナの Codex で `method/06` の確認 | **確認済**（2026-09-10、第 8 段。`codex exec` で 4 動詞を `raw/` に保存し、監査ログと EC2 側の journal に記録が残った） |
 | root 段の `log` 動詞（登録済みログ） | **確認済**（2026-09-10、AL2023）。root 専用の `/var/log/audit/audit.log*` を `--log` で登録して再導入し、`ssh verify` が `log <名前> --tail 3` を root 段で読めることを確認（省略 0）。動詞の解析と `--file` の照合は `tests/test_gateway.py` |
-| x86_64 の session-manager-plugin（`ubuntu_64bit`） | **未実行**。arm64 の `ubuntu_arm64` からアーキテクチャ名を読み替えるだけで、x86_64 の Mac では `aws-survey run` の初回ビルドで通る |
+| x86_64 の session-manager-plugin（`ubuntu_64bit`） | **確認済**（2026-09-10、arm64 の Mac の Docker Desktop で `--platform linux/amd64 --build-arg AWSCLI_ARCH=x86_64` のイメージをエミュレーションで作り、`uname -m` が `x86_64`、プラグイン 1.2.835.0 が起動し、`ec2 web1 uptime` が実 EC2 に届き、`ec2 --selftest` の 20 項目が通過）。x86_64 の実機での `aws-survey run` の初回ビルド（`uname -m` の判定）だけは未実施 |
