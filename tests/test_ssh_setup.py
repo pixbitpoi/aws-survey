@@ -40,6 +40,8 @@ FAKE_AWS = r'''#!/usr/bin/env python3
   FAKE_FAIL_INSTANCE  instance id whose RunCommand ends with Status Failed
   FAKE_REMOVE_LEFTOVER  1: the removal script reports a leftover (non-zero, no "REMOVED clean")
   FAKE_DELETE_TAG_FAIL  1: delete-tags fails
+  FAKE_POLICY_MISSING  1: iam get-policy answers NoSuchEntity
+  FAKE_DELETE_POLICY_FAIL  1: iam delete-policy answers DeleteConflict
 """
 import json, os, sys
 argv = sys.argv[1:]
@@ -51,6 +53,17 @@ instances = json.loads(os.environ.get("FAKE_INSTANCES") or
                        '[{"id": "i-0123456789abcdef0", "name": "web1", "state": "running"}]')
 if "get-caller-identity" in argv:
     print("arn:aws:iam::000000000000:user/fake"); sys.exit(0)
+if argv[0] == "iam":
+    op = argv[1]
+    if op == "get-policy":
+        if os.environ.get("FAKE_POLICY_MISSING") == "1":
+            sys.stderr.write("An error occurred (NoSuchEntity) when calling the GetPolicy operation\n"); sys.exit(254)
+        print(opt("--policy-arn")); sys.exit(0)
+    if op == "list-policy-versions":
+        print("v3\tv2"); sys.exit(0)
+    if op == "delete-policy" and os.environ.get("FAKE_DELETE_POLICY_FAIL") == "1":
+        sys.stderr.write("An error occurred (DeleteConflict) when calling the DeletePolicy operation\n"); sys.exit(254)
+    print("{}"); sys.exit(0)
 if argv[:2] == ["ec2", "describe-instances"] or "describe-instances" in argv:
     found = instances
     if "--instance-ids" in argv:
@@ -185,7 +198,7 @@ class Setup(SshSetupCase):
     def test_call_order_and_arguments(self):
         result = self.setup('web1')
         calls = self.calls()
-        ops = [c[c.index(next(a for a in c if a in ('sts', 'ec2', 'ssm'))) + 1] for c in calls]
+        ops = [c[c.index(next(a for a in c if a in ('sts', 'ec2', 'ssm', 'iam'))) + 1] for c in calls]
         self.assertEqual(ops, ['get-caller-identity', 'describe-instances', 'describe-instance-information',
                                'send-command', 'get-command-invocation', 'create-tags'])
         for call in calls:
@@ -414,7 +427,7 @@ class Rotate(SshSetupCase):
         self.old_pub = (self.keys / 'id_ed25519.pub').read_text()
 
     def ops(self):
-        return [c[c.index(next(a for a in c if a in ('sts', 'ec2', 'ssm'))) + 1] for c in self.calls()]
+        return [c[c.index(next(a for a in c if a in ('sts', 'ec2', 'ssm', 'iam'))) + 1] for c in self.calls()]
 
     def test_reinstalls_every_host_with_the_new_key_then_swaps(self):
         self.two_hosts()
@@ -501,7 +514,7 @@ class Remove(SshSetupCase):
             p.unlink()
 
     def ops(self):
-        return [c[c.index(next(a for a in c if a in ('sts', 'ec2', 'ssm'))) + 1] for c in self.calls()]
+        return [c[c.index(next(a for a in c if a in ('sts', 'ec2', 'ssm', 'iam'))) + 1] for c in self.calls()]
 
     def test_call_order_and_what_is_removed(self):
         self.two_hosts()
@@ -531,6 +544,11 @@ class Remove(SshSetupCase):
         self.assertIn('REMOVED clean', result.stdout)
         self.assertIn('残っている登録', result.stdout)
 
+    POLICY_ARN = 'arn:aws:iam::000000000000:policy/diag-ssh-smoke'
+
+    def iam_calls(self):
+        return [c for c in self.calls() if c[1] == 'iam']
+
     def test_last_host_points_to_credentials_and_role(self):
         self.setup('web1')
         result = self.run_cli('ssh', 'remove', 'web1')
@@ -544,6 +562,70 @@ class Remove(SshSetupCase):
         self.assertIn('aws-survey role --create', result.stdout)
         self.assertTrue((self.keys / 'id_ed25519').exists())
         self.assertNotIn('EC2 の中を調べる', self.run_cli('status').stdout)
+
+    def test_last_host_detaches_and_deletes_the_policy(self):
+        """Own role: after the tag and the records, detach, drop the non-default versions, delete."""
+        self.setup('web1')
+        self.log.unlink()
+        result = self.run_cli('ssh', 'remove', 'web1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        ops = self.ops()
+        self.assertEqual(ops[:6], ['get-caller-identity', 'describe-instances', 'describe-instance-information',
+                                   'send-command', 'get-command-invocation', 'delete-tags'])
+        self.assertEqual(ops[6:], ['get-policy', 'detach-role-policy', 'list-policy-versions',
+                                   'delete-policy-version', 'delete-policy-version', 'delete-policy'])
+        iam = self.iam_calls()
+        self.assertTrue(all('fake-src' in c for c in iam))
+        self.assertTrue(all(self.POLICY_ARN in c for c in iam))
+        detach = iam[1]
+        self.assertEqual(detach[detach.index('--role-name') + 1], 'fake-role')
+        versions = [c[c.index('--version-id') + 1] for c in iam if 'delete-policy-version' in c]
+        self.assertEqual(versions, ['v3', 'v2'])
+        self.assertIn('diag-ssh-smoke を消しました', result.stdout)
+        self.assertIn('5/5', result.stdout)
+
+    def test_not_the_last_host_leaves_the_policy(self):
+        self.two_hosts()
+        self.run_cli('ssh', 'remove', 'db1', FAKE_INSTANCES=TWO_INSTANCES)
+        self.assertEqual(self.iam_calls(), [])
+
+    def test_missing_policy_is_skipped(self):
+        self.setup('web1')
+        result = self.run_cli('ssh', 'remove', 'web1', FAKE_POLICY_MISSING='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([c[2] for c in self.iam_calls()], ['get-policy'])
+        self.assertIn('片付けるものはありません', result.stdout)
+
+    def test_policy_delete_failure_reports_and_keeps_the_rest_done(self):
+        self.setup('web1')
+        result = self.run_cli('ssh', 'remove', 'web1', FAKE_DELETE_POLICY_FAIL='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.environment()['ssh']['hosts'], {})          # EC2, tag and records are done
+        self.assertIn('DeleteConflict', result.stdout)
+        self.assertIn(f'aws iam delete-policy --policy-arn {self.POLICY_ARN}', result.stdout)
+        self.assertIn('aws-survey credentials', result.stdout)
+
+    def test_borrowed_role_shows_the_commands_instead(self):
+        self.setup('web1')
+        env = self.environment()
+        env['auth']['route'] = 'existing_role'
+        (self.target / 'environment.json').write_text(json.dumps(env))
+        self.log.unlink()
+        result = self.run_cli('ssh', 'remove', 'web1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.iam_calls(), [])
+        self.assertEqual(self.environment()['ssh']['hosts'], {})
+        self.assertIn(f'aws iam detach-role-policy --role-name fake-role --policy-arn {self.POLICY_ARN}', result.stdout)
+        self.assertIn(f'aws iam delete-policy --policy-arn {self.POLICY_ARN}', result.stdout)
+        self.assertIn('管理者', result.stdout)
+
+    def test_terminated_last_host_still_cleans_the_policy(self):
+        self.setup('web1')
+        self.log.unlink()
+        instances = json.dumps([{'id': INSTANCE, 'name': 'web1', 'state': 'terminated'}])
+        result = self.run_cli('ssh', 'remove', 'web1', FAKE_INSTANCES=instances)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([c[2] for c in self.iam_calls()][-1], 'delete-policy')
 
     def assert_still_registered(self, alias='web1'):
         self.assertIn(alias, self.environment()['ssh']['hosts'])

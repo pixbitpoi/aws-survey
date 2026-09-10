@@ -145,7 +145,14 @@ class Ec2Wrapper(unittest.TestCase):
     The host name must be one of the Host entries in the mounted config, options are never
     accepted, and the verb and arguments travel as one %q-quoted string after `--`, so nothing
     the agent types can become an ssh option. Checked with a fake ssh that records its argv.
+
+    The wrapper also tidies SSM sessions in two layers, both through a fake aws here: before
+    every connection it terminates the Active sessions its own key left on that instance
+    (Terminating ones excluded), and after an abnormal exit (255) it terminates what that
+    connection left behind. Only aws's arguments are recorded; nothing is contacted.
     """
+
+    OWNER = 'arn:aws:sts::000000000000:assumed-role/fake-role/claude-survey-20260910T000000'
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -158,10 +165,24 @@ class Ec2Wrapper(unittest.TestCase):
         (self.root / 'bin').mkdir()
         fake = self.root / 'bin/ssh'
         fake.write_text('#!/usr/bin/env python3\nimport json, os, sys\n'
-                        'open(os.environ["FAKE_LOG"], "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                        'open(os.environ["FAKE_LOG"], "a").write(json.dumps(["ssh"] + sys.argv[1:]) + "\\n")\n'
                         'sys.exit(int(os.environ.get("FAKE_EXIT", "0")))\n')
         fake.chmod(0o755)
-        self.log = self.root / 'ssh.jsonl'
+        # aws: get-caller-identity answers the owner, describe-sessions answers FAKE_SESSIONS
+        # (lines of "<id> <start> <status>"; the first call only when FAKE_SESSIONS_ONCE=1), the rest is silent
+        aws = self.root / 'bin/aws'
+        aws.write_text('#!/usr/bin/env python3\nimport json, os, sys\n'
+                       'argv = sys.argv[1:]\n'
+                       'open(os.environ["FAKE_LOG"], "a").write(json.dumps(["aws"] + argv) + "\\n")\n'
+                       'if "get-caller-identity" in argv:\n'
+                       f'    print("{self.OWNER}")\n'
+                       'elif "describe-sessions" in argv:\n'
+                       '    n = sum(1 for l in open(os.environ["FAKE_LOG"]) if "describe-sessions" in l)\n'
+                       '    if n == 1 or os.environ.get("FAKE_SESSIONS_ONCE") != "1":\n'
+                       '        sys.stdout.write(os.environ.get("FAKE_SESSIONS", "").replace(" ", "\\t"))\n'
+                       'sys.exit(0)\n')
+        aws.chmod(0o755)
+        self.log = self.root / 'calls.jsonl'
 
     def tearDown(self):
         self.temp.cleanup()
@@ -172,8 +193,14 @@ class Ec2Wrapper(unittest.TestCase):
         env.update(extra)
         return subprocess.run(['bash', str(ROOT / 'container/ec2'), *args], env=env, capture_output=True, text=True)
 
-    def calls(self):
+    def all_calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def calls(self):
+        return [c[1:] for c in self.all_calls() if c[0] == 'ssh']
+
+    def aws_ops(self):
+        return [c[2] for c in self.all_calls() if c[0] == 'aws']
 
     def test_verb_and_arguments_are_one_quoted_string_after_the_host(self):
         result = self.run_ec2('web1', 'grep', '/var/log/my app.log', '--pattern', 'a|b; id $(x)')
@@ -206,6 +233,46 @@ class Ec2Wrapper(unittest.TestCase):
         result = self.run_ec2('web1', 'uptime')
         self.assertEqual(result.returncode, 2)
         self.assertIn('接続設定がありません', result.stderr)
+
+    SESSIONS = ('claude-survey-20260910T000000-aaaa 2026-09-10T00:00:01+00:00 Connected\n'
+                'claude-survey-20260910T000000-bbbb 2026-09-10T00:00:02+00:00 Terminating\n'
+                'claude-survey-20260910T000000-cccc 2026-09-10T00:00:03+00:00 Connecting\n')
+
+    def test_leftover_sessions_are_terminated_before_connecting(self):
+        result = self.run_ec2('web1', 'uptime', FAKE_SESSIONS=self.SESSIONS, FAKE_SESSIONS_ONCE='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.all_calls()
+        kinds = [(c[0], c[2] if c[0] == 'aws' else 'ssh') for c in calls]
+        self.assertEqual(kinds, [('aws', 'get-caller-identity'), ('aws', 'describe-sessions'),
+                                 ('aws', 'terminate-session'), ('aws', 'terminate-session'), ('ssh', 'ssh')])
+        describe = calls[1]
+        self.assertIn('key=Target,value=i-0123456789abcdef0', describe)
+        self.assertIn(f'key=Owner,value={self.OWNER}', describe)
+        self.assertIn('Active', describe)
+        terminated = [c[c.index('--session-id') + 1] for c in calls if c[0] == 'aws' and 'terminate-session' in c]
+        self.assertEqual(terminated, ['claude-survey-20260910T000000-aaaa', 'claude-survey-20260910T000000-cccc'])
+        self.assertIn('残っていた SSM セッション 2 件を終了しました', result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_nothing_left_means_no_terminate_and_no_message(self):
+        result = self.run_ec2('web1', 'uptime')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.aws_ops(), ['get-caller-identity', 'describe-sessions'])
+        self.assertEqual(result.stderr, '')
+
+    def test_abnormal_exit_looks_again_after_ssh(self):
+        result = self.run_ec2('web1', 'uptime', FAKE_EXIT='255')
+        self.assertEqual(result.returncode, 255)
+        kinds = [(c[0], c[2] if c[0] == 'aws' else 'ssh') for c in self.all_calls()]
+        self.assertEqual(kinds, [('aws', 'get-caller-identity'), ('aws', 'describe-sessions'), ('ssh', 'ssh'),
+                                 ('aws', 'describe-sessions')])
+
+    def test_without_aws_the_connection_still_goes_through(self):
+        (self.root / 'bin/aws').write_text('#!/bin/sh\nexit 253\n')       # aws that cannot answer (no key, no network)
+        result = self.run_ec2('web1', 'uptime')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(result.stderr, '')
 
 
 class AuditLogPermissions(unittest.TestCase):

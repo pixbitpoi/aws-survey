@@ -88,7 +88,8 @@ IAM の `--description` や `--role-session-name` に日本語を入れない。
 `session-guard.json` は Deny しか書いていないため、外すと Allow がゼロになり全 API が拒否される。
 
 `environment.json` に `ssh.hosts` があるときは、その後ろに `diag-ssh-<name>`（`role --create` が作る顧客管理ポリシー。
-`DIAG_POLICY_ARN`）を並べる。空のときは渡さない（ポリシーが無くても発行できること）。ロールセッション名の接頭辞
+`DIAG_POLICY_ARN`）を並べる。空のときは渡さない（ポリシーが無くても発行できること）。`--policy-arns` で渡したポリシーを
+あとから消すと（`ssh remove` が最後のホストで消す）、その一時キーは読み取りも含めて全部拒否される。消したら発行し直す案内を出す。ロールセッション名の接頭辞
 `SESSION_NAME_PREFIX` は `load-env.sh` が持ち、`diag-ssh-<name>` の `ssm:TerminateSession` / `ResumeSession` の資源
 （`session/<接頭辞>-*`）と一致していなければならない。片方だけ変えない。内容は `docs/design-ec2-ssh.md` の第 6 節。
 

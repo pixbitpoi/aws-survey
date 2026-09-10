@@ -10,7 +10,9 @@
 #                                   終了後に SSM セッションが残らないことを実際に接続して確かめる
 #   aws-survey ssh rotate                鍵を作り直し、登録済みホスト全部に再導入する。1 台でも失敗したら古い鍵と記録を残す
 #   aws-survey ssh remove <host>         EC2 からユーザー・sshd 設定・sudoers・ゲートウェイ・設定・tmpfiles・ロックを撤去し、
-#                                   タグを外して記録から消す。remove --print <host> は撤去スクリプトを出すだけ
+#                                   タグを外して記録から消す。最後のホストなら diag-ssh-<name> ポリシーも調査用ロールから外して消す
+#                                   （自分で作ったロールのときだけ。借りたロールでは管理者向けのコマンドを表示する）。
+#                                   remove --print <host> は撤去スクリプトを出すだけ
 #
 # 鍵は $AWS_DIR/ssh/id_ed25519（対象ごとに 1 対、無ければ作る）。導入スクリプトに入るのは公開鍵だけ。
 # 導入スクリプトの雛形は libexec/ec2/install.sh.tmpl、撤去は remove.sh.tmpl。EC2 に残るものの名前は diag で統一する
@@ -754,6 +756,54 @@ cmd_rotate() {
 # ---- remove ----
 # setup の逆順。EC2 側の撤去（RunCommand）が済んでからタグを外し、記録・config・known_hosts から消す。
 # EC2 側で失敗したらタグも記録も触らない（同じコマンドで続きからやり直せる。撤去スクリプトは冪等）。
+# 最後のホストを消したときは diag-ssh-<name> ポリシーも片付ける（下）。
+
+# 元プロファイルで IAM を叩く（role.sh と同じ形）
+iam() { aws iam "$@" --profile "$PROFILE_SRC"; }
+
+# 借りたロールの経路と、自分で作ったロールで片付けに失敗したときに、手で打つコマンドを表示する
+show_policy_cleanup_by_hand() {
+  ui_text "ポリシー $DIAG_POLICY_NAME を片付けるコマンド（ロールから外し、既定でない版を消してから、ポリシーを消します）:"
+  ui_text "  aws iam detach-role-policy --role-name $ROLE_NAME --policy-arn $DIAG_POLICY_ARN"
+  ui_text "  aws iam list-policy-versions --policy-arn $DIAG_POLICY_ARN --query 'Versions[?!IsDefaultVersion].VersionId'"
+  ui_text "  aws iam delete-policy-version --policy-arn $DIAG_POLICY_ARN --version-id <既定でない版>"
+  ui_text "  aws iam delete-policy --policy-arn $DIAG_POLICY_ARN"
+}
+
+# 自分で作ったロールから diag-ssh-<name> を外し、既定でない版を消してから、ポリシーを消す。
+# ポリシーが無ければ何もしない。途中で失敗したら、残っているものと手で打つコマンドを表示して 1 を返す
+# （EC2 側・タグ・記録は済んでいるので、やり直しはこの片付けだけ）。
+cleanup_diag_policy() {
+  local out v n=0
+  if ! out=$(iam get-policy --policy-arn "$DIAG_POLICY_ARN" --query Policy.Arn --output text 2>&1); then
+    case "$out" in
+      *NoSuchEntity*) ui_skip "ポリシー $DIAG_POLICY_NAME はありません（片付けるものはありません）"; return 0 ;;
+      *) ui_raw "$out"; ui_err "ポリシー $DIAG_POLICY_NAME の状態を読めません"; show_policy_cleanup_by_hand; return 1 ;;
+    esac
+  fi
+  if ! out=$(iam detach-role-policy --role-name "$ROLE_NAME" --policy-arn "$DIAG_POLICY_ARN" 2>&1); then
+    case "$out" in
+      *NoSuchEntity*) ui_skip "ロール $ROLE_NAME に $DIAG_POLICY_NAME は付いていません" ;;
+      *) ui_raw "$out"; ui_err "ロール $ROLE_NAME から $DIAG_POLICY_NAME を外せませんでした"; show_policy_cleanup_by_hand; return 1 ;;
+    esac
+  else
+    ui_ok "ロール $ROLE_NAME から $DIAG_POLICY_NAME を外しました"
+  fi
+  for v in $(iam list-policy-versions --policy-arn "$DIAG_POLICY_ARN" \
+               --query 'Versions[?!IsDefaultVersion].VersionId' --output text 2>/dev/null); do
+    [ "$v" != None ] || continue
+    if ! out=$(iam delete-policy-version --policy-arn "$DIAG_POLICY_ARN" --version-id "$v" 2>&1); then
+      ui_raw "$out"; ui_err "ポリシー $DIAG_POLICY_NAME の版 $v を消せませんでした"; show_policy_cleanup_by_hand; return 1
+    fi
+    n=$((n + 1))
+  done
+  [ "$n" -eq 0 ] || ui_ok "既定でない版を消しました（${n}）"
+  if ! out=$(iam delete-policy --policy-arn "$DIAG_POLICY_ARN" 2>&1); then
+    ui_raw "$out"; ui_err "ポリシー $DIAG_POLICY_NAME を消せませんでした（ロールから外したあとです）"; show_policy_cleanup_by_hand; return 1
+  fi
+  ui_ok "ポリシー $DIAG_POLICY_NAME を消しました"
+}
+
 cmd_remove() {
   local host="" print=0
   while [ $# -gt 0 ]; do
@@ -789,12 +839,16 @@ cmd_remove() {
   ui_kv "ホスト" "$host  ${C_DIM}${INSTANCE_ID}  user ${SSH_USER}${C_RESET}"
   echo ""
 
-  ui_head "1/4 元プロファイル $PROFILE_SRC で撤去する"
+  # 最後のホストなら、ポリシーの片付けが 5/5 に入る
+  local steps=4 last=0
+  [ "$(jq -r '.ssh.hosts | length' "$ENV_FILE")" -gt 1 ] || { steps=5; last=1; }
+
+  ui_head "1/$steps 元プロファイル $PROFILE_SRC で撤去する"
   ui_text "撤去（SSM RunCommand）は強い権限の仕事です。調査用の一時キーには渡しません。"
   check_source_profile
   echo ""
 
-  ui_head "2/4 対象と SSM の管理状態"
+  ui_head "2/$steps 対象と SSM の管理状態"
   local out state gone=0
   if out=$(src ec2 describe-instances --instance-ids "$INSTANCE_ID" \
              --query 'Reservations[].Instances[].{id:InstanceId,state:State.Name}' 2>&1); then
@@ -821,7 +875,7 @@ cmd_remove() {
   fi
   echo ""
 
-  ui_head "3/4 EC2 で撤去スクリプトを root 実行する（AWS-RunShellScript）"
+  ui_head "3/$steps EC2 で撤去スクリプトを root 実行する（AWS-RunShellScript）"
   if [ "$gone" -eq 1 ]; then
     ui_skip "インスタンスが無いので省きます"
   else
@@ -847,7 +901,7 @@ cmd_remove() {
   fi
   echo ""
 
-  ui_head "4/4 タグと記録"
+  ui_head "4/$steps タグと記録"
   if [ "$gone" -eq 1 ]; then
     ui_skip "タグ diag:ssh=$SURVEY_NAME はインスタンスと一緒に消えています"
   else
@@ -872,16 +926,29 @@ cmd_remove() {
   if [ -n "$remaining" ]; then
     ui_kv "残っている登録" "$remaining"
     next_cmd "$AWS_SURVEY_CMD ssh list" "登録済みホストと導入状態を確かめます"
+    return 0
+  fi
+
+  ui_head "5/$steps ポリシー ${DIAG_POLICY_NAME}"
+  ui_text "登録済みホストが無くなりました。鍵（${KEY}）は残しています（次の ssh setup がそのまま使います）。"
+  local policy_rc=0
+  if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
+    ui_text "調査用ロールは自分で作ったものなので、SSH 接続を許すポリシーも片付けます。"
+    cleanup_diag_policy || policy_rc=1
   else
-    ui_text "登録済みホストが無くなりました。鍵（${KEY}）は残しています（次の ssh setup がそのまま使います）。"
-    ui_text "ポリシー ${DIAG_POLICY_NAME} は調査用ロールに付いたままですが、タグ付きのインスタンスが無いので何も許しません。"
-    next_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めない一時キーを発行し直します（登録が無いときは ${DIAG_POLICY_NAME} を渡しません）"
-    if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
-      also_cmd "$AWS_SURVEY_CMD role --create" "ロールの状態を確かめます（登録が無いときは ${DIAG_POLICY_NAME} を付けず、付いているものは外しません）"
-      ui_text "ポリシーそのものを片付けるなら、元プロファイルで detach-role-policy（ロール ${ROLE_NAME}）してから delete-policy します: $DIAG_POLICY_ARN"
-    else
-      also_cmd "$AWS_SURVEY_CMD role --create" "管理者に渡した ${DIAG_POLICY_NAME} が要らなくなったことを伝えるために、ロールの状態を確かめます"
-    fi
+    ui_text "調査用ロールは借りたものなので、ポリシー ${DIAG_POLICY_NAME} は触りません。タグ付きのインスタンスが無いので、付いたままでも何も許しません。"
+    ui_text "管理者に、要らなくなったことを伝えてください。"
+    show_policy_cleanup_by_hand
+  fi
+  echo ""
+  if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
+    ui_text "いまの一時キーは、発行時に渡した ${DIAG_POLICY_NAME} が無くなったので使えません（読み取りも通りません）。発行し直してください。"
+  fi
+  next_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めない一時キーを発行し直します（登録が無いときは ${DIAG_POLICY_NAME} を渡しません）"
+  also_cmd "$AWS_SURVEY_CMD role --create" "ロールの状態を確かめます（登録が無いときは ${DIAG_POLICY_NAME} を付けません）"
+  if [ "$policy_rc" -ne 0 ]; then
+    ui_err "ポリシーの片付けが途中で止まりました。EC2 側・タグ・記録は済んでいるので、残りは上のコマンドを手で打つか、原因を直してから同じ手順で片付けてください。"
+    return 1
   fi
 }
 

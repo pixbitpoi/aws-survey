@@ -16,9 +16,13 @@
 #
 # SSM のセッションは、ゲートウェイが終わって EC2 側の sshd が接続を閉じることで終わる。
 # ssh が接続の段階で異常終了したとき（終了コード 255。転送の拒否・鍵の不一致・切断など）は
-# EC2 側が閉じる機会が無く、セッションが Connected のまま残るので、自分（同じ一時キー）が
-# この対象に対して開始時刻以降に開いたセッションを探して終了する。プラグインは stdio モードでは
-# 自分からセッションを終了しない（2026-09 に確認）。
+# EC2 側が閉じる機会が無く、セッションが Connected のまま残る。プラグインは stdio モードでは
+# 自分からセッションを終了しない（2026-09 に確認）。後片付けは二層。
+#   - 異常終了時: 自分（同じ一時キー）がこの対象に対して開始時刻以降に開いたセッションを探して終了する
+#   - 起動時: 前回までの接続が残した Active なセッション（同じ一時キー・この対象。Terminating 中は除く）を、
+#     接続の前に探して終了する。ssh がラッパーごと強制終了されて上の層が動かなかった分を拾う
+# どちらも自分のセッションしか見えず、終了できるのも自分のものだけ。同じホストへ同時に 2 本は送らない
+# （EC2 側で 1 本ずつ直列に処理されるうえ、起動時の後片付けが並走中の接続を前回の残りと見なす）。
 set -uo pipefail
 
 SSH_DIR="$HOME/.aws-claude/ssh"
@@ -37,37 +41,48 @@ known_host() {
 }
 
 # ---- 残ったセッションの後片付け ----
-# 終了したセッション ID をファイルに残す（$(...) の中で呼ばれても親から数えられるように）
+# 終了したセッションを「<層> <ID>」の行でファイルに残す（$(...) の中で呼ばれても親から数えられるように）。
+# 層は before（起動時）か after（異常終了時）
 REAP_LOG=$(mktemp 2>/dev/null || echo /dev/null)
 trap 'rm -f "$REAP_LOG"' EXIT
+# 自分（一時キー）の ARN。$(...) の中で呼ばれると覚えられないので、reap が先に呼んで親に残す
 owner() { [ -n "${OWNER:-}" ] || OWNER=$(aws sts get-caller-identity --query Arn --output text 2>/dev/null); printf '%s' "${OWNER:-}"; }
-# 自分がこの対象に $2（UTC, %Y-%m-%dT%H:%M:%S）以降に開いた Active なセッションの ID を出す
+# 自分がこの対象に $2（UTC, %Y-%m-%dT%H:%M:%S。空なら時刻を問わない）以降に開いた Active なセッションの ID を出す
 lingering() {
   local target since who
-  target=$(host_field "$1" HostName); since="$2"; who=$(owner)
+  target=$(host_field "$1" HostName); since="${2:-}"; who=$(owner)
   [ -n "$target" ] && [ -n "$who" ] || return 0
   # 正常に終わった直前の接続は Terminating として数秒見えることがある。それは数えない
   aws ssm describe-sessions --state Active --filters "key=Target,value=$target" "key=Owner,value=$who" \
       --query 'Sessions[].[SessionId, StartDate, Status]' --output text 2>/dev/null \
     | awk -v since="$since" '$3 != "Terminating" { start = substr($2, 1, 19); if (start >= since) print $1 }'
 }
+# 1: ホスト、2: この時刻以降（空なら全部）、3: 層（before / after）。終了した件数を REAP_COUNT に入れる
 reap() {
-  local id n=0
-  for id in $(lingering "$1" "$2"); do
-    aws ssm terminate-session --session-id "$id" >/dev/null 2>&1 && { n=$((n + 1)); printf '%s\n' "$id" >> "$REAP_LOG"; }
+  local id layer="${3:-after}"
+  REAP_COUNT=0
+  owner >/dev/null
+  for id in $(lingering "$1" "${2:-}"); do
+    aws ssm terminate-session --session-id "$id" >/dev/null 2>&1 && { REAP_COUNT=$((REAP_COUNT + 1)); printf '%s %s\n' "$layer" "$id" >> "$REAP_LOG"; }
   done
-  [ "$n" -eq 0 ] || printf 'ec2: 接続が異常終了したため、残った SSM セッション %d 件を終了しました\n' "$n" >&2
 }
+reap_count() { awk -v l="${1:-}" '$1 == l { n++ } END { print n + 0 }' "$REAP_LOG" 2>/dev/null || echo 0; }
 utcnow() { date -u +%Y-%m-%dT%H:%M:%S; }
 
 # ssh を 1 回打つ。$1 がホスト、$2 以降は ssh の引数（ホスト名より前に置くもの）と、-- のあとの 1 本の文字列。
-# 呼び出し側が組み立てる。異常終了（255）なら後片付けをして、その終了コードを返す。
+# 呼び出し側が組み立てる。接続の前に、前回までの接続が残したセッションを終了する（起動時の層）。
+# 異常終了（255）なら、この接続が残したものを終了して（異常終了時の層）、その終了コードを返す。
 connect() {
   local host="$1"; shift
   local since rc
+  reap "$host" "" before
+  [ "$REAP_COUNT" -eq 0 ] || printf 'ec2: 前回までの接続で残っていた SSM セッション %d 件を終了しました\n' "$REAP_COUNT" >&2
   since=$(date -u -d '60 seconds ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || utcnow)
   ssh -F "$CONFIG" "$@"; rc=$?
-  [ "$rc" -ne 255 ] || reap "$host" "$since"
+  if [ "$rc" -eq 255 ]; then
+    reap "$host" "$since" after
+    [ "$REAP_COUNT" -eq 0 ] || printf 'ec2: 接続が異常終了したため、残った SSM セッション %d 件を終了しました\n' "$REAP_COUNT" >&2
+  fi
   return "$rc"
 }
 
@@ -161,14 +176,38 @@ selftest() {
   echo ""
 
   echo "◆ 後片付け"
+  # 起動時の層: ssh を接続中に強制終了してセッションを残し（ラッパーの異常終了時の層が動かない状況）、
+  # 次の接続がそれを見つけて終了することを見る。vmstat は数秒続くので、その間に殺す
+  local pid before_n after_n i
+  before_n=$(reap_count before)
+  ssh -F "$CONFIG" -- "$host" 'vmstat --count 10' </dev/null >/dev/null 2>&1 &
+  pid=$!
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(lingering "$host" "$started")" ] || break
+    sleep 2
+  done
+  kill -9 "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  sleep 2
+  out=$(lingering "$host" "$started")
+  if [ -z "$out" ]; then
+    skip "ssh を強制終了してもセッションが残らなかったので、起動時の後片付けは確かめられない"
+  else
+    out=$(remote "$host" uptime 2>&1); rc=$?
+    after_n=$(reap_count before)
+    if [ $rc -eq 0 ] && [ "$after_n" -gt "$before_n" ]; then
+      ok "強制終了で残ったセッションを、次の接続が起動時に終了した（$((after_n - before_n)) 件）"
+    else
+      ng "強制終了で残ったセッションが、次の接続の起動時に終了されない (exit $rc)" "$out"
+    fi
+  fi
   # 上の異常終了で残ったセッションは connect が終了している。ここでは、この自己診断が開いたものが残っていないことを見る
   sleep 2
   out=$(lingering "$host" "$started"); rc=$?
   if [ -n "$out" ]; then
-    reap "$host" "$started"
+    reap "$host" "$started" after
     ng "SSM セッションが残っていた（$(printf '%s\n' "$out" | wc -l | tr -d ' ') 件。終了した）" "$out"
   else
-    reaped=$(wc -l < "$REAP_LOG" | tr -d ' ')
+    reaped=$(reap_count after)
     ok "SSM セッションは残っていない$([ "${reaped:-0}" -eq 0 ] || printf '（異常終了した接続の %d 件はその場で終了した）' "$reaped")"
   fi
   echo ""

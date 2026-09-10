@@ -158,6 +158,7 @@ $ aws-survey run
 
 ```bash
 $ aws-survey ssh remove web1       # ユーザー・ゲートウェイ・sshd と sudoers の設定を EC2 から撤去し、タグと記録を消す
+                                   # 最後のホストなら、接続を許すポリシーも調査用ロールから外して消す
 $ aws-survey ssh rotate            # 鍵を作り直して、登録済みホスト全部に再導入する
 ```
 

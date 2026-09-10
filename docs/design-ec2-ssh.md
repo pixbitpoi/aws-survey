@@ -1,8 +1,9 @@
 # 設計: EC2 の中を調べる（SSH over SSM + 診断ゲートウェイ）
 
 調査コンテナのエージェントが、対象 EC2 インスタンスの OS 内部（ログ・サービス状態・リソース状況）を
-調べられるようにする機能の設計。第 10 節の第 7 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`、
-調査コンテナの `ec2` ラッパーとフック、`aws-survey ssh verify`、文書と `survey-status`、鍵の作り直し `rotate` と後片付け `remove`）。
+調べられるようにする機能の設計。第 10 節の第 8 段まで実装済み（ホスト側の導入と登録、IAM ポリシーと `role` / `credentials` / `verify`、
+調査コンテナの `ec2` ラッパーとフック、`aws-survey ssh verify`、文書と `survey-status`、鍵の作り直し `rotate` と後片付け `remove`、
+SSM セッションの起動時の後片付けと `remove` でのポリシーの片付け）。
 
 ## 1. 目標と方針
 
@@ -272,9 +273,16 @@ aws-survey ssh remove --print <host>        # 撤去スクリプトを標準出�
 3. `REMOVED clean` を確かめてから `ec2 delete-tags`（`Key=diag:ssh,Value=<name>`）。
 4. `environment.json` の `ssh.hosts.<alias>` を消し、`known_hosts` からそのインスタンスの行を消し（同じインスタンスを別の別名でも
    登録していれば残す）、`config` を作り直す。鍵は残す（次の `setup` がそのまま使う）。
-5. 最後のホストを消したときは、`diag-ssh-<name>` ポリシーが調査用ロールに付いたままでもタグ付きインスタンスが無いので何も許さないこと、
-   `credentials` の再発行（登録が無いときはポリシーを渡さない）と `role --create`（登録が無いときはポリシーを付けないが、
-   付いているものを外しもしない）を案内する。ポリシーそのものの detach / delete は利用者の判断で行う。
+5. 最後のホストを消したときは、`diag-ssh-<name>` ポリシーも片付ける（5/5）。自分で作ったロール（`own_role`）のときだけ、
+   元プロファイルで `detach-role-policy`（ロール `auth.role_name`）→ `list-policy-versions` で既定でない版を `delete-policy-version` →
+   `delete-policy` の順に行う（既定でない版が残っていると `delete-policy` は `DeleteConflict` になる）。`get-policy` が `NoSuchEntity` なら
+   何もしない。借りたロールの経路（`existing_role` / `granted_role`）ではポリシーに触らず、管理者に打ってもらう同じ 4 コマンドを表示する。
+   ここで失敗しても EC2 側・タグ・記録は済んでいるので、残ったものと手で打つコマンドを表示して非ゼロで終わる。
+   `role --create` は変えない（登録が無いときはポリシーを付けず、付いているものを外しもしない）。
+   `credentials` の再発行を案内する。**発行時に `--policy-arns` で渡したポリシーを消すと、その一時キーは読み取りも含めて全部拒否される**
+   （2026-09-10 の実測。`remove` の直後に古いキーで `verify` を打つと `get-caller-identity` から落ちる）ので、案内は「使えなくなった」と書く。
+   `setup` → `role --create` でポリシーを作り直した直後の `credentials` は `AssumeRole` が失敗することがあり（同日の実測。
+   作成から 20 秒ほど置いてやり直すと通った）、IAM の反映待ちとして扱う。
 
 EC2 側が失敗したらタグも記録も触らない。タグ外しが失敗したときは EC2 側は済んでいるので、同じコマンドのやり直しで続きから進む。
 
@@ -476,6 +484,9 @@ API が通ってプラグインの探索まで進んだ。
 - 直接の `ssh` でもゲートウェイしか動かない: `ssh <host> bash`、`ssh <host> 'uptime; id'` が `denied:` で終わる。
   `ssh -tt` は pty を割り当てられない（PermitTTY no）。`ssh -R` と `ssh -W`（`-L` と同じ direct-tcpip）は拒否される
   （DisableForwarding yes）。`sftp <host>` は使えない（サブシステム要求も ForceCommand に置き換わる）
+- 起動時の後片付けが動く: `ssh <host> 'vmstat --count 10'` を接続中に SIGKILL してセッションを残し（ラッパーの異常終了時の
+  後片付けが動かない状況）、続く `ec2 <host> uptime` が起動時にそれを見つけて終了したこと（`ec2:` の報せの件数）を見る。
+  セッションが残らなかったときは省略にする
 - 終わったあとに SSM のセッションが残っていない（下の「セッションの終わり方」）
 
 `ssh <host> 'cat /etc/passwd'` のような「直接の `ssh` に読める内容を頼む」形は、EC2 側では `ec2` 経由と同じ扱いになる
@@ -499,9 +510,31 @@ sshd からの EOF を読まず（正常経路で終了の起点になる `handl
 アカウントでは既定の 20 分（実測: 開始から 20 分 46 秒で `Terminated`。以前の「10 分ほど」は誤り）。
 
 つまり `ClientAliveInterval` が担うのは EC2 側の後片付け（sshd-session・ゲートウェイ・`/run/diag.lock` の解放）で、
-SSM 側の後片付けは `ec2` ラッパーの `terminate-session`（上）だけが持つ。ラッパーが動かなかった場合の SSM セッションは
-20 分の期限まで残る（`ssh verify` や次の `ec2` の実行が、自分の残したものを見つけて終了する）。
+SSM 側の後片付けは `ec2` ラッパーの `terminate-session` だけが持つ。
 コンテナ側の `config` にある `ServerAliveInterval 15` は逆方向（クライアントがサーバの無応答を検知する）で、この問題には効かない。
+
+**起動時の後片付け**（第 8 段で導入、2026-09-10 の実測）。ラッパーの後片付けは二層にした。
+
+| 層 | いつ | 何を終了するか |
+| --- | --- | --- |
+| 異常終了時 | `ssh` が 255 で終わったとき | 自分（同じ `Owner`）がその対象に、接続の開始時刻の 60 秒前以降に開いた `Active` なセッション |
+| 起動時 | 毎回の接続の前 | 自分（同じ `Owner`）がその対象に残している `Active` なセッション全部。`Terminating` 中のものは除く |
+
+異常終了時の層は、`ssh` がラッパーごと消えたとき（エージェントのコマンドがタイムアウトで殺された、コンテナが落ちた）には動かない。
+その分を次の接続が拾うのが起動時の層で、これで「ラッパーが動かなかった場合はサービス側の期限まで残る」が
+「次に `ec2` を打つまで残る」に縮む。同じ `Owner` に限るので、別の一時キー（発行し直す前のもの）が残したセッションは見えず、
+それはサービス側の期限に任せる。同じホストへ同時に 2 本の `ec2` を送ると、後から始まった方が先の接続を前回の残りと見なして
+終了するが、EC2 側で `/run/diag.lock` により 1 本ずつしか処理されないので、同時に送る意味がそもそも無い（`method/06` に「同時に送れるのは 1 本」とある）。
+
+実測（arm64 の Mac の調査コンテナから実 EC2 の AL2023 へ。`vmstat --count 10` を送って 5 秒後に殺した）。
+
+| 殺し方 | クライアント側のプロセス | SSM セッション | 次の `ec2 <host> uptime` |
+| --- | --- | --- | --- |
+| `ssh` だけを SIGKILL | `aws` と session-manager-plugin も消える（ProxyCommand は `ssh` と一緒に終わる） | `Connected` のまま残る（14 秒後も） | 起動時に 1 件を終了し、`uptime` は通る |
+| `ssh` とその ProxyCommand をプロセスグループごと SIGKILL | 全部消える | `Connected` のまま残る（73 秒後も。sshd の `ClientAlive` で EC2 側が閉じたあとも） | 同上 |
+
+どちらも `ec2` の標準エラーに「前回までの接続で残っていた SSM セッション 1 件を終了しました」が出て、終了したセッションは
+`History` で `Terminated` になる。`ssh verify` の自己診断はこれを毎回確かめる（上の項目）。
 
 ## 8. 調査コンテナ側
 
@@ -510,7 +543,7 @@ SSM 側の後片付けは `ec2` ラッパーの `terminate-session`（上）だ�
 | 部品 | 置き場 | 役割 |
 | --- | --- | --- |
 | `session-manager-plugin` と `openssh-client` | `Dockerfile` | `aws ssm start-session` の実体。AWS の deb を arch 別に入れる（`AWSCLI_ARCH` の `aarch64` → `ubuntu_arm64`、`x86_64` → `ubuntu_64bit`。deb に依存パッケージは無く `dpkg -i` で入る） |
-| `ec2` ラッパー | `container/ec2` → `/usr/local/bin/ec2`（root 所有） | `ssh -F ~/.aws-claude/ssh/config -- <host> <argv>` を組む。オプションは一切受け取らず、`<host>` は config の `Host` と照合。`--list`（ホスト一覧）と `--selftest <host>`（§7）だけが例外。異常終了時に残った SSM セッションを終了する（§7） |
+| `ec2` ラッパー | `container/ec2` → `/usr/local/bin/ec2`（root 所有） | `ssh -F ~/.aws-claude/ssh/config -- <host> <argv>` を組む。オプションは一切受け取らず、`<host>` は config の `Host` と照合。`--list`（ホスト一覧）と `--selftest <host>`（§7）だけが例外。SSM セッションの後片付けを二層で持つ（接続の前に前回までの残りを、異常終了時にその接続の残りを終了する。§7） |
 | フックの追加 | `container/hooks/aws-readonly-guard.sh`・`codex-guard.py`・`settings.json` | `ssh` / `scp` / `sftp` / `session-manager-plugin` の直接実行を拒否。`ec2 ` で始まる単独コマンドは、`aws` と同じ「`> out/…` だけ許す」規則で通す。監査ログに記録。Codex 側は `ec2` を `aws` と同じく Bash ガードへ委ねる。`settings.json` は `Bash(ec2:*)` を allow、`ssh` / `scp` / `sftp` / `session-manager-plugin` を deny に足す（フックと二重） |
 | `method/06_EC2の中を調べる.md` | `container/method/` | 動詞の使い方。`ls` / `find` で場所を突き止めてから `tail` / `grep`、大きい出力は `raw/` に落とす、の作法 |
 | `survey-status` | `container/survey-status` | 登録済みホストを表示 |
@@ -582,6 +615,14 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
    sshd の実効値（`forcecommand none`）・`visudo -c` を見て何も残っていないこと、タグが `Name` だけになったことを確認 → `setup` で戻した。
    `ClientAliveInterval` の実測は §7）。偽の `aws` で呼び出し順・引数・失敗時に何も残さないことを見るのは `tests/test_ssh_setup.py`、
    撤去スクリプトの中身は `tests/test_ssh_install.py`。
+8. `ec2` ラッパーの起動時の後片付けと自己診断の項目、`ssh remove` での `diag-ssh-<name>` の片付け。**済**（2026-09-10、arm64 の Mac と
+   実 EC2 の AL2023。`ssh verify` の自己診断 20 項目が通過（新しい項目は「強制終了で残ったセッションを、次の接続が起動時に終了した（1 件）」）。
+   手で `ssh` を 2 通りに強制終了して残したセッションを、次の `ec2 web1 uptime` が起動時に終了することを実測（§7 の表）。
+   `ssh remove web1` が 5/5 でロールから外し、既定でない版 1 つを消し、ポリシーを消して、`get-policy` が `NoSuchEntity`、ロールに残るのは
+   `ReadOnlyAccess` だけ、タグは `Name` だけになったことを確認。そのあと `ssh setup` → `role --create` → `credentials` → `verify`（7 項目）→
+   `ssh verify`（20 項目）が通って元の状態に戻した。古い一時キーが全拒否になることと、作成直後の `credentials` の失敗は §4.6）。
+   偽の `aws` での IAM の呼び出し順は `tests/test_ssh_setup.py`、ラッパーの後片付けの呼び出し順と引数の渡し方は `tests/test_guards.py`（偽の `ssh` と `aws`）。
+   調査コンテナの Codex は未認証のままで、Codex に `method/06` を読ませる確認は残件（Claude Code での同じ確認は第 6 段で済）。
 
 実環境で未確認のまま完了扱いにしない項目と、いまの状態。
 
@@ -593,6 +634,8 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 | AL2 の `requiretty` | **確認済**（2026-09-10、一時的に作った AL2 の実機。作業後に終了）。素の AL2 の `/etc/sudoers` に `requiretty` は無い。全体に `Defaults requiretty` を足しても（`/etc/sudoers.d/` と `/etc/sudoers` 先頭の両方で試した）、`Defaults:<user> !requiretty` を持つログインユーザーからの `sudo diag-root` は tty 無しで通り、それを持たない対照ユーザーは「you must have a tty」で拒否された。確認は sshd と同じく sudo を経由せず `runuser` でログインユーザーになって行った（root からの `sudo -u <user>` は外側の sudo が requiretty に当たる） |
 | AL2 の Python 3.7 | **確認済**（同上）。ゲートウェイが `shlex.join`（3.8 以降）を使っていて自己確認で落ちたので `shlex.quote` の連結に直し、AL2 で導入と root 段（`dmesg` / `log`）が動くこと、`tests/test_gateway.py` が Python 3.7 でも通ることを見た |
 | session-manager-plugin の deb の arm64 対応 | **確認済**（2026-09-10、arm64 の Mac の Docker で `ubuntu_arm64` の deb を `node:22-bookworm-slim` に入れ、`aws ssm start-session` 経由の `ssh` が実 EC2 に届いた。x86_64 側は `ubuntu_64bit` に読み替えるだけで、未実行） |
-| ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。第 7 段で sshd に `ClientAliveInterval 15` / `ClientAliveCountMax 3` を入れ、EC2 側のプロセスは 69 秒で消えることを実測したが、SSM のセッションはそれでは終わらず既定 20 分の期限まで残る。SSM 側の後片付けはラッパーだけが持つ） |
+| ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。第 7 段で sshd に `ClientAliveInterval 15` / `ClientAliveCountMax 3` を入れ、EC2 側のプロセスは 69 秒で消えることを実測したが、SSM のセッションはそれでは終わらず既定 20 分の期限まで残る。第 8 段でラッパーに起動時の層を足し、ラッパーごと消えた場合も次の `ec2` が終了することを実測） |
+| `remove` の `diag-ssh-<name>` の片付け | **確認済**（2026-09-10、第 8 段。detach → 版の削除 → delete が通り、`NoSuchEntity` を確認。古い一時キーは全拒否になる） |
+| 調査コンテナの Codex で `method/06` の確認 | **未実施**。Codex が未認証（`codex login --device-auth` はブラウザでの承認が要る）。Claude Code では第 6 段で済 |
 | root 段の `log` 動詞（登録済みログ） | **確認済**（2026-09-10、AL2023）。root 専用の `/var/log/audit/audit.log*` を `--log` で登録して再導入し、`ssh verify` が `log <名前> --tail 3` を root 段で読めることを確認（省略 0）。動詞の解析と `--file` の照合は `tests/test_gateway.py` |
 | x86_64 の session-manager-plugin（`ubuntu_64bit`） | **未実行**。arm64 の `ubuntu_arm64` からアーキテクチャ名を読み替えるだけで、x86_64 の Mac では `aws-survey run` の初回ビルドで通る |
