@@ -1,4 +1,4 @@
-"""`aws-survey ssh setup --print` and the install script it assembles, checked without EC2.
+"""`aws-survey ssh setup --print` and the install script it assembles, checked without EC2 or aws.
 
 The generated script is bash with the gateway, the root helper and the configuration builder
 embedded as heredocs. Here we check the assembly: the embedded Python still parses and equals
@@ -197,18 +197,28 @@ class HostSideValidation(SshPrintCase):
         self.assertIn('不明なオプション', result.stderr)
 
 
-class NotYetImplemented(SshPrintCase):
-    def test_setup_without_print_needs_target_and_stops(self):
+class WithoutAws(SshPrintCase):
+    """This case has no `aws` on PATH: --print and list still work, setup <target> stops before touching anything.
+    The SSM path itself is checked with a fake aws in tests/test_ssh_setup.py."""
+
+    def test_setup_without_target_points_to_print(self):
         result = self.run_cli('ssh', 'setup')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('--print', result.stderr)
+
+    def test_setup_with_target_needs_aws(self):
         result = self.run_cli('ssh', 'setup', 'i-0123456789abcdef0')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('まだ実装されていません', result.stdout)
-        self.assertIn('ssh setup --print', result.stdout)
+        self.assertIn('aws コマンドが見つかりません', result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['ssh']['hosts'], {})
+
+    def test_list_without_aws_reads_the_file(self):
+        result = self.run_cli('ssh', 'list')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('登録済みホストはありません', result.stdout)
 
     def test_other_subcommands_say_so(self):
-        for sub in (['list'], ['verify', 'web1'], ['rotate'], ['remove', 'web1']):
+        for sub in (['verify', 'web1'], ['rotate'], ['remove', 'web1']):
             result = self.run_cli('ssh', *sub)
             self.assertNotEqual(result.returncode, 0, sub)
             self.assertIn('まだ実装されていません', result.stdout, sub)

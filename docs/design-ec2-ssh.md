@@ -1,7 +1,8 @@
 # 設計: EC2 の中を調べる（SSH over SSM + 診断ゲートウェイ）
 
 調査コンテナのエージェントが、対象 EC2 インスタンスの OS 内部（ログ・サービス状態・リソース状況）を
-調べられるようにする機能の設計。**未実装の提案**であり、実装後は `security.md` と `README.md` に反映する。
+調べられるようにする機能の設計。第 10 節の第 3 段まで実装済み（ホスト側の導入と登録）。
+IAM・コンテナ側・文書は未実装で、実装後は `security.md` と `README.md` に反映する。
 
 ## 1. 目標と方針
 
@@ -93,7 +94,7 @@ flowchart LR
 ### 4.1 コマンド
 
 ```bash
-aws-survey ssh setup <instance-id | Name タグ> [--user <name>] [--log <名前>=<パス or glob>]... [--deny <glob>]... [--strict]
+aws-survey ssh setup <instance-id | Name タグ> [--alias <名前>] [--user <name>] [--log <名前>=<パス or glob>]... [--deny <glob>]... [--strict]
 aws-survey ssh setup --print [...]          # 導入スクリプトを標準出力に出すだけ（手動実行用）
 aws-survey ssh list                         # 登録済みホストと導入状態
 aws-survey ssh verify <host>                # コンテナから自己診断を打つ（§7）
@@ -104,6 +105,8 @@ aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoe
 - `--log` は root 読み取り段に登録するログ。一般ユーザーで読めるログには不要（§5.3）。
 - `--deny` は一般読み取り段の拒否パターンに足す glob。ホスト固有の秘密の置き場を隠すため。
 - `--strict` は一般読み取り段を無効にし、登録済みログと固定診断だけにする。感度の高いホスト向け。
+- `--alias` は `config` の `Host` 名（コンテナから `ec2 <host>` で呼ぶ名前）。省略時は Name タグ、
+  それが名前に使えなければ instance-id。同じ別名を別のインスタンスに付け直すことはできない（`--alias` で分ける）。
 
 `setup` は冪等。2 回目は鍵・ゲートウェイ・設定を上書きするだけで、ユーザーは作り直さない。
 引数なしの `aws-survey` は、`environment.json` に `ssh.hosts` があれば `status` に表示するだけで、
@@ -147,10 +150,21 @@ aws-survey ssh remove <host>                # ユーザー・sshd 設定・sudoe
 
 ### 4.3 導入スクリプトの大きさ
 
-`AWS-RunShellScript` の `commands` に渡す。第 2 段で組み立てた 1 本は約 65 KB（ゲートウェイと `diag-root` を素の heredoc で含む）。
-SSM の公開されている上限は「ドキュメント 64 KB」で、`SendCommand` は `MaxDocumentSizeExceeded` を返す。パラメータ値そのものの上限は
-文書に明記されておらず、**実 AWS で第 3 段のときに実測する**。超えるときは gzip + base64（約 18 KB になる）を 1 つの heredoc で渡し、
-EC2 側で展開して実行する。S3 経由は使わない（調査側で `s3:GetObject` を Deny している設計と噛み合わないし、余計なバケットを作りたくない）。
+`AWS-RunShellScript` の `commands` に渡す。組み立てた 1 本は約 65 KB（ゲートウェイと `diag-root` を素の heredoc で含む）。
+公開されている上限は「ドキュメント 64 KB」だが、`SendCommand` が実際に見るのは**パラメータとドキュメントの合計で 97 KB**
+（超えると `MaxDocumentSizeExceeded`。エラー文にこの数字が出る）。第 3 段の実測（2026-09-10、Amazon Linux 2023）:
+
+| 送った形 | 大きさ | 結果 |
+| --- | --- | --- |
+| 素の bash（既定） | 64,859 バイト | 通る。導入まで成功 |
+| コメントで水増しした無害なスクリプト | 81,940 バイト | 通る |
+| 同上 | 102,401 バイト | `MaxDocumentSizeExceeded`（97KB limit） |
+| gzip + base64 を 1 つの heredoc で渡し、EC2 側で展開して実行 | 26,488 バイト | 通る。導入まで成功（冪等な 2 回目として実行） |
+
+既定は素のまま送り、`SendCommand` が大きさで拒否したときだけ gzip + base64 に畳んで送り直す（`setup` の出力に「送った形」が出る）。
+`AWS_SURVEY_SSH_PACK=1` で最初から畳んだ形にできる（畳んだ経路を確かめる開発用）。素のままで 30 KB ほど余裕があるが、
+ゲートウェイを大きくするときはこの表を目安にする。S3 経由は使わない（調査側で `s3:GetObject` を Deny している設計と噛み合わないし、
+余計なバケットを作りたくない）。
 
 ### 4.4 environment.json
 
@@ -160,6 +174,7 @@ EC2 側で展開して実行する。S3 経由は使わない（調査側で `s3
   "hosts": {
     "web1": {
       "instance_id": "i-0123456789abcdef0",
+      "user": "diag",
       "installed_at": "2026-09-09T10:00:00+09:00",
       "logs": { "app": "/var/www/app/log/*.log" },
       "deny": ["/var/www/app/config/*"],
@@ -170,8 +185,11 @@ EC2 側で展開して実行する。S3 経由は使わない（調査側で `s3
 ```
 
 - `ssh.user` の既定は `diag`。`--user` で変える。検証は `^[a-z_][a-z0-9_-]{0,31}$`。
-  `init` の 9 項目には足さない（EC2 調査は任意機能なので `setup` 時に決める）。
+  `init` の 9 項目には足さない（EC2 調査は任意機能なので `setup` 時に決める）。ホストごとの `user` は導入時の値で、
+  `config` の `User` はこちらを使う。
 - `load-env.sh` は `SSH_USER` と `SSH_HOSTS`（alias の一覧）を読むだけ。
+- 記録は導入が成功し、タグが付いてから書く。途中で失敗したら environment.json・`config`・`known_hosts` には触れない。
+  `config` は `ssh.hosts` 全体から毎回作り直し、`known_hosts` はそのインスタンスの行だけ入れ替える。
 
 ### 4.5 導入スクリプトが EC2 に作るもの
 
@@ -445,7 +463,9 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 2. 導入スクリプトの雛形と `aws-survey ssh setup --print`。EC2 を使わず、ローカルの Docker（Ubuntu / AL2023）で
    root 実行して sshd 設定と権限を確かめる。**済**（`libexec/ec2/install.sh.tmpl`・`libexec/commands/ssh.sh`・
    `tests/test_ssh_install.py`。Docker での確認は `tests/ec2_install_smoke.sh`）。
-3. `aws-survey ssh setup`（SSM 経由）と `known_hosts` の回収。実 EC2 が要る。
+3. `aws-survey ssh setup`（SSM 経由）と `known_hosts` の回収、`aws-survey ssh list`。**済**（実 EC2 の Amazon Linux 2023 で
+   導入・冪等な再導入・`list` まで確認。SSM の上限は §4.3）。偽の `aws` で呼び出し順・引数・記録・失敗時に何も残さないことを
+   見るのは `tests/test_ssh_setup.py`。
 4. IAM ポリシーと `role` / `credentials` / `verify` の追加。実 AWS が要る。`PackedPolicySize` を再確認する。
 5. Dockerfile・`ec2` ラッパー・フック・`test_guards.py`。
 6. `method/06`、`survey-status`、`security.md`、`README.md`。
@@ -454,7 +474,8 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 
 | 項目 | 状態 |
 | --- | --- |
-| `/bin/bash` と ForceCommand の組み合わせ | ローカル Docker の sshd（Ubuntu 24.04 / AL2023）で、鍵認証 → ForceCommand → ゲートウェイの許可と拒否まで確認。実 EC2 では未確認 |
-| SSM パラメータの上限 | 未確認。生成物は約 65 KB で、公開されている「ドキュメント 64 KB」と同じ桁（§4.3） |
-| AL2 の `requiretty` | 未確認（AL2023 では `requiretty` が無く、AL2 のイメージでは確認していない）。sudoers に `Defaults:<user> !requiretty` を書いてある |
+| `/bin/bash` と ForceCommand の組み合わせ | **確認済**（2026-09-10、実 EC2 の AL2023）。導入後に RunCommand で、`sshd -T -C user=diag` の実効値（ForceCommand・PermitTTY no・DisableForwarding yes・publickey のみ）と、一時鍵で `ssh diag@127.0.0.1` を打った結果（`uptime` 許可、`bash` 拒否、`-tt` は pty 割当て失敗、`cat /etc/ssh/sshd_config` 拒否パターン）を見た。一時鍵はその場で `authorized_keys` から戻した |
+| SSM パラメータの上限 | **実測済**（§4.3）。合計 97 KB。素のまま 64,859 バイトで通る |
+| 再起動後の `/run/diag.lock` | **確認済**（AL2023）。再起動後に `root:diag 660` で再作成され、ゲートウェイが動く |
+| AL2 の `requiretty` | 未確認（AL2023 では `/etc/sudoers` に `requiretty` が無いことを確認。AL2 の実機では確認していない）。sudoers に `Defaults:<user> !requiretty` を書いてある |
 | session-manager-plugin の deb の arm64 対応 | 未確認（第 5 段） |

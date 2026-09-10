@@ -1,0 +1,381 @@
+"""`aws-survey ssh setup <target>` and `ssh list`, checked with a fake `aws` (no AWS, no EC2).
+
+The fake logs every call and answers the handful of APIs setup uses. Here we check the call
+order and arguments (source profile, SSM Online gate, RunShellScript with the assembled script,
+tag after success), the fallback to gzip + base64 when SendCommand refuses the size, what is
+recorded in environment.json, and the config / known_hosts written for the container. Nothing
+is recorded when the install fails.
+"""
+import base64
+import gzip
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+CLI = ROOT / 'bin/aws-survey'
+TOOLS = ['bash', 'sh', 'env', 'jq', 'sed', 'grep', 'awk', 'cut', 'head', 'tail', 'cat', 'wc', 'tr',
+         'dirname', 'basename', 'readlink', 'mkdir', 'chmod', 'cp', 'mv', 'rm', 'stat', 'date',
+         'mktemp', 'python3', 'printf', 'echo', 'test', 'touch', 'uname', 'gzip', 'base64', 'fold', 'sleep']
+FAKE_PUBKEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFak smoke-comment'
+INSTANCE = 'i-0123456789abcdef0'
+HOSTKEYS = ['HOSTKEY ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHostHostHostHostHostHostHostHostHostHostHos',
+            'HOSTKEY ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHost']
+
+FAKE_AWS = r'''#!/usr/bin/env python3
+"""Fake aws for ssh setup. Knobs (environment):
+  FAKE_PING        PingStatus of the instance (default Online; "none" = not managed)
+  FAKE_REJECT_PLAIN  1: the first SendCommand whose script is not packed fails with MaxDocumentSizeExceeded
+  FAKE_RUN_STATUS  final Status of the invocation (default Success)
+  FAKE_NO_HOSTKEY  1: the output has no HOSTKEY lines
+  FAKE_INSTANCES   JSON list of {id,name,state} to answer describe-instances (default one running web1)
+"""
+import json, os, sys
+argv = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(json.dumps(["aws"] + argv) + "\n")
+def opt(name, default=None):
+    return argv[argv.index(name) + 1] if name in argv else default
+instances = json.loads(os.environ.get("FAKE_INSTANCES") or
+                       '[{"id": "i-0123456789abcdef0", "name": "web1", "state": "running"}]')
+if "get-caller-identity" in argv:
+    print("arn:aws:iam::000000000000:user/fake"); sys.exit(0)
+if argv[:2] == ["ec2", "describe-instances"] or "describe-instances" in argv:
+    found = instances
+    if "--instance-ids" in argv:
+        wanted = [a for a in argv[argv.index("--instance-ids") + 1:] if not a.startswith("--")]
+        found = [i for i in instances if i["id"] in wanted]
+        if not found:
+            sys.stderr.write("An error occurred (InvalidInstanceID.NotFound)\n"); sys.exit(254)
+    elif "--filters" in argv:
+        name = [a for a in argv if a.startswith("Name=tag:Name,Values=")][0].split("=", 2)[2]
+        found = [i for i in instances if i.get("name") == name]
+    if "diag:ssh" in " ".join(argv):
+        print(json.dumps([{"id": i["id"], "state": i["state"], "tag": i.get("tag")} for i in found]))
+    else:
+        print(json.dumps([{"id": i["id"], "state": i["state"], "name": i.get("name"), "arch": "x86_64", "image": "ami-0"} for i in found]))
+    sys.exit(0)
+if "describe-instance-information" in argv:
+    ping = os.environ.get("FAKE_PING", "Online")
+    if "InstanceInformationList[0]" in " ".join(argv):
+        print("null" if ping == "none" else json.dumps({"ping": ping, "platform": "Amazon Linux", "version": "2023", "agent": "3.3"}))
+    else:
+        print("[]" if ping == "none" else json.dumps([{"id": i["id"], "ping": ping} for i in instances]))
+    sys.exit(0)
+if "send-command" in argv:
+    req = json.loads(opt("--cli-input-json"))
+    script = req["Parameters"]["commands"][0]
+    packed = "__DIAG_B64__" in script
+    d = os.environ["FAKE_SCRIPTS"]
+    n = len([f for f in os.listdir(d) if f.endswith(".sh")])
+    with open(os.path.join(d, f"{n}-{'packed' if packed else 'plain'}.sh"), "w") as f:
+        f.write(script)
+    with open(os.path.join(d, f"{n}.request.json"), "w") as f:
+        json.dump(req, f)
+    if os.environ.get("FAKE_REJECT_PLAIN") == "1" and not packed:
+        sys.stderr.write("An error occurred (MaxDocumentSizeExceeded) when calling the SendCommand operation: "
+                         "The total size of your parameter(s) and document exceeds the 97KB limit.\n")
+        sys.exit(254)
+    print(json.dumps({"Command": {"CommandId": "cmd-fake-" + str(n), "Status": "Pending"}})); sys.exit(0)
+if "get-command-invocation" in argv:
+    status = os.environ.get("FAKE_RUN_STATUS", "Success")
+    out = "[diag] created user diag\n[diag] self check passed (uptime allowed, bash refused)\n"
+    if os.environ.get("FAKE_NO_HOSTKEY") != "1":
+        out += "\n".join(__HOSTKEYS__) + "\n"
+    print(json.dumps({"Status": status, "StandardOutputContent": out,
+                      "StandardErrorContent": "" if status == "Success" else "[diag] error: sshd -t rejected the configuration"}))
+    sys.exit(0)
+if "create-tags" in argv:
+    if os.environ.get("FAKE_TAG_FAIL") == "1":
+        sys.stderr.write("An error occurred (UnauthorizedOperation)\n"); sys.exit(254)
+    print("{}"); sys.exit(0)
+print("{}")
+'''.replace('__HOSTKEYS__', json.dumps(HOSTKEYS))
+
+
+class SshSetupCase(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        base = Path(self.temp.name).resolve()
+        self.home = base / 'home'
+        self.target = base / 'target'
+        self.bin = base / 'bin'
+        self.scripts = base / 'scripts'
+        for d in (self.home, self.target, self.bin, self.scripts):
+            d.mkdir()
+        for tool in TOOLS:
+            found = shutil.which(tool)
+            if found:
+                (self.bin / tool).symlink_to(found)
+        (self.bin / 'aws').write_text(FAKE_AWS)
+        (self.bin / 'aws').chmod(0o755)
+        self.log = base / 'calls.jsonl'
+        self.write_environment()
+        self.keys = self.home / '.aws-survey/smoke/ssh'
+        self.keys.mkdir(parents=True)
+        (self.keys / 'id_ed25519').write_text('fake private key\n')
+        (self.keys / 'id_ed25519.pub').write_text(FAKE_PUBKEY + '\n')
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def write_environment(self, ssh=None):
+        config = json.loads((ROOT / 'templates/environment.json').read_text())
+        config.update(name='smoke', account_id='000000000000', region='test-region')
+        config['auth'].update(route='own_role', source_profile='fake-src',
+                              principal_arn='arn:aws:iam::000000000000:user/fake',
+                              role_name='fake-role', refresh_command=None)
+        if ssh is not None:
+            config['ssh'] = ssh
+        (self.target / 'environment.json').write_text(json.dumps(config))
+
+    def environment(self):
+        return json.loads((self.target / 'environment.json').read_text())
+
+    def run_cli(self, *args, **knobs):
+        env = {'PATH': str(self.bin), 'HOME': str(self.home), 'LANG': os.environ.get('LANG', 'C.UTF-8'),
+               'LC_ALL': os.environ.get('LC_ALL', ''), 'TZ': 'UTC', 'FAKE_LOG': str(self.log),
+               'FAKE_SCRIPTS': str(self.scripts), 'AWS_SURVEY_SSM_POLL': '0'}
+        env = {k: v for k, v in env.items() if v}
+        env.update(knobs)
+        return subprocess.run([str(CLI), '--dir', str(self.target), *args], capture_output=True, text=True,
+                              errors='replace', env=env)
+
+    def calls(self):
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def sent_scripts(self):
+        return sorted(p.name for p in self.scripts.iterdir() if p.suffix == '.sh')
+
+    def setup(self, *args, **knobs):
+        result = self.run_cli('ssh', 'setup', *args, **knobs)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+
+class Setup(SshSetupCase):
+    def test_call_order_and_arguments(self):
+        result = self.setup('web1')
+        calls = self.calls()
+        ops = [c[c.index(next(a for a in c if a in ('sts', 'ec2', 'ssm'))) + 1] for c in calls]
+        self.assertEqual(ops, ['get-caller-identity', 'describe-instances', 'describe-instance-information',
+                               'send-command', 'get-command-invocation', 'create-tags'])
+        for call in calls:
+            self.assertIn('fake-src', call, call)          # every call goes through the source profile
+        self.assertNotIn('claude-ro', json.dumps(calls))
+        describe = calls[1]
+        self.assertIn('Name=tag:Name,Values=web1', describe)
+        send = calls[3]
+        self.assertIn('test-region', send)
+        request = json.loads(send[send.index('--cli-input-json') + 1])
+        self.assertEqual(request['DocumentName'], 'AWS-RunShellScript')
+        self.assertEqual(request['InstanceIds'], [INSTANCE])
+        self.assertEqual(request['Parameters']['executionTimeout'], ['600'])
+        for word in ('ai', 'agent', 'survey', 'claude'):
+            self.assertNotIn(word, request['Comment'].lower())
+        tag = calls[5]
+        self.assertIn(INSTANCE, tag)
+        self.assertIn('Key=diag:ssh,Value=smoke', tag)
+        self.assertIn('送った形: plain', result.stdout)
+        self.assertIn('aws-survey ssh list', result.stdout)
+
+    def test_sent_script_is_the_print_output(self):
+        printed = self.run_cli('ssh', 'setup', '--print', '--log', 'app=/var/log/app/*.log', '--strict')
+        self.setup('web1', '--log', 'app=/var/log/app/*.log', '--strict')
+        self.assertEqual(self.sent_scripts(), ['0-plain.sh'])
+        self.assertEqual((self.scripts / '0-plain.sh').read_text(), printed.stdout)
+
+    def test_environment_json_record(self):
+        self.setup(INSTANCE, '--alias', 'app', '--user', 'ops', '--log', 'app=/var/log/app/*.log',
+                   '--deny', '/srv/*.pem', '--strict')
+        ssh = self.environment()['ssh']
+        host = ssh['hosts']['app']
+        self.assertEqual(host['instance_id'], INSTANCE)
+        self.assertEqual(host['user'], 'ops')
+        self.assertEqual(host['logs'], {'app': '/var/log/app/*.log'})
+        self.assertEqual(host['deny'], ['/srv/*.pem'])
+        self.assertIs(host['strict'], True)
+        self.assertRegex(host['installed_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$')
+        self.assertEqual(set(host), {'instance_id', 'user', 'installed_at', 'logs', 'deny', 'strict'})
+        self.assertIn('describe-instances', json.dumps(self.calls()[1]))
+        self.assertIn(INSTANCE, self.calls()[1])
+
+    def test_config_and_known_hosts(self):
+        self.setup('web1')
+        config = (self.keys / 'config').read_text()
+        self.assertIn('Host web1\n', config)
+        self.assertIn(f'    HostName {INSTANCE}\n', config)
+        self.assertIn('    User diag\n', config)
+        self.assertIn('    IdentityFile ~/.aws-claude/ssh/id_ed25519\n', config)
+        self.assertIn('    UserKnownHostsFile ~/.aws-claude/ssh/known_hosts\n', config)
+        self.assertIn('    ProxyCommand aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p\n', config)
+        for line in ('StrictHostKeyChecking yes', 'BatchMode yes', 'RequestTTY no', 'ForwardAgent no', 'IdentitiesOnly yes'):
+            self.assertIn(f'    {line}\n', config)
+        known = (self.keys / 'known_hosts').read_text().splitlines()
+        self.assertEqual(known, [h.replace('HOSTKEY', INSTANCE) for h in HOSTKEYS])
+        self.assertEqual(oct((self.keys / 'config').stat().st_mode & 0o777), '0o644')
+        self.assertIn('EC2 の中を調べる', self.run_cli('status').stdout)
+
+    def test_second_host_keeps_the_first(self):
+        self.setup('web1')
+        instances = json.dumps([{'id': INSTANCE, 'name': 'web1', 'state': 'running'},
+                                {'id': 'i-0fedcba9876543210', 'name': 'db1', 'state': 'running'}])
+        self.setup('db1', FAKE_INSTANCES=instances)
+        hosts = self.environment()['ssh']['hosts']
+        self.assertEqual(set(hosts), {'web1', 'db1'})
+        config = (self.keys / 'config').read_text()
+        self.assertIn('Host web1\n', config)
+        self.assertIn('Host db1\n', config)
+        known = (self.keys / 'known_hosts').read_text()
+        self.assertEqual(known.count(INSTANCE), 2)
+        self.assertEqual(known.count('i-0fedcba9876543210'), 2)
+
+    def test_rerun_replaces_known_hosts_lines_not_duplicates(self):
+        self.setup('web1')
+        self.setup('web1')
+        known = (self.keys / 'known_hosts').read_text().splitlines()
+        self.assertEqual(len(known), 2)
+        self.assertEqual(len(self.environment()['ssh']['hosts']), 1)
+
+    def test_alias_defaults_to_instance_id_when_name_is_unusable(self):
+        instances = json.dumps([{'id': INSTANCE, 'name': 'web 1 (prod)', 'state': 'running'}])
+        self.setup(INSTANCE, FAKE_INSTANCES=instances)
+        self.assertEqual(list(self.environment()['ssh']['hosts']), [INSTANCE])
+
+    def test_alias_used_by_another_instance_is_refused(self):
+        self.write_environment({'user': 'diag', 'hosts': {'web1': {'instance_id': 'i-0fedcba9876543210'}}})
+        result = self.run_cli('ssh', 'setup', 'web1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--alias', result.stderr)
+        self.assertFalse(any('send-command' in c for c in self.calls()))
+
+    def test_packed_fallback_when_plain_is_too_large(self):
+        result = self.setup('web1', FAKE_REJECT_PLAIN='1')
+        self.assertEqual(self.sent_scripts(), ['0-plain.sh', '1-packed.sh'])
+        self.assertIn('MaxDocumentSizeExceeded', result.stdout)
+        self.assertIn('送った形: packed', result.stdout)
+        packed = (self.scripts / '1-packed.sh').read_text()
+        self.assertTrue(packed.startswith('#!/usr/bin/env bash\n'))
+        body = re.search(r"<<'__DIAG_B64__'[^\n]*\n(.*?)\n__DIAG_B64__\n", packed, re.S).group(1)
+        unpacked = gzip.decompress(base64.b64decode(body)).decode()
+        self.assertEqual(unpacked, (self.scripts / '0-plain.sh').read_text())
+        self.assertLess(len(packed), len(unpacked) / 2)
+        self.assertEqual(subprocess.run(['bash', '-n'], input=packed, capture_output=True, text=True).returncode, 0)
+        self.assertIn('web1', self.environment()['ssh']['hosts'])
+
+    def test_pack_can_be_forced(self):
+        self.setup('web1', AWS_SURVEY_SSH_PACK='1')
+        self.assertEqual(self.sent_scripts(), ['0-packed.sh'])
+
+
+class NothingRecordedOnFailure(SshSetupCase):
+    def assert_nothing_recorded(self, result):
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.environment()['ssh']['hosts'], {})
+        self.assertFalse((self.keys / 'config').exists())
+        self.assertFalse((self.keys / 'known_hosts').exists())
+        self.assertFalse(any('create-tags' in c for c in self.calls()))
+
+    def test_not_managed_by_ssm_guides_and_stops(self):
+        result = self.run_cli('ssh', 'setup', 'web1', FAKE_PING='none')
+        self.assert_nothing_recorded(result)
+        self.assertIn('AmazonSSMManagedInstanceCore', result.stdout)
+        self.assertIn('ssh setup --print', result.stdout)
+        self.assertFalse(any('send-command' in c for c in self.calls()))
+
+    def test_ping_not_online(self):
+        result = self.run_cli('ssh', 'setup', 'web1', FAKE_PING='ConnectionLost')
+        self.assert_nothing_recorded(result)
+        self.assertIn('ConnectionLost', result.stdout)
+
+    def test_install_failure(self):
+        result = self.run_cli('ssh', 'setup', 'web1', FAKE_RUN_STATUS='Failed')
+        self.assert_nothing_recorded(result)
+        self.assertIn('Failed', result.stdout)
+        self.assertIn('sshd -t rejected', result.stdout)
+        self.assertIn('何も記録していません', result.stderr)
+
+    def test_missing_hostkey_lines(self):
+        result = self.run_cli('ssh', 'setup', 'web1', FAKE_NO_HOSTKEY='1')
+        self.assert_nothing_recorded(result)
+        self.assertIn('HOSTKEY', result.stderr)
+
+    def test_tag_failure_records_nothing(self):
+        result = self.run_cli('ssh', 'setup', 'web1', FAKE_TAG_FAIL='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.environment()['ssh']['hosts'], {})
+        self.assertFalse((self.keys / 'config').exists())
+        self.assertIn('diag:ssh=smoke', result.stderr)
+
+    def test_stopped_instance(self):
+        instances = json.dumps([{'id': INSTANCE, 'name': 'web1', 'state': 'stopped'}])
+        result = self.run_cli('ssh', 'setup', 'web1', FAKE_INSTANCES=instances)
+        self.assert_nothing_recorded(result)
+        self.assertIn('running', result.stderr)
+
+    def test_ambiguous_name(self):
+        instances = json.dumps([{'id': INSTANCE, 'name': 'web1', 'state': 'running'},
+                                {'id': 'i-0fedcba9876543210', 'name': 'web1', 'state': 'running'}])
+        result = self.run_cli('ssh', 'setup', 'web1', FAKE_INSTANCES=instances)
+        self.assert_nothing_recorded(result)
+        self.assertIn('2 台', result.stderr)
+
+    def test_unknown_target(self):
+        result = self.run_cli('ssh', 'setup', 'nope')
+        self.assert_nothing_recorded(result)
+        self.assertIn('見つかりません', result.stderr)
+
+    def test_no_target(self):
+        result = self.run_cli('ssh', 'setup')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--print', result.stderr)
+        self.assertEqual(self.calls(), [])
+
+
+class List(SshSetupCase):
+    def test_empty(self):
+        result = self.run_cli('ssh', 'list')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('登録済みホストはありません', result.stdout)
+        self.assertIn('aws-survey ssh setup', result.stdout)
+
+    def test_after_setup_shows_live_state(self):
+        self.setup('web1')
+        self.log.unlink()
+        instances = json.dumps([{'id': INSTANCE, 'name': 'web1', 'state': 'running', 'tag': 'smoke'}])
+        result = self.run_cli('ssh', 'list', FAKE_INSTANCES=instances)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('✔ web1', result.stdout)
+        self.assertIn(INSTANCE, result.stdout)
+        self.assertIn('状態 running / タグ diag:ssh=smoke / SSM Online', result.stdout)
+        self.assertTrue(all('fake-src' in c for c in self.calls()))
+
+    def test_missing_tag_is_a_warning(self):
+        self.setup('web1')
+        instances = json.dumps([{'id': INSTANCE, 'name': 'web1', 'state': 'stopped'}])
+        result = self.run_cli('ssh', 'list', FAKE_INSTANCES=instances, FAKE_PING='none')
+        self.assertIn('⚠ web1', result.stdout)
+        self.assertIn('状態 stopped / タグ diag:ssh=（無し） / SSM なし', result.stdout)
+
+    def test_without_aws_lists_from_file(self):
+        self.write_environment({'user': 'diag', 'hosts': {'web1': {'instance_id': INSTANCE, 'user': 'diag',
+                                                                    'installed_at': '2026-09-10T00:00:00+09:00',
+                                                                    'logs': {'app': '/var/log/app/*.log'}, 'deny': [], 'strict': True}}})
+        (self.bin / 'aws').unlink()
+        result = self.run_cli('ssh', 'list')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('web1', result.stdout)
+        self.assertIn('strict', result.stdout)
+        self.assertIn('app=/var/log/app/*.log', result.stdout)
+        self.assertIn('確かめていません', result.stdout)
+
+
+if __name__ == '__main__':
+    unittest.main()

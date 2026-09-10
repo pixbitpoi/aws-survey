@@ -12,8 +12,10 @@
 #   aws-survey credentials          一時キーの発行・再発行（libexec/commands/credentials.sh）
 #   aws-survey verify               読み取り専用の検証（libexec/commands/verify.sh）
 #   aws-survey run [cmd]            コンテナのビルドと起動（libexec/commands/run.sh）
-#   aws-survey ssh setup --print [...]
-#                                   EC2 の中を調べるための導入スクリプトを書き出す（libexec/commands/ssh.sh。任意の追加機能）
+#   aws-survey ssh setup <instance-id | Name タグ> [...]
+#                                   EC2 の中を調べるための診断ゲートウェイを SSM 経由で導入して登録する（libexec/commands/ssh.sh。任意の追加機能）
+#   aws-survey ssh setup --print [...]   その導入スクリプトを書き出すだけ（手動実行用）
+#   aws-survey ssh list             登録済みホストと導入状態
 #
 #   共通オプション:  --dir <対象フォルダ>   既定はカレントディレクトリ（AWS_SURVEY_DIR でも指定可）
 #
@@ -874,7 +876,7 @@ cmd_doctor() {
   bash "$LIBEXEC_DIR/commands/doctor.sh"
 }
 
-cmd_help() { sed -n '2,21p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,23p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 case "$CMD" in
   "")          cmd_guide_loop ;;
