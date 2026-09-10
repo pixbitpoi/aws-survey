@@ -622,7 +622,9 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
    `ReadOnlyAccess` だけ、タグは `Name` だけになったことを確認。そのあと `ssh setup` → `role --create` → `credentials` → `verify`（7 項目）→
    `ssh verify`（20 項目）が通って元の状態に戻した。古い一時キーが全拒否になることと、作成直後の `credentials` の失敗は §4.6）。
    偽の `aws` での IAM の呼び出し順は `tests/test_ssh_setup.py`、ラッパーの後片付けの呼び出し順と引数の渡し方は `tests/test_guards.py`（偽の `ssh` と `aws`）。
-   調査コンテナの Codex は未認証のままで、Codex に `method/06` を読ませる確認は残件（Claude Code での同じ確認は第 6 段で済）。
+   調査コンテナの Codex（`codex login --device-auth` で認証）に `method/06` を読ませ、`ec2 web1` の `help` / `uptime` / `services` / `tail` を
+   `out/<フェーズ>/raw/raw-web1-<何>.txt` に保存させて、監査ログに 4 件の `ALLOW`、EC2 側の journal に 4 件の `allow`、終了後に SSM の
+   セッションが残らないことを確認（Claude Code での同じ確認は第 6 段）。
 
 実環境で未確認のまま完了扱いにしない項目と、いまの状態。
 
@@ -636,6 +638,6 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
 | session-manager-plugin の deb の arm64 対応 | **確認済**（2026-09-10、arm64 の Mac の Docker で `ubuntu_arm64` の deb を `node:22-bookworm-slim` に入れ、`aws ssm start-session` 経由の `ssh` が実 EC2 に届いた。x86_64 側は `ubuntu_64bit` に読み替えるだけで、未実行） |
 | ssh の異常終了で SSM のセッションが残る | **確認済・対処済**（§7。`ec2` ラッパーが終了する。第 7 段で sshd に `ClientAliveInterval 15` / `ClientAliveCountMax 3` を入れ、EC2 側のプロセスは 69 秒で消えることを実測したが、SSM のセッションはそれでは終わらず既定 20 分の期限まで残る。第 8 段でラッパーに起動時の層を足し、ラッパーごと消えた場合も次の `ec2` が終了することを実測） |
 | `remove` の `diag-ssh-<name>` の片付け | **確認済**（2026-09-10、第 8 段。detach → 版の削除 → delete が通り、`NoSuchEntity` を確認。古い一時キーは全拒否になる） |
-| 調査コンテナの Codex で `method/06` の確認 | **未実施**。Codex が未認証（`codex login --device-auth` はブラウザでの承認が要る）。Claude Code では第 6 段で済 |
+| 調査コンテナの Codex で `method/06` の確認 | **確認済**（2026-09-10、第 8 段。`codex exec` で 4 動詞を `raw/` に保存し、監査ログと EC2 側の journal に記録が残った） |
 | root 段の `log` 動詞（登録済みログ） | **確認済**（2026-09-10、AL2023）。root 専用の `/var/log/audit/audit.log*` を `--log` で登録して再導入し、`ssh verify` が `log <名前> --tail 3` を root 段で読めることを確認（省略 0）。動詞の解析と `--file` の照合は `tests/test_gateway.py` |
 | x86_64 の session-manager-plugin（`ubuntu_64bit`） | **未実行**。arm64 の `ubuntu_arm64` からアーキテクチャ名を読み替えるだけで、x86_64 の Mac では `aws-survey run` の初回ビルドで通る |
