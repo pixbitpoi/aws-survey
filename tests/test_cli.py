@@ -256,8 +256,8 @@ class StateTable(CliCase):
         self.verified()
         self.write_keys(iso(datetime.now(timezone.utc) + timedelta(minutes=45)))
         result = self.run_cli()
-        self.assert_stage(result, 5, '任意の追加', 'EC2 の中を調べる: なし', 'aws-survey ssh setup <instance-id | Name タグ>',
-                          'Lambda のコードを読む: なし', 'aws-survey lambda pull <関数名>')
+        self.assert_stage(result, 5, '任意の追加', 'EC2 の中を調べる: なし', 'aws-survey ec2',
+                          'Lambda のコードを読む: なし', 'aws-survey lambda', 'aws-survey run', 'aws-survey ls')
         for region, name in (('r1', 'f1'), ('r1', 'f2'), ('r2', 'f3')):
             path = self.target / 'code/lambda' / region / name
             path.mkdir(parents=True)
@@ -265,7 +265,7 @@ class StateTable(CliCase):
         (self.target / 'code/lambda-layers/r1/l1/1').mkdir(parents=True)
         result = self.run_cli()
         self.assert_stage(result, 5, '取り出してある関数 3 件', 'aws-survey run')
-        self.assertNotIn('aws-survey lambda pull', result.stdout)
+        self.assertNotIn('で一覧から選んで取り出します', result.stdout)
         self.assertIn('取り出してある関数 3 件', self.run_cli('status').stdout)
 
     def ec2_environment(self, setup=None, hosts=None, session_hosts=None, expiration=None):

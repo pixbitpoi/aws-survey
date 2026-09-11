@@ -40,9 +40,22 @@
 
 利用者に見せる「次に打つコマンド」は `load-env.sh` が入れる `AWS_SURVEY_CMD`（`aws-survey` か `<本体>/aws-survey`）で
 組み立てる。`./run.sh` のようなスクリプト名を案内文に書かない。入口は `aws-survey`（`role` / `credentials` / `verify` /
-`run` / `status` / `doctor` / `init` / `ssh` / `lambda`）。実体は `role` / `credentials` / `verify` / `run` / `doctor` / `ssh` / `lambda` が
-`libexec/commands/<名前>.sh`、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。イメージのビルドは `libexec/docker.sh`
-（`run` と `lambda pull` が共有する）。
+`run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh`）。実体は `role` / `credentials` / `verify` / `run` / `doctor` /
+`ls` / `ec2` / `ssh` / `lambda` が `libexec/commands/<名前>.sh`、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。
+イメージのビルドは `libexec/docker.sh`（`run` と `lambda pull` と `libexec/container.sh` が共有する）。
+
+利用者に見せる入口はリソース名（`ls` / `ec2` / `lambda`）で、ホストで動くかコンテナで動くかは必要な資格情報で内部的に決め、
+利用者には見せない。元プロファイル（強い権限）が要るもの（`ssh setup` / `rotate` / `remove`、`lambda pull`）はホストで動き、
+読み取り専用の一時キーで足りるもの（リソースの列挙、`ec2 --selftest`）は調査コンテナと同じイメージで `docker run --rm` の
+1 コマンドとして動く（`libexec/container.sh` の `container_run`。渡すのは `$AWS_DIR` の ro マウントとリージョンだけで、`out/` も
+`code/` も Claude / Codex のボリュームも付けない）。列挙は `libexec/inventory.sh` を `/x/` に ro マウントして貸す
+（`container_inventory`。`lambda pull` が抽出器を貸すのと同じ型。イメージには焼かず、調査エージェントには届かない）。
+出力は 1 行 1 JSON で、読めないサービスも `denied` の行を落とさない。画面に出すだけで `out/` には書かない
+（対象の棚卸しを調査エージェントに先渡ししない規則は、ファイルに残さないことで守る）。
+`ec2` / `lambda`（引数なし）は一覧から矢印キーで選ばせ（`libexec/menu.sh` の `choose_menu`。`init` と共有）、選んだ 1 つを既存の
+`ssh.sh setup|verify|remove <対象>` に `exec`、`lambda.sh` の `cmd_pull` / `cmd_remove` に in-process で渡す。端末でなければ一覧と
+`next_cmd` の案内だけで終わる。`choose_menu` は EXIT トラップを張って外すので、`trap ... EXIT` を張る前に呼ぶ。
+一時キーの状態の判定（`key_state`）は `libexec/keys.sh` にあり、`bin/aws-survey` と `container.sh` が共有する。
 `ssh` と `lambda` は任意の追加機能。段階 0〜4 の判定には組み込まず、段階 5（調査）に着いてから `show_extras` で現状と足し方を出す。
 EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `ssh verify <host>`）が要るので、`ec2_pending` が
 ファイルだけで途中かどうかを判定し、案内ループに乗せる。判定に使う記録は 3 つ: `setup.ssh_policy_attached`（`role --create` が書く。

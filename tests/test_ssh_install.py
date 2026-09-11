@@ -322,7 +322,7 @@ class LoadEnv(SshPrintCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, '')
         self.assertIn('EC2 の中を調べる: なし', result.stdout)
-        self.assertIn('ssh setup <instance-id | Name タグ>', result.stdout)
+        self.assertIn('ec2 で一覧から選んで登録します', result.stdout)
         self.write_environment({'ssh': {'user': 'diag', 'hosts': {'web1': {'instance_id': 'i-0'}, 'db1': {'instance_id': 'i-1'}}}})
         result = self.run_cli('status')
         self.assertIn('登録済みホスト db1 web1', result.stdout)

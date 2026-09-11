@@ -56,6 +56,11 @@
 `phase_dir` / `region` / `name` は起動時に読むので次回の `aws-survey run` から効く。
 同じ `out/` に対して 2 つのエージェントを同時に走らせない。台帳と監査ログの書き手が競合する。
 
+ホストが同じイメージを `docker run --rm` で 1 コマンドだけ動かす経路がある（`aws-survey ls` / `ec2` / `lambda` の一覧と
+`ssh verify` の `ec2 --selftest`。`libexec/container.sh`）。渡すのは一時キーの ro マウントだけで、`out/` も指示書も
+エージェントのボリュームも付けない。ホスト側のスクリプト（`libexec/inventory.sh`）は `/x/` に ro マウントして借りるだけで、
+`container/` には置かない。調査エージェントに使わせる道具ではなく、イメージにも残らない。
+
 ## 画面の見た目
 
 ログイン時の案内（`bashrc`）と `survey-status` は続けて 1 画面に出る。記号・字下げ・色は

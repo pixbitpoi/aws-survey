@@ -110,6 +110,10 @@ aws-survey ssh remove --print <host>        # 撤去スクリプトを標準出�
 - `--alias` は `config` の `Host` 名（コンテナから `ec2 <host>` で呼ぶ名前）。省略時は Name タグ、
   それが名前に使えなければ instance-id。同じ別名を別のインスタンスに付け直すことはできない（`--alias` で分ける）。
 
+利用者向けの入口は `aws-survey ec2`。EC2 の一覧（調査コンテナの中で一時キーが読む。SSM の管理下か・登録済みかを 1 行ごとに出す）から
+矢印キーで 1 台選ばせ、未登録なら `ssh setup <instance-id>` に、登録済みなら `ssh verify` / `ssh remove` / 引数なしの `aws-survey` に
+`exec` する。上のコマンドは変えず、その上に載せた選択の層。
+
 `setup` は冪等。2 回目は鍵・ゲートウェイ・設定を上書きするだけで、ユーザーは作り直さない。
 引数なしの `aws-survey` は、段階 5（調査）に着いてから「任意の追加」として登録済みホストを出す。`setup` のあとに要る 3 手
 （`role --create` → `credentials` → `ssh verify <host>`）は、基本の準備と同じ案内ループで 1 手ずつ進める。途中かどうかの判定は

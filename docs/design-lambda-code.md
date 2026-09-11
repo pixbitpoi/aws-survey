@@ -98,6 +98,8 @@ aws-survey lambda remove <関数名>... | --all
 - `remove` はホストの取り出し先を消す。AWS には何も残していないので、AWS 側の片付けは無い。関数名での `remove` は
   `--region`（既定は `environment.json` の `region`）の関数だけを消し、レイヤーは他の関数と共有するので残す。`--all` は `code/` ごと消す
 - 表示は `libexec/ui.sh` の部品で組む（`.agents/rules/credentials.md`）。`ssh` と同じく任意機能で、段階の判定には組み込まない
+- 利用者向けの入口は引数なしの `aws-survey lambda`。関数の一覧（調査コンテナの中で一時キーが `ListFunctions` を読む。
+  取り出し済みかを `_manifest.json` の有無で印す）から矢印キーで選ばせ、`cmd_pull` / `cmd_remove` に渡す。上のコマンドは変えない
 
 ### 4.2 pull が行うこと
 

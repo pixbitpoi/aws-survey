@@ -13,6 +13,13 @@
 #   aws-survey credentials          一時キーの発行・再発行（libexec/commands/credentials.sh）
 #   aws-survey verify               読み取り専用の検証（libexec/commands/verify.sh）
 #   aws-survey run [cmd]            コンテナのビルドと起動（libexec/commands/run.sh）
+#   aws-survey ls [サービス名...]   アカウントで使っているリソースの一覧（libexec/commands/ls.sh。調査コンテナの中で
+#                                   一時キーが読む。画面に出すだけで out/ には書かない）
+#   aws-survey ec2                  EC2 の一覧から 1 台選んで、中を調べる準備へ進む（libexec/commands/ec2.sh。
+#                                   未登録なら ssh setup、登録済みなら ssh verify / ssh remove / 調査へ）
+#   aws-survey lambda               Lambda 関数の一覧から選んで、コードを取り出す・消す（libexec/commands/lambda.sh）
+#
+#   1 台・1 関数ずつ手で進めるなら（ec2 / lambda が内部で呼ぶのと同じ）:
 #   aws-survey ssh setup <instance-id | Name タグ> [...]
 #                                   EC2 の中を調べるための診断ゲートウェイを SSM 経由で導入して登録する（libexec/commands/ssh.sh。任意の追加機能）
 #   aws-survey ssh setup --print [...]   その導入スクリプトを書き出すだけ（手動実行用）
@@ -186,14 +193,14 @@ show_extras() {
     ui_ok "EC2 の中を調べる: 登録済みホスト ${SSH_HOSTS}"
   else
     ui_skip "EC2 の中を調べる: なし"
-    ui_text "$(ui_cmd "$CMD_NAME ssh setup <instance-id | Name タグ>") で登録します（SSM 管理下のインスタンスに限る）"
+    ui_text "$(ui_cmd "$CMD_NAME ec2") で一覧から選んで登録します（SSM 管理下のインスタンスに限る）"
   fi
   n=$(lambda_pulled_count)
   if [ "$n" -gt 0 ]; then
     ui_ok "Lambda のコードを読む: 取り出してある関数 ${n} 件"
   else
     ui_skip "Lambda のコードを読む: なし"
-    ui_text "$(ui_cmd "$CMD_NAME lambda pull <関数名>") で取り出します（そのリージョンの全関数なら --all）"
+    ui_text "$(ui_cmd "$CMD_NAME lambda") で一覧から選んで取り出します"
   fi
   echo ""
 }
@@ -336,6 +343,7 @@ cmd_guide() {
   fi
   show_extras
   guide_next "run" "調査コンテナを起動します。中で Claude Code / Codex と調査を進めます"
+  guide_also "ls" "アカウントで使っているリソースの一覧を出します（読むだけで、out/ には書きません）"
 }
 
 # いま実行してよいか聞く。Enter は「はい」。端末でなければ read_line が諦めるので、案内だけ出して終わる。
@@ -994,7 +1002,7 @@ cmd_doctor() {
   [ "$ok" -eq 1 ]
 }
 
-cmd_help() { sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,35p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 case "$CMD" in
   "")          cmd_guide_loop ;;
