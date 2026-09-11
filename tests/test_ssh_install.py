@@ -190,6 +190,35 @@ class RemoveScript(SshPrintCase):
         for word in ('ai', 'agent', 'survey', 'claude'):
             self.assertNotRegex(script.lower(), r'(?<![a-z])' + word + r'(?![a-z])')
 
+    def test_marker_block_round_trip_restores_sshd_config(self):
+        """Without Include, the install appends a blank line and the marked block. Installing twice and
+        removing must give back the original bytes (no blank lines piling up)."""
+        def strip_function(script):
+            marks = re.findall(r'^MARK_(?:BEGIN|END)=.*$', script, re.M)
+            body = re.search(r'^strip_marked_block\(\) \{\n.*?^\}\n', script, re.M | re.S).group(0)
+            return '\n'.join(marks) + '\n' + body
+        harness = '\n'.join([
+            'set -eu',
+            strip_function(self.print_script().stdout),
+            # The append as the install script does it.
+            'append() { { strip_marked_block "$1"; printf \'\\n%s\\n\' "$MARK_BEGIN"; '
+            'printf \'Match User diag\\n    PermitTTY no\\n\'; printf \'%s\\n\' "$MARK_END"; } > "$1.new"; mv "$1.new" "$1"; }',
+            'append "$1"; append "$1"; cp "$1" "$1.installed"',
+            strip_function(self.print_remove().stdout),
+            'strip_marked_block "$1" > "$1.new"; mv "$1.new" "$1"',
+        ])
+        base = Path(self.temp.name)
+        for original in ('Port 22\nPasswordAuthentication no\n', 'Port 22\n\nUsePAM yes\n\n', '# only a comment\n\n\n'):
+            with self.subTest(original=original):
+                config = base / 'sshd_config'
+                config.write_text(original)
+                result = subprocess.run(['bash', '-c', harness, 'harness', str(config)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                installed = (base / 'sshd_config.installed').read_text()
+                self.assertTrue(installed.startswith(original + '\n# diag begin'), installed)
+                self.assertEqual(installed.count('# diag begin'), 1)
+                self.assertEqual(config.read_text(), original)
+
     def test_print_touches_nothing(self):
         self.print_remove()
         after = json.loads((self.target / 'environment.json').read_text())

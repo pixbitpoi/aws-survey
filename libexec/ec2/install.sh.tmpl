@@ -116,11 +116,17 @@ restore_sshd() {
   cp -p "$WORK/sshd_config.orig" "$SSHD_CONFIG"
   if [ "$had_dropin" -eq 1 ]; then cp -p "$WORK/dropin.orig" "$SSHD_DROPIN"; else rm -f "$SSHD_DROPIN"; fi
 }
+# Drops the marked block and the one blank line appended before it, so that stripping undoes
+# the append exactly and repeated runs do not pile up blank lines.
 strip_marked_block() {
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
-    $0 == b { skip = 1; next }
-    $0 == e { skip = 0; next }
-    !skip' "$1"
+    $0 == b  { skip = 1; held = 0; next }
+    $0 == e  { skip = 0; next }
+    skip     { next }
+    held     { print ""; held = 0 }
+    $0 == "" { held = 1; next }
+             { print }
+    END      { if (held) print "" }' "$1"
 }
 
 if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' "$SSHD_CONFIG"; then

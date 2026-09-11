@@ -36,11 +36,17 @@ esac
 [ -f "$SSHD_CONFIG" ] || fail "$SSHD_CONFIG not found"
 
 # ---- 1. sshd: drop the Match block, keep the previous file if sshd -t rejects the result ----
+# Drops the marked block and the one blank line the install appended before it, so that
+# sshd_config returns to what it was before the install.
 strip_marked_block() {
   awk -v b="$MARK_BEGIN" -v e="$MARK_END" '
-    $0 == b { skip = 1; next }
-    $0 == e { skip = 0; next }
-    !skip' "$1"
+    $0 == b  { skip = 1; held = 0; next }
+    $0 == e  { skip = 0; next }
+    skip     { next }
+    held     { print ""; held = 0 }
+    $0 == "" { held = 1; next }
+             { print }
+    END      { if (held) print "" }' "$1"
 }
 changed=0
 if [ -f "$SSHD_DROPIN" ]; then
