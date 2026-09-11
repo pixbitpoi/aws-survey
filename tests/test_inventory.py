@@ -27,12 +27,17 @@ words = []
 skip = False
 for a in argv:
     if skip: skip = False; continue
-    if a in ("--region", "--output", "--query"): skip = True; continue
+    if a in ("--region", "--output", "--query", "--profile"): skip = True; continue
     words.append(a)
 service, op = words[0], words[1]
 with open(os.environ["FAKE_LOG"], "a") as f:
     f.write(json.dumps({"service": service, "op": op, "argv": argv,
                         "in_container": os.environ.get("FAKE_IN_CONTAINER", "")}) + "\n")
+if not os.environ.get("FAKE_IN_CONTAINER"):
+    # the host side (ssh setup / lambda pull) may check who it is; anything past that is out of scope here
+    if op == "get-caller-identity":
+        print("arn:aws:iam::000000000000:user/fake"); sys.exit(0)
+    sys.stderr.write("unexpected host-side call " + " ".join(argv) + "\n"); sys.exit(2)
 if service in os.environ.get("FAKE_DENY", "").split(","):
     sys.stderr.write("\nAn error occurred (AccessDeniedException) when calling the %s operation: User is not authorized\n" % op)
     sys.exit(254)
@@ -62,10 +67,10 @@ print(json.dumps(answers[(service, op)]))
 def default_state():
     return {
         'instances': [
-            {'id': 'i-0bbb', 'name': 'web2', 'state': 'stopped', 'extra': {'type': 't3.micro', 'az': 'test-region-a', 'launched': '2026-01-02T00:00:00+00:00'}},
-            {'id': 'i-0aaa', 'name': 'web1', 'state': 'running', 'extra': {'type': 't3.small', 'az': 'test-region-a', 'launched': '2026-01-01T00:00:00+00:00'}},
+            {'id': 'i-0bbbbbbbbbbbbbbbb', 'name': 'web2', 'state': 'stopped', 'extra': {'type': 't3.micro', 'az': 'test-region-a', 'launched': '2026-01-02T00:00:00+00:00'}},
+            {'id': 'i-0aaaaaaaaaaaaaaaa', 'name': 'web1', 'state': 'running', 'extra': {'type': 't3.small', 'az': 'test-region-a', 'launched': '2026-01-01T00:00:00+00:00'}},
         ],
-        'ssm': [{'id': 'i-0aaa', 'ping': 'Online'}],
+        'ssm': [{'id': 'i-0aaaaaaaaaaaaaaaa', 'ping': 'Online'}],
         'functions': [
             {'id': 'fn-node', 'name': 'fn-node', 'state': 'nodejs20.x', 'extra': {'handler': 'index.handler', 'memory': 128, 'modified': '2026-01-01T00:00:00.000+0000', 'size': 1024}},
             {'id': 'fn-py', 'name': 'fn-py', 'state': 'python3.12', 'extra': {'handler': 'app.handler', 'memory': 256, 'modified': '2026-01-02T00:00:00.000+0000', 'size': 2048}},
@@ -106,7 +111,7 @@ class InventoryCase(unittest.TestCase):
 
     def run_inventory(self, *args, **extra):
         env = {'PATH': str(self.bin), 'HOME': str(self.base), 'FAKE_LOG': str(self.log), 'FAKE_STATE': str(self.state_file),
-               'LANG': os.environ.get('LANG', 'C.UTF-8')}
+               'LANG': os.environ.get('LANG', 'C.UTF-8'), 'FAKE_IN_CONTAINER': '1'}
         env.update(extra)
         return subprocess.run(['bash', str(SCRIPT), '--region', 'test-region', *args], env=env, capture_output=True, text=True)
 
@@ -133,7 +138,7 @@ class Output(InventoryCase):
         ec2 = [line for line in lines if line['service'] == 'ec2']
         self.assertEqual(ec2[0]['kind'], 'service')
         self.assertEqual(ec2[0]['count'], 2)
-        self.assertEqual([line['id'] for line in ec2[1:]], ['i-0aaa', 'i-0bbb'])
+        self.assertEqual([line['id'] for line in ec2[1:]], ['i-0aaaaaaaaaaaaaaaa', 'i-0bbbbbbbbbbbbbbbb'])
         self.assertEqual(ec2[1]['name'], 'web1')
         self.assertEqual(ec2[1]['state'], 'running')
         self.assertEqual(ec2[1]['region'], 'test-region')
@@ -142,8 +147,8 @@ class Output(InventoryCase):
     def test_ssm_status_is_folded_into_the_ec2_items(self):
         lines = self.lines(self.run_inventory('ec2'))
         by_id = {line['id']: line for line in lines if line['kind'] == 'item'}
-        self.assertEqual(by_id['i-0aaa']['extra']['ssm'], 'Online')
-        self.assertEqual(by_id['i-0bbb']['extra']['ssm'], 'なし')
+        self.assertEqual(by_id['i-0aaaaaaaaaaaaaaaa']['extra']['ssm'], 'Online')
+        self.assertEqual(by_id['i-0bbbbbbbbbbbbbbbb']['extra']['ssm'], 'なし')
         self.assertEqual([line['service'] for line in lines if line['kind'] == 'service'], ['ec2'])
 
     def test_a_denied_service_keeps_its_line_and_the_rest_still_comes(self):
@@ -207,7 +212,7 @@ class Output(InventoryCase):
 
     def test_unknown_service_and_missing_region_are_usage_errors(self):
         self.assertEqual(self.run_inventory('iam').returncode, 2)
-        env = {'PATH': str(self.bin), 'FAKE_LOG': str(self.log), 'FAKE_STATE': str(self.state_file)}
+        env = {'PATH': str(self.bin), 'FAKE_LOG': str(self.log), 'FAKE_STATE': str(self.state_file), 'FAKE_IN_CONTAINER': '1'}
         self.assertEqual(subprocess.run(['bash', str(SCRIPT)], env=env, capture_output=True, text=True).returncode, 2)
         self.assertEqual(self.calls(), [])
 

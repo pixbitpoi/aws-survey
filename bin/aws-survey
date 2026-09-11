@@ -1007,6 +1007,7 @@ case "$CMD" in
   verify)      exec "$LIBEXEC_DIR/commands/verify.sh" "$@" ;;
   run)         exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
   ls)          exec "$LIBEXEC_DIR/commands/ls.sh" "$@" ;;
+  ec2)         exec "$LIBEXEC_DIR/commands/ec2.sh" "$@" ;;
   ssh)         exec "$LIBEXEC_DIR/commands/ssh.sh" "$@" ;;
   lambda)      exec "$LIBEXEC_DIR/commands/lambda.sh" "$@" ;;
   *)           die "不明なコマンド: ${CMD}（aws-survey --help）" ;;

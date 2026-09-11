@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Lambda 関数にデプロイされているコードを取り出す（ホストで実行）。aws-survey lambda から呼ばれる。
 #
+#   aws-survey lambda                  一覧（調査コンテナの中で一時キーが読む）から関数を選んで、取り出す・消す（端末でなければ案内だけ）
 #   aws-survey lambda pull <関数名>... [--region <r>] [--with-deps]
 #   aws-survey lambda pull --all [--region <r>] [--with-deps]
 #                                   取り出し専用の一時キー（Lambda の読み取り 4 つだけ・15 分・ファイルに書かない）でコードを落とし、
@@ -17,6 +18,8 @@ set -uo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
 . "$LIBEXEC_DIR/docker.sh"
+. "$LIBEXEC_DIR/container.sh"
+. "$LIBEXEC_DIR/menu.sh"
 
 CODE_DIR="$AWS_SURVEY_DIR/code"
 EXTRACT="$LIBEXEC_DIR/lambda/extract.py"
@@ -34,7 +37,7 @@ GF_QUERY='{c:Configuration.{FunctionName:FunctionName,FunctionArn:FunctionArn,Ru
 GL_QUERY='{c:{LayerVersionArn:LayerVersionArn,Version:Version,CompatibleRuntimes:CompatibleRuntimes,CompatibleArchitectures:CompatibleArchitectures,CreatedDate:CreatedDate,CodeSha256:Content.CodeSha256,CodeSize:Content.CodeSize},location:Content.Location}'
 
 die() { ui_die "$@"; }
-usage() { sed -n '4,10p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,11p' "$0" | sed 's/^# \{0,1\}//'; }
 
 valid_function() { [[ "$1" =~ ^[A-Za-z0-9_-]{1,64}$ ]]; }
 # 取り出し先のパスの 1 段になるので、形だけ見る（実在しないリージョンは AWS が拒否する）
@@ -46,7 +49,6 @@ hide_urls() { sed -E 's#https?://[^[:space:]"]+#<URL>#g'; }
 
 # ---- 引数 ----
 SUB="${1:-}"; [ $# -gt 0 ] && shift
-[ -n "$SUB" ] || { usage >&2; die "サブコマンドを指定してください（pull <関数名>... / pull --all / list / remove <関数名>...）。"; }
 ARGS_TEXT="$*"
 ALL=0; WITH_DEPS=false; PULL_REGION="$REGION"; NAMES=()
 
@@ -473,7 +475,80 @@ cmd_remove() {
   ui_text "レイヤーは他の関数と共有するので残します（全部消すなら --all）。"
 }
 
+# ---- 引数なし: 一覧から選ぶ ----
+# 一覧は調査コンテナの中で読み取り専用の一時キーが読む（container_inventory）。取り出しと削除はここのホストの関数を呼ぶ。
+# choose_menu は EXIT トラップを潰すので、cmd_pull（一時ディレクトリの trap）より前に済ませる。
+cmd_interactive() {
+  [ $# -eq 0 ] || { usage >&2; die "不明なサブコマンド: ${1}（pull / list / remove。引数なしなら一覧から選びます）"; }
+  ui_title "aws-survey lambda"
+  ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
+  ui_kv "アカウント" "$ACCOUNT_ID"
+  ui_kv "リージョン" "$REGION"
+  ui_kv "取り出し先" "$CODE_DIR"
+  echo ""
+  container_require_key || exit 1
+  container_prepare || exit 1
+  ui_text "調査コンテナの中から、読み取り専用の一時キーで読みます（画面に出すだけで、何も書きません）。"
+  local inv st
+  inv=$(container_inventory lambda)
+  [ -n "$inv" ] || { echo ""; ui_err "列挙できませんでした（上の出力を確認してください）"; exit 1; }
+  st=$(jq -r 'select(.kind == "service" and .service == "lambda") | .status' <<< "$inv" | head -n 1)
+  if [ "$st" != ok ]; then
+    echo ""
+    ui_err "Lambda 関数の一覧を読めませんでした"
+    ui_raw "$(jq -r 'select(.kind == "service" and .service == "lambda") | .error // ""' <<< "$inv" | head -n 1)"
+    exit 1
+  fi
+  local -a names=() labels=() pulled=()
+  local id state modified m at
+  while IFS=$'\t' read -r id state modified; do
+    [ -n "$id" ] || continue
+    m="$CODE_DIR/lambda/$REGION/$id/_manifest.json"
+    at=""
+    if [ -f "$m" ]; then
+      at=$(jq -r '.pulled_at // empty' "$m" 2>/dev/null); at="取り出し済み${at:+ $at}"
+    fi
+    names+=("$id"); pulled+=("$at")
+    labels+=("${id}  ${state}  更新 ${modified%%.*}${at:+  $at}")
+  done < <(jq -r 'select(.kind == "item") | [.id, .state, (.extra.modified // "")] | @tsv' <<< "$inv")
+  echo ""
+  ui_head "Lambda 関数（${#names[@]}）"
+  if [ ${#names[@]} -eq 0 ]; then ui_skip "なし"; return 0; fi
+
+  if ! menu_available; then
+    local i
+    for i in "${!names[@]}"; do
+      if [ -n "${pulled[i]}" ]; then ui_ok "${labels[i]}"; else ui_skip "${labels[i]}"; fi
+    done
+    echo ""
+    next_cmd "$AWS_SURVEY_CMD lambda pull <関数名>" "デプロイされたコードを取り出して code/ に置きます（そのリージョンの全関数なら --all）"
+    also_cmd "$AWS_SURVEY_CMD lambda list" "取り出してある関数とレイヤー"
+    also_cmd "$AWS_SURVEY_CMD lambda remove <関数名>" "取り出したコードを消します"
+    return 0
+  fi
+
+  local picked sel="" act
+  choose_menu picked "コードを読みたい関数を選んでください" 0 "${labels[@]}"
+  for i in "${!labels[@]}"; do [ "${labels[i]}" != "$picked" ] || sel=$i; done
+  [ -n "$sel" ] || die "選択を読めませんでした。"
+  ui_ok "$picked"
+  echo ""
+  if [ -z "${pulled[sel]}" ]; then
+    choose_menu act "${names[sel]} に何をしますか？" 0 "デプロイされたコードを取り出す" "やめる"
+  else
+    choose_menu act "${names[sel]} に何をしますか？" 0 "取り直す（コードが変わっていなければ落とさない）" "取り出したコードを消す" "やめる"
+  fi
+  ui_ok "$act"
+  echo ""
+  case "$act" in
+    "デプロイされたコードを取り出す"|"取り直す"*) cmd_pull "${names[sel]}" ;;
+    "取り出したコードを消す") cmd_remove "${names[sel]}" ;;
+    *) ui_text "ここで止めます。" ;;
+  esac
+}
+
 case "$SUB" in
+  "")     cmd_interactive "$@" ;;
   pull)   cmd_pull "$@" ;;
   list)   cmd_list "$@" ;;
   remove) cmd_remove "$@" ;;
