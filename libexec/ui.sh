@@ -79,3 +79,9 @@ ui_die() {
   if [ -t 2 ] && [ -n "$C_RED" ]; then printf '%s✗ %s%s\n' "$C_RED" "$*" "$C_RESET" >&2; else echo "✗ $*" >&2; fi
   exit 1
 }
+
+# 1 行読む。端末なら待ち続け、端末でなければ数秒で諦める（エージェントの実行環境では標準入力が閉じず、待つと止まる）。
+# 読めなければ 1 を返す。
+read_line() {
+  if [ -t 0 ]; then read -r "$1"; else read -t 5 -r "$1"; fi
+}

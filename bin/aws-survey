@@ -98,17 +98,6 @@ CMD_NAME="aws-survey"
 [ -n "$DIR_OPT" ] && CMD_NAME="$CMD_NAME --dir $AWS_SURVEY_DIR"
 
 # ---- 補助 ----
-# ISO 8601（AWS の Expiration: 2026-01-02T03:04:05+00:00 / ...Z）を epoch 秒に。読めなければ空。
-iso_to_epoch() {
-  local s="$1" n
-  n=$(printf '%s' "$s" | sed -E 's/\.[0-9]+//; s/\+00:00$/Z/; s/UTC$/Z/')
-  case "$n" in
-    *Z) jq -rn --arg t "$n" '$t | fromdateiso8601' 2>/dev/null && return 0 ;;
-  esac
-  date -d "$s" +%s 2>/dev/null && return 0
-  date -j -f '%Y-%m-%dT%H:%M:%S%z' "${s/%Z/+0000}" +%s 2>/dev/null
-}
-mtime_of() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 
 # 判定はファイルだけで行う。AWS は叩かない。
 missing_tools() {
@@ -140,33 +129,6 @@ env_state() {
 load_env() { . "$LIBEXEC_DIR/load-env.sh"; }
 
 setup_value() { jq -r --arg k "$1" '.setup[$k] // empty' "$ENV_FILE"; }
-
-# 一時キーの状態。KEY_STATE = missing | expired | valid | unknown、KEY_EXP / KEY_LEFT_MIN / KEY_TOTAL_MIN / KEY_NOTE
-key_state() {
-  local cred="$AWS_DIR/credentials" session="$AWS_DIR/session.json" exp="" dur="" mt exp_epoch now
-  KEY_STATE=missing; KEY_EXP=""; KEY_LEFT_MIN=""; KEY_TOTAL_MIN=""; KEY_NOTE=""
-  [ -f "$cred" ] || return 0
-  if [ -f "$session" ]; then
-    exp=$(jq -r '.expiration // empty' "$session" 2>/dev/null)
-    dur=$(jq -r '.duration_seconds // empty' "$session" 2>/dev/null)
-  fi
-  [ -n "$dur" ] || dur="$DURATION"
-  if [ -z "$exp" ]; then
-    # 発行元の情報が無いときは、credentials の更新時刻 + duration_seconds で推定する
-    if mt=$(mtime_of "$cred") && [ -n "$mt" ]; then
-      exp_epoch=$(( mt + dur )); KEY_NOTE="（credentials の更新時刻から推定）"
-      exp=$(date -u -r "$exp_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$exp_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
-    fi
-  else
-    exp_epoch=$(iso_to_epoch "$exp")
-  fi
-  KEY_EXP="$exp"
-  if [ -z "${exp_epoch:-}" ]; then KEY_STATE=unknown; return 0; fi
-  now=$(date +%s)
-  KEY_LEFT_MIN=$(( (exp_epoch - now) / 60 ))
-  KEY_TOTAL_MIN=$(( dur / 60 ))
-  if [ "$exp_epoch" -le "$now" ]; then KEY_STATE=expired; else KEY_STATE=valid; fi
-}
 
 survey_started() { [ -f "$AWS_SURVEY_DIR/out/00_進捗.md" ]; }
 
@@ -245,12 +207,8 @@ init_guidance() {
 
 # ---- 表示 ----
 . "$LIBEXEC_DIR/ui.sh"
-
-# 1 行読む。端末なら待ち続け、端末でなければ数秒で諦める（エージェントの実行環境では標準入力が閉じず、待つと止まる）。
-# 読めなければ 1 を返す。
-read_line() {
-  if [ -t 0 ]; then read -r "$1"; else read -t 5 -r "$1"; fi
-}
+. "$LIBEXEC_DIR/keys.sh"
+. "$LIBEXEC_DIR/menu.sh"
 
 # ---- 引数なし: 段階の判定と、その場での実行 ----
 # cmd_guide は判定と表示だけを行い（AWS は叩かない）、次の 1 手は guide_next / guide_also に覚えさせる。
@@ -518,57 +476,6 @@ choose_profile() {
     done
     ui_err "一覧にありません。"
   done
-}
-
-# ↑↓ / j k で移動、1〜9 で番号へ、Enter で決定、q または Ctrl-D で中断。描画は ANSI（色・カーソル移動・消去）だけ。
-# choose_menu <結果の変数名> <問いの文> <初期カーソル（0 始まり）> <候補>...  決定後はメニューを消して 1 行に畳む（呼ぶ側が ui_ok を出す）。
-# 色は標準出力が端末で NO_COLOR が無いときだけ。
-choose_menu() {
-  local var="$1" title="$2" cursor="$3"; shift 3
-  local -a entries=("$@")
-  local count=${#entries[@]} i key rest
-  # 描く行数 = 候補 + ヒント 1 行。見出しは動かさない
-  draw_menu() {
-    local i
-    for i in "${!entries[@]}"; do
-      if [ "$i" = "$cursor" ]; then
-        printf '\033[K  %s❯ %s%s\n' "$C_CYAN" "${entries[i]}" "$C_RESET"
-      else
-        printf '\033[K  %s  %s%s\n' "$C_DIM" "${entries[i]}" "$C_RESET"
-      fi
-    done
-    printf '\033[K  %s↑↓ 移動 · Enter 決定 · q 中断%s\n' "$C_DIM" "$C_RESET"
-  }
-  show_cursor() { printf '\033[?25h'; }
-  trap show_cursor EXIT
-  printf '\033[?25l'
-  printf '  %s❯%s %s\n' "$C_CYAN" "$C_RESET" "$title"
-  draw_menu
-  while :; do
-    IFS= read -rsn1 key || { show_cursor; echo ""; init_die "${title}: 選択が中断されました。"; }
-    case "$key" in
-      $'\e')
-        read -rsn2 -t 0.2 rest || rest=
-        case "$rest" in
-          '[A') [ "$cursor" -le 0 ] || cursor=$((cursor-1)) ;;
-          '[B') [ "$cursor" -ge $((count-1)) ] || cursor=$((cursor+1)) ;;
-        esac
-        ;;
-      k) [ "$cursor" -le 0 ] || cursor=$((cursor-1)) ;;
-      j) [ "$cursor" -ge $((count-1)) ] || cursor=$((cursor+1)) ;;
-      [1-9]) [ "$key" -gt "$count" ] || cursor=$((key-1)) ;;
-      '') break ;;
-      q) show_cursor; echo ""; init_die "${title}: 選択が中断されました。" ;;
-    esac
-    printf '\033[%dA' "$((count+1))"
-    draw_menu
-  done
-  printf -v "$var" '%s' "${entries[cursor]}"
-  # 問い + 候補 + ヒント + Enter で bash が出す改行 1 行を消して、呼ぶ側の結果 1 行に畳む
-  printf '\033[%dA' "$((count+3))"
-  printf '\033[J'
-  show_cursor
-  trap - EXIT
 }
 
 # 初期カーソルは default があればそこ、なければ先頭
