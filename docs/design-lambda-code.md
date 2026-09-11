@@ -328,7 +328,7 @@ zip の大半は依存ライブラリで、読みたいのは関数自身のコ�
 
 | 部品 | 置き場 | 役割 |
 | --- | --- | --- |
-| マウント | `libexec/commands/run.sh` | `<対象フォルダ>/code` があれば `/home/node/aws-survey/code:ro`。無ければマウントしない |
+| マウント | `libexec/commands/run.sh` | `<対象フォルダ>/code` を空でも作り、常に `/home/node/aws-survey/code:ro`。調査中に `pull` したものが起動し直さずに見える（`method/07` の依頼文の前提） |
 | 読み取りの許可 | `container/settings.json` | `Read(//home/node/aws-survey/code/**)` を allow、`WebFetch` / `WebSearch` を deny（§6.1）、`Bash(rg:*)` を allow（`--pre` / `--hostname-bin` はフックが拒否。下の「コードの検索とフック」） |
 | フック | `container/hooks/aws-readonly-guard.sh` | §6.1 の拒否と、下の「コードの検索」。Codex 側は `aws` を Bash ガードへ委ねているので追加は無い |
 | `method/07_Lambdaのコードを読む.md` | `container/method/` | `_manifest.json` → ハンドラ → 呼んでいる AWS サービスとリソース名・環境変数の名前、の読み方。設定と突き合わせる。起動しないこと、依存は一覧で見ること、読めない形の扱い、コードが無いときはユーザーにホストでの取り出しを頼むこと |
@@ -368,7 +368,7 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
 | フック | `tests/test_guards.py` に通る例（`lambda get-function-configuration`・`cloudfront get-function`・`grep -rn boto3 code/`）と落ちる例（`lambda get-function`・`lambda get-layer-version-by-arn`・`grep boto3 code/ \| aws …`） |
 | `WebFetch` の拒否 | `settings.json` の deny を `tests/test_launcher.py` の `WebToolsDenied` で見る（`Bash(rg:*)` の allow と、フックの `--pre` の拒否も同じクラス） |
 | 抽出器の追加項目 | ソースコードの拡張子では名前の拒否を掛けないこと・リテラルだけをマスクすること・`sourcesContent` からの復元・`node_modules/` 由来の `sourcesContent` の除外 |
-| マウントと配置 | `tests/test_launcher.py`（`code/` があるときだけマウントされ、ro であること） |
+| マウントと配置 | `tests/test_launcher.py`（`code/` が常に作られ、ro でマウントされること） |
 | 実環境 | `tests/live/lambda/` で検証用のアカウントに Python と Node.js の関数を 1 つずつ、レイヤー付きで作り、`pull` → `check.sh` → `run` → 調査コンテナで `method/07` に沿って読ませる（§8.1） |
 
 ### 8.1 第 5 段の手順（実環境）

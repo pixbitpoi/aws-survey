@@ -200,6 +200,8 @@ class RoleCreate(IamCase):
         attached = [c[c.index('--policy-arn') + 1] for c in self.calls('attach-role-policy')]
         self.assertEqual(attached, [RO_ARN, DIAG_ARN])
         self.assertIn('diag-ssh-smoke を作りました', result.stdout)
+        setup = json.loads((self.target / 'environment.json').read_text())['setup']
+        self.assertRegex(setup['ssh_policy_attached'], r'^\d{4}-\d{2}-\d{2}$')
 
     def test_policy_document_limits_start_session_to_tag_and_ssh_document(self):
         self.write_environment()
@@ -277,6 +279,16 @@ class RoleCreate(IamCase):
         self.assertIn('AWS-StartSSHSession', result.stdout)
         self.assertIn('aws iam create-policy --policy-name diag-ssh-smoke', result.stdout)
         self.assertIn('attach-role-policy --role-name fake-role --policy-arn ' + DIAG_ARN, result.stdout)
+
+    def test_borrowed_role_records_the_policy_once_an_admin_attached_it(self):
+        self.write_environment(route='existing_role', setup={'route_decided': '2026-09-10', 'role_created': '2026-09-10'},)
+        (self.state / 'attached.txt').write_text(RO_ARN + '\n' + DIAG_ARN + '\n')
+        result = self.run_cli('role', '--create', FAKE_ROLE='exists')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('aws iam create-policy', result.stdout)
+        self.assertIn('aws-survey credentials', result.stdout)
+        setup = json.loads((self.target / 'environment.json').read_text())['setup']
+        self.assertRegex(setup['ssh_policy_attached'], r'^\d{4}-\d{2}-\d{2}$')
 
     def test_borrowed_role_without_hosts_has_nothing_to_show(self):
         self.write_environment(hosts=False, route='existing_role')

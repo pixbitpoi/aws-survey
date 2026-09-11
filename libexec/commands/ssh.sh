@@ -463,14 +463,16 @@ cmd_setup() {
   ui_kv "known_hosts" "$KNOWN_HOSTS"
   echo ""
   ui_text "調査コンテナからは ec2 $HOST_ALIAS <動詞> で使います（一覧: ec2 $HOST_ALIAS help）。"
-  next_cmd "$AWS_SURVEY_CMD ssh list" "登録済みホストと導入状態を確かめます"
+  ui_text "使えるようにするには、あと 3 手あります。引数なしの $AWS_SURVEY_CMD が 1 手ずつ「実行しますか？」と聞いて進めます。"
+  next_cmd "$AWS_SURVEY_CMD" "続きを進めます: 接続を許すポリシー → 一時キーの発行し直し → 調査コンテナからの接続の確認"
   if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
-    also_cmd "$AWS_SURVEY_CMD role --create" "このインスタンスへの SSH 接続を許すポリシーを調査用ロールに付けます（初めての登録のとき）"
+    also_cmd "$AWS_SURVEY_CMD role --create" "（1 手目）このインスタンスへの SSH 接続を許すポリシーを調査用ロールに付けます（初めての登録のとき）"
   else
-    also_cmd "$AWS_SURVEY_CMD role --create" "SSH 接続を許すポリシーの JSON を表示します（管理者に付けてもらいます）"
+    also_cmd "$AWS_SURVEY_CMD role --create" "（1 手目）SSH 接続を許すポリシーの JSON を表示します（管理者に付けてもらいます）"
   fi
-  also_cmd "$AWS_SURVEY_CMD credentials" "その権限を含めて一時キーを発行し直し、$AWS_SURVEY_CMD verify で確かめます"
-  also_cmd "$AWS_SURVEY_CMD ssh verify $HOST_ALIAS" "一時キーを発行し直したあと、調査コンテナから実際に接続して確かめます"
+  also_cmd "$AWS_SURVEY_CMD credentials" "（2 手目）その権限を含めて一時キーを発行し直します"
+  also_cmd "$AWS_SURVEY_CMD ssh verify $HOST_ALIAS" "（3 手目）調査コンテナから実際に接続して確かめます"
+  also_cmd "$AWS_SURVEY_CMD ssh list" "登録済みホストと導入状態を確かめます"
 }
 
 cmd_setup_print() {
@@ -636,6 +638,10 @@ cmd_verify() {
   echo ""
   if [ "$rc" -eq 0 ]; then
     ui_ok "検証が通りました。調査コンテナからは ec2 $host <動詞> で使えます（一覧: ec2 $host help）"
+    # 引数なしの aws-survey が「確かめ済み」と見る記録。setup / rotate が installed_at を進めると、また確かめる案内になる
+    local tmp
+    tmp=$(mktemp) && jq --arg a "$host" --arg now "$(now_iso)" '.ssh.hosts[$a].verified_at = $now' "$ENV_FILE" > "$tmp" \
+      && mv "$tmp" "$ENV_FILE" && ui_text "environment.json に記録しました: ssh.hosts.${host}.verified_at"
   else
     ui_err "検証に失敗した項目があります（上の ✗ を見てください）"
   fi
@@ -937,6 +943,8 @@ cmd_remove() {
   if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
     ui_text "調査用ロールは自分で作ったものなので、SSH 接続を許すポリシーも片付けます。"
     cleanup_diag_policy || policy_rc=1
+    # ポリシーは無くなったので、次に ssh setup したときは role --create からやり直す
+    tmp=$(mktemp) && jq '.setup.ssh_policy_attached = null' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
   else
     ui_text "調査用ロールは借りたものなので、ポリシー ${DIAG_POLICY_NAME} は触りません。タグ付きのインスタンスが無いので、付いたままでも何も許しません。"
     ui_text "管理者に、要らなくなったことを伝えてください。"
@@ -946,7 +954,8 @@ cmd_remove() {
   if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
     ui_text "いまの一時キーは、発行時に渡した ${DIAG_POLICY_NAME} が無くなったので使えません（読み取りも通りません）。発行し直してください。"
   fi
-  next_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めない一時キーを発行し直します（登録が無いときは ${DIAG_POLICY_NAME} を渡しません）"
+  next_cmd "$AWS_SURVEY_CMD" "一時キーの発行し直しを案内します（登録が無いときは ${DIAG_POLICY_NAME} を渡しません）"
+  also_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めない一時キーを、いますぐ発行し直します"
   also_cmd "$AWS_SURVEY_CMD role --create" "ロールの状態を確かめます（登録が無いときは ${DIAG_POLICY_NAME} を付けません）"
   if [ "$policy_rc" -ne 0 ]; then
     ui_err "ポリシーの片付けが途中で止まりました。EC2 側・タグ・記録は済んでいるので、残りは上のコマンドを手で打つか、原因を直してから同じ手順で片付けてください。"

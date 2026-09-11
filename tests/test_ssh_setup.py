@@ -218,7 +218,12 @@ class Setup(SshSetupCase):
         self.assertIn(INSTANCE, tag)
         self.assertIn('Key=diag:ssh,Value=smoke', tag)
         self.assertIn('送った形: plain', result.stdout)
+        # 続きの 3 手は引数なしの aws-survey が案内する。個々のコマンドも読める
+        self.assertIn('あと 3 手', result.stdout)
         self.assertIn('aws-survey ssh list', result.stdout)
+        self.assertIn('aws-survey role --create', result.stdout)
+        self.assertIn('aws-survey credentials', result.stdout)
+        self.assertIn('aws-survey ssh verify web1', result.stdout)
 
     def test_sent_script_is_the_print_output(self):
         printed = self.run_cli('ssh', 'setup', '--print', '--log', 'app=/var/log/app/*.log', '--strict')
@@ -561,7 +566,8 @@ class Remove(SshSetupCase):
         self.assertIn('aws-survey credentials', result.stdout)
         self.assertIn('aws-survey role --create', result.stdout)
         self.assertTrue((self.keys / 'id_ed25519').exists())
-        self.assertNotIn('EC2 の中を調べる', self.run_cli('status').stdout)
+        self.assertIsNone(self.environment()['setup'].get('ssh_policy_attached'))
+        self.assertIn('EC2 の中を調べる: なし', self.run_cli('status').stdout)
 
     def test_last_host_detaches_and_deletes_the_policy(self):
         """Own role: after the tag and the records, detach, drop the non-default versions, delete."""

@@ -159,15 +159,17 @@ RENEW_HINT="cd $AWS_SURVEY_DIR && $AWS_SURVEY_CMD credentials"
 
 # コンテナ内の survey-status が「残り時間」と「いま何をすべきか」を出すために使う。
 # duration_seconds を渡すのが要点で、これが無いと残り時間を判断の閾値に換算できない。
+# ssh_hosts は発行時の登録済みホスト。引数なしの aws-survey が、いまの登録と比べて発行し直しを案内する。
 echo "$json" | jq \
   --argjson dur "$DURATION" \
   --arg region "$REGION" \
   --arg account "$ACCOUNT_ID" \
   --arg role "$ROLE_NAME" \
   --arg renew "$RENEW_HINT" \
+  --arg ssh_hosts "$SSH_HOSTS" \
   '{expiration: .Credentials.Expiration, duration_seconds: $dur,
     region: $region, account_id: $account, role_name: $role,
-    renew_hint: $renew}' \
+    renew_hint: $renew, ssh_hosts: $ssh_hosts}' \
   > "$OUT/session.json"
 chmod 644 "$OUT/session.json"
 rm -f "$OUT/expires"

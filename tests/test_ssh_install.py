@@ -321,11 +321,12 @@ class LoadEnv(SshPrintCase):
         result = self.run_cli('status')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, '')
-        self.assertNotIn('EC2 の中を調べる', result.stdout)
+        self.assertIn('EC2 の中を調べる: なし', result.stdout)
+        self.assertIn('ssh setup <instance-id | Name タグ>', result.stdout)
         self.write_environment({'ssh': {'user': 'diag', 'hosts': {'web1': {'instance_id': 'i-0'}, 'db1': {'instance_id': 'i-1'}}}})
         result = self.run_cli('status')
-        self.assertIn('EC2 の中を調べる', result.stdout)
-        self.assertIn('db1 web1', result.stdout)
+        self.assertIn('登録済みホスト db1 web1', result.stdout)
+        self.assertIn('ログインユーザー', result.stdout)
 
     def test_template_has_ssh_defaults(self):
         config = json.loads((ROOT / 'templates/environment.json').read_text())
@@ -393,10 +394,18 @@ class Verify(SshPrintCase):
         self.assertIn('selftest output', result.stdout)
         self.assertIn('省きました', result.stdout)
 
+    def test_success_records_verified_at_for_the_guide(self):
+        self.run_verify('web1')
+        host = json.loads((self.target / 'environment.json').read_text())['ssh']['hosts']['web1']
+        self.assertRegex(host['verified_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$')
+        self.assertGreater(host['verified_at'], host['installed_at'])
+
     def test_selftest_failure_is_the_result(self):
         result = self.run_verify('web1', FAKE_EXIT='1')
         self.assertEqual(result.returncode, 1)
         self.assertIn('失敗した項目', result.stdout)
+        host = json.loads((self.target / 'environment.json').read_text())['ssh']['hosts']['web1']
+        self.assertNotIn('verified_at', host)
 
     def test_expired_key_stops_before_docker(self):
         self.session(expiration='2020-01-01T00:00:00+00:00')

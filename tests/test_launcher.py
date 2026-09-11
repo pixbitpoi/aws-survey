@@ -139,18 +139,23 @@ class Launcher(unittest.TestCase):
         self.assertFalse((self.root / 'out').exists())
         self.assertFalse((elsewhere / 'out').exists())
 
-    def test_pulled_code_is_mounted_read_only_only_when_present(self):
-        """code/ (aws-survey lambda pull) reaches the container read-only, and only when it exists."""
+    def test_code_dir_is_always_mounted_read_only(self):
+        """code/ (aws-survey lambda pull) reaches the container read-only. It is created empty so that a pull
+        made while the container runs shows up without a restart (the request sentence in method/07 relies on it)."""
         write_environment(self.root)
         keys = self.root / 'keys'
         keys.mkdir()
         (keys / 'credentials').touch()
-        self.assertEqual(self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root, AWS_DIR=str(keys)).returncode, 0)
-        _, launch = self.last_launch()
-        self.assertFalse(any('/home/node/aws-survey/code' in a for a in launch))
-        (self.root / 'code/lambda').mkdir(parents=True)
+        self.assertFalse((self.root / 'code').exists())
         result = self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root, AWS_DIR=str(keys))
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / 'code').is_dir())
+        self.assertNotIn('取り出した Lambda のコード', result.stdout)
+        _, launch = self.last_launch()
+        self.assertIn(f'{self.root}/code:/home/node/aws-survey/code:ro', launch)
+        (self.root / 'code/lambda').mkdir(parents=True)
+        result = self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root, AWS_DIR=str(keys))
+        self.assertIn('取り出した Lambda のコード', result.stdout)
         _, launch = self.last_launch()
         self.assertIn(f'{self.root}/code:/home/node/aws-survey/code:ro', launch)
         self.assertEqual(launch[-2:], ['smoke:latest', 'codex'])

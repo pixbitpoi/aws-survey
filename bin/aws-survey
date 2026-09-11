@@ -3,7 +3,8 @@
 #
 #   aws-survey                      いまの段階を判定し（AWS は叩かない）、次の 1 手を案内して、
 #                                   「実行しますか？」と聞きながら起動まで進める。
-#                                   端末でなければ案内だけで終わる（エージェントは 1 本ずつ手渡す）
+#                                   端末でなければ案内だけで終わる（エージェントは 1 本ずつ手渡す）。
+#                                   ssh setup のあとは、ポリシー → 一時キー → 接続の確認も同じ形で進める
 #   aws-survey status               到達点・一時キーの残り時間・本体とデータの場所
 #   aws-survey doctor               aws / jq / docker の有無と、発行失敗の切り分け（libexec/commands/doctor.sh）
 #   aws-survey init [--from <json>] [--force]
@@ -169,6 +170,72 @@ key_state() {
 
 survey_started() { [ -f "$AWS_SURVEY_DIR/out/00_進捗.md" ]; }
 
+# ---- 任意の追加（EC2 の中を調べる・Lambda のコードを読む）----
+# どちらも段階 5（調査）に着いてから足すもの。判定はファイルだけで行う。
+
+# 取り出してある Lambda 関数の数（code/lambda/<リージョン>/<関数名>/_manifest.json を数える）
+lambda_pulled_count() {
+  local m n=0
+  for m in "$AWS_SURVEY_DIR"/code/lambda/*/*/_manifest.json; do [ -f "$m" ] && n=$((n + 1)); done
+  echo "$n"
+}
+
+# EC2 の中を調べる準備が途中なら、次の 1 手を EC2_NEXT / EC2_NEXT_DESC に、状況を EC2_DETAIL に入れて 0 を返す。
+# 順に見る: 接続を許すポリシーをロールに付けたか → その権限を含めて一時キーを発行したか → 各ホストに実際に繋いで確かめたか。
+#   ポリシー   role --create が setup.ssh_policy_attached に記録する（ssh remove が最後のホストで消す）
+#   一時キー   credentials が session.json の ssh_hosts に「発行時の登録済みホスト」を書く。いまの登録と違えば発行し直し
+#   接続確認   ssh verify が ssh.hosts.<host>.verified_at に記録する。setup / rotate の installed_at より古ければやり直し
+ec2_pending() {
+  local key_hosts host
+  EC2_NEXT=""; EC2_NEXT_DESC=""; EC2_DETAIL=""
+  key_hosts=$(jq -r '.ssh_hosts // empty' "$AWS_DIR/session.json" 2>/dev/null)
+  if [ -z "$SSH_HOSTS" ]; then
+    [ -n "$key_hosts" ] || return 1
+    EC2_DETAIL="登録を消したホスト（${key_hosts}）の権限が一時キーに残っています"
+    EC2_NEXT="credentials"; EC2_NEXT_DESC="EC2 への接続の権限を含めない一時キーを発行し直します"
+    return 0
+  fi
+  if [ -z "$(setup_value ssh_policy_attached)" ]; then
+    EC2_DETAIL="登録済みホスト（${SSH_HOSTS}）への接続を許すポリシーが、まだ調査用ロールに付いていません"
+    if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
+      EC2_NEXT="role --create"; EC2_NEXT_DESC="接続を許すポリシーを作って調査用ロールに付けます（既にあるものは変えません）"
+    else
+      EC2_NEXT="role --create"; EC2_NEXT_DESC="管理者に付けてもらうポリシーを表示します（付いていれば、そのことを記録します）"
+    fi
+    return 0
+  fi
+  if [ "$key_hosts" != "$SSH_HOSTS" ]; then
+    EC2_DETAIL="いまの一時キーは、登録済みホスト（${SSH_HOSTS}）への接続の権限を含んでいません"
+    EC2_NEXT="credentials"; EC2_NEXT_DESC="その権限を含めて一時キーを発行し直します"
+    return 0
+  fi
+  host=$(jq -r '.ssh.hosts | to_entries[] | select((.value.verified_at // "") < (.value.installed_at // "")) | .key' "$ENV_FILE" 2>/dev/null | head -n 1)
+  [ -n "$host" ] || return 1
+  EC2_DETAIL="ホスト ${host} に、まだ調査コンテナから繋いで確かめていません"
+  EC2_NEXT="ssh verify $host"; EC2_NEXT_DESC="調査コンテナから実際に接続して、通るもの・塞がっているものを確かめます"
+  return 0
+}
+
+# 任意の追加の現状。段階 5 の案内と status が出す。無いものは、足すためのコマンドを添える
+show_extras() {
+  local n
+  ui_head "任意の追加（要らなければ、このまま調査に進めます）"
+  if [ -n "$SSH_HOSTS" ]; then
+    ui_ok "EC2 の中を調べる: 登録済みホスト ${SSH_HOSTS}"
+  else
+    ui_skip "EC2 の中を調べる: なし"
+    ui_text "$(ui_cmd "$CMD_NAME ssh setup <instance-id | Name タグ>") で登録します（SSM 管理下のインスタンスに限る）"
+  fi
+  n=$(lambda_pulled_count)
+  if [ "$n" -gt 0 ]; then
+    ui_ok "Lambda のコードを読む: 取り出してある関数 ${n} 件"
+  else
+    ui_skip "Lambda のコードを読む: なし"
+    ui_text "$(ui_cmd "$CMD_NAME lambda pull <関数名>") で取り出します（そのリージョンの全関数なら --all）"
+  fi
+  echo ""
+}
+
 print_places() { printf "  %s対象フォルダ:%s %s\n" "$C_DIM" "$C_RESET" "$AWS_SURVEY_DIR"; }
 
 init_guidance() {
@@ -294,11 +361,22 @@ cmd_guide() {
   esac
   STAGE_DONE[4]="残り約 ${KEY_LEFT_MIN} 分 / ${KEY_TOTAL_MIN} 分${KEY_NOTE}（期限 ${KEY_EXP}）"
 
+  # 任意の追加（EC2 の中を調べる）の準備が途中なら、その 1 手を先に案内する。調査コンテナは止めなくてよい
+  if ec2_pending; then
+    show_track 5 "EC2 の中を調べる準備が途中: $EC2_DETAIL"
+    show_extras
+    ui_text "調査コンテナが動いていても、そのまま進められます（中からは終わったあとに見えます）。"
+    ui_text "EC2 の準備を後回しにして調査を始めるなら $(ui_cmd "$CMD_NAME run") を打ちます。"
+    guide_next "$EC2_NEXT" "$EC2_NEXT_DESC"
+    return 0
+  fi
+
   if survey_started; then
     show_track 5 "調査: 開始済み（out/00_進捗.md あり）。続きはコンテナ内の台帳に従います"
   else
     show_track 5 "調査: 未開始。目的と進め方はコンテナ内でユーザーと決めます"
   fi
+  show_extras
   guide_next "run" "調査コンテナを起動します。中で Claude Code / Codex と調査を進めます"
 }
 
@@ -321,7 +399,7 @@ guide_run() {
   case "$cmd" in
     init) AWS_SURVEY_CHAIN=1; cmd_init "$@"; rc=$?; AWS_SURVEY_CHAIN=0; return "$rc" ;;
     run)  exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
-    *)    AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/$cmd.sh" "$@" ;;
+    *)    AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/$cmd.sh" "$@" ;;   # ssh verify <host> は ssh.sh verify <host>
   esac
 }
 
@@ -890,11 +968,14 @@ cmd_status() {
   else
     ui_skip "未開始"
   fi
-  # EC2 の中を調べる機能は任意。登録があるときだけ見せ、段階には組み込まない
+  echo ""
+  show_extras
   if [ -n "${SSH_HOSTS:-}" ]; then
-    echo ""
-    ui_head "EC2 の中を調べる（ログインユーザー ${SSH_USER}）"
-    ui_kv "登録済みホスト" "$SSH_HOSTS"
+    ui_kv "ログインユーザー" "$SSH_USER"
+    if [ "$KEY_STATE" = valid ] && ec2_pending; then
+      ui_warn "EC2 の中を調べる準備が途中: $EC2_DETAIL"
+      next_cmd "$CMD_NAME" "続きを 1 手ずつ案内します"
+    fi
   fi
 }
 
@@ -955,7 +1036,7 @@ cmd_doctor() {
   [ "$ok" -eq 1 ]
 }
 
-cmd_help() { sed -n '2,27p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 case "$CMD" in
   "")          cmd_guide_loop ;;

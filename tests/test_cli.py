@@ -251,6 +251,96 @@ class StateTable(CliCase):
         (self.target / 'out/00_進捗.md').write_text('# 進捗\n')
         self.assert_stage(self.run_cli(), 5, '開始済み')
 
+    def test_stage_5_lists_the_optional_additions(self):
+        self.verified()
+        self.write_keys(iso(datetime.now(timezone.utc) + timedelta(minutes=45)))
+        result = self.run_cli()
+        self.assert_stage(result, 5, '任意の追加', 'EC2 の中を調べる: なし', 'aws-survey ssh setup <instance-id | Name タグ>',
+                          'Lambda のコードを読む: なし', 'aws-survey lambda pull <関数名>')
+        for region, name in (('r1', 'f1'), ('r1', 'f2'), ('r2', 'f3')):
+            path = self.target / 'code/lambda' / region / name
+            path.mkdir(parents=True)
+            (path / '_manifest.json').write_text('{}')
+        (self.target / 'code/lambda-layers/r1/l1/1').mkdir(parents=True)
+        result = self.run_cli()
+        self.assert_stage(result, 5, '取り出してある関数 3 件', 'aws-survey run')
+        self.assertNotIn('aws-survey lambda pull', result.stdout)
+        self.assertIn('取り出してある関数 3 件', self.run_cli('status').stdout)
+
+    def ec2_environment(self, setup=None, hosts=None, session_hosts=None, expiration=None):
+        """Stage 5 target with registered hosts. `setup` adds records, `session_hosts` is what the key was issued for."""
+        self.verified()
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['ssh']['hosts'] = hosts if hosts is not None else {
+            'web1': {'instance_id': 'i-0123456789abcdef0', 'user': 'diag', 'installed_at': '2026-09-10T12:00:00+09:00'}}
+        config['setup'].update(setup or {})
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        keys = self.write_keys(expiration or iso(datetime.now(timezone.utc) + timedelta(minutes=45)))
+        if session_hosts is not None:
+            session = json.loads((keys / 'session.json').read_text())
+            session['ssh_hosts'] = session_hosts
+            (keys / 'session.json').write_text(json.dumps(session))
+
+    def test_ec2_first_the_policy(self):
+        self.ec2_environment()
+        result = self.run_cli()
+        self.assert_stage(result, 5, '準備が途中', 'ポリシー', '登録済みホスト web1', 'aws-survey role --create')
+        self.assertIn('aws-survey run', result.stdout)          # the survey itself is not blocked
+        self.assertNotIn('aws-survey credentials', result.stdout)
+
+    def test_ec2_then_the_key(self):
+        self.ec2_environment(setup={'ssh_policy_attached': '2026-09-10'})
+        result = self.run_cli()
+        self.assert_stage(result, 5, '準備が途中', '権限を含んでいません', 'aws-survey credentials')
+        self.assertNotIn('role --create', result.stdout)
+        # a key issued for a different set of hosts is also stale
+        self.ec2_environment(setup={'ssh_policy_attached': '2026-09-10'}, session_hosts='db1')
+        self.assert_stage(self.run_cli(), 5, 'aws-survey credentials')
+
+    def test_ec2_then_verify_each_host_once_per_install(self):
+        self.ec2_environment(setup={'ssh_policy_attached': '2026-09-10'}, session_hosts='web1')
+        result = self.run_cli()
+        self.assert_stage(result, 5, '準備が途中', 'まだ調査コンテナから繋いで確かめていません', 'aws-survey ssh verify web1')
+        hosts = {'web1': {'instance_id': 'i-0123456789abcdef0', 'installed_at': '2026-09-10T12:00:00+09:00',
+                          'verified_at': '2026-09-10T12:30:00+09:00'},
+                 'db1': {'instance_id': 'i-0123456789abcdef1', 'installed_at': '2026-09-11T12:00:00+09:00',
+                         'verified_at': '2026-09-10T12:30:00+09:00'}}   # re-installed after the last check
+        self.ec2_environment(setup={'ssh_policy_attached': '2026-09-10'}, hosts=hosts, session_hosts='db1 web1')
+        self.assert_stage(self.run_cli(), 5, 'aws-survey ssh verify db1')
+        hosts['db1']['verified_at'] = '2026-09-11T12:30:00+09:00'
+        self.ec2_environment(setup={'ssh_policy_attached': '2026-09-10'}, hosts=hosts, session_hosts='db1 web1')
+        result = self.run_cli()
+        self.assert_stage(result, 5, '調査: 未開始', '登録済みホスト db1 web1', 'aws-survey run')
+        self.assertNotIn('準備が途中', result.stdout)
+
+    def test_ec2_hosts_removed_but_key_still_carries_them(self):
+        self.ec2_environment(hosts={}, session_hosts='web1')
+        result = self.run_cli()
+        self.assert_stage(result, 5, '登録を消したホスト（web1）', 'aws-survey credentials')
+
+    def test_ec2_chain_runs_each_step_after_a_yes(self):
+        self.ec2_environment(setup={'ssh_policy_attached': '2026-09-10'})
+        result = self.run_cli(input='y\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        assume = next(call for call in self.calls() if 'assume-role' in call)
+        self.assertIn('arn=arn:aws:iam::000000000000:policy/diag-ssh-smoke', assume)
+        session = json.loads((self.home / '.aws-survey/smoke/session.json').read_text())
+        self.assertEqual(session['ssh_hosts'], 'web1')
+        # the second judgement moves on to the connection check and asks again; EOF stops there
+        self.assertIn('aws-survey ssh verify web1', result.stdout)
+        self.assertEqual([c for c in self.calls() if c[0] == 'docker'], [])
+
+    def test_ec2_borrowed_role_stops_when_nothing_changed(self):
+        self.ec2_environment()
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['auth']['route'] = 'existing_role'
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_cli(input='y\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('管理者', result.stdout)
+        self.assertIn('自動では進めません', result.stdout)
+        self.assertEqual([c for c in self.calls() if 'assume-role' in c], [])
+
     def test_guide_never_calls_aws_or_docker(self):
         self.verified()
         self.write_keys(iso(datetime.now(timezone.utc) + timedelta(minutes=45)))
@@ -315,6 +405,7 @@ class Dispatch(CliCase):
         session = json.loads((self.home / '.aws-survey/smoke/session.json').read_text())
         self.assertEqual(session['renew_hint'], f'cd {self.target} && aws-survey credentials')
         self.assertEqual(session['duration_seconds'], 3600)
+        self.assertEqual(session['ssh_hosts'], '')          # the guide compares it with the registered hosts
         self.assertIn('次に打つコマンド', result.stdout)
         self.assertIn('aws-survey verify', result.stdout)
         self.assertNotIn('aws-survey run', result.stdout)

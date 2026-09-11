@@ -123,6 +123,7 @@ ensure_diag_policy() {
     --role-name "$ROLE_NAME" --policy-arn "$DIAG_POLICY_ARN" >/dev/null \
     || die "ポリシー $DIAG_POLICY_NAME をロールに付けられませんでした。"
   ui_ok "$DIAG_POLICY_NAME を付けました（登録済みインスタンスへの SSH 接続だけを許します）"
+  env_mark_setup ssh_policy_attached "EC2 への接続を許すポリシーを付けた"
 }
 
 # ロールを借りる経路では作れない。管理者に渡す形で表示する
@@ -352,8 +353,17 @@ if [ "$AUTH_ROUTE" != "own_role" ]; then
   ui_text "借りるロールが使えるかは $AWS_SURVEY_CMD doctor で確かめてください。"
   if [ -n "$SSH_HOSTS" ]; then
     echo ""
-    show_diag_policy_for_admin
-    ui_text "付いたら $AWS_SURVEY_CMD credentials で一時キーを発行し直します。"
+    # 借りたロールに管理者が付けてくれたかは、上で読んだ「付いているポリシー」で分かる。付いていれば記録し、無ければ頼む内容を出す
+    case "${attached:-}" in
+      *"$DIAG_POLICY_ARN"*)
+        ui_ok "$DIAG_POLICY_NAME は付いています（登録済みインスタンスへの SSH 接続だけを許します）"
+        env_mark_setup ssh_policy_attached "EC2 への接続を許すポリシーが付いていることを確かめた"
+        echo ""
+        next_cmd "$AWS_SURVEY_CMD credentials" "その権限を含めて一時キーを発行し直します" ;;
+      *)
+        show_diag_policy_for_admin
+        ui_text "付いたら、もう一度 $AWS_SURVEY_CMD を実行してください（付いたことを記録して、一時キーの発行し直しへ進みます）。" ;;
+    esac
     exit 0
   fi
   exit 1

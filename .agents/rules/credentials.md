@@ -43,7 +43,15 @@
 `run` / `status` / `doctor` / `init` / `ssh` / `lambda`）。実体は `role` / `credentials` / `verify` / `run` / `doctor` / `ssh` / `lambda` が
 `libexec/commands/<名前>.sh`、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。イメージのビルドは `libexec/docker.sh`
 （`run` と `lambda pull` が共有する）。
-`ssh` と `lambda` は任意の追加機能で、段階の判定には組み込まない（`environment.json` の `ssh.hosts` があれば `status` に出すだけ）。
+`ssh` と `lambda` は任意の追加機能。段階 0〜4 の判定には組み込まず、段階 5（調査）に着いてから `show_extras` で現状と足し方を出す。
+EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `ssh verify <host>`）が要るので、`ec2_pending` が
+ファイルだけで途中かどうかを判定し、案内ループに乗せる。判定に使う記録は 3 つ: `setup.ssh_policy_attached`（`role --create` が書く。
+`ssh remove` が最後のホストで消す）、`session.json` の `ssh_hosts`（`credentials` が発行時の登録済みホストを書く）、
+`ssh.hosts.<host>.verified_at`（`ssh verify` が成功時に書く。`installed_at` より古ければやり直し）。
+借りたロールでは `role --create` が管理者に頼む内容を出すだけなので、ループは状態が変わらないことを見て止まる。
+管理者が付けたあとの `role --create` は「付いているポリシー」から記録して先へ進む。
+`run.sh` は `code/` を空でも作って常に読み取り専用でマウントする。調査中に `lambda pull` したものが起動し直さずに見えるようにするため
+（`method/07` の依頼文がそれを前提にしている）。
 
 `lambda pull` の取り出し専用の一時キー（調査用ロールを Lambda の読み取り 4 つだけのインラインポリシーで借りる。`--policy-arns` は渡さない）は、
 ファイルに書かず、コマンドの引数（`ps` に出る）にも here-string（bash 3.2 では一時ファイルになる）にも載せない。`get-function` の応答には

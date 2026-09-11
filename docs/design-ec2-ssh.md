@@ -111,8 +111,12 @@ aws-survey ssh remove --print <host>        # 撤去スクリプトを標準出�
   それが名前に使えなければ instance-id。同じ別名を別のインスタンスに付け直すことはできない（`--alias` で分ける）。
 
 `setup` は冪等。2 回目は鍵・ゲートウェイ・設定を上書きするだけで、ユーザーは作り直さない。
-引数なしの `aws-survey` は、`environment.json` に `ssh.hosts` があれば `status` に表示するだけで、
-セットアップを段階に組み込まない（EC2 調査は任意の追加機能）。
+引数なしの `aws-survey` は、段階 5（調査）に着いてから「任意の追加」として登録済みホストを出す。`setup` のあとに要る 3 手
+（`role --create` → `credentials` → `ssh verify <host>`）は、基本の準備と同じ案内ループで 1 手ずつ進める。途中かどうかの判定は
+ファイルだけで行う: `setup.ssh_policy_attached`（`role --create` が記録、`remove` が最後のホストで消す）、`session.json` の
+`ssh_hosts`（`credentials` が発行時の登録済みホストを記録。いまの登録と違えば発行し直し）、`ssh.hosts.<host>.verified_at`
+（`verify` が成功時に記録。`installed_at` より古ければ確認し直し。`rotate` と再 `setup` が `installed_at` を進める）。
+段階 0〜4 には組み込まない（EC2 調査は任意の追加機能）。
 
 ### 4.2 setup が行うこと
 
@@ -178,6 +182,7 @@ aws-survey ssh remove --print <host>        # 撤去スクリプトを標準出�
       "instance_id": "i-0123456789abcdef0",
       "user": "diag",
       "installed_at": "2026-09-09T10:00:00+09:00",
+      "verified_at": "2026-09-09T10:20:00+09:00",
       "logs": { "app": "/var/www/app/log/*.log" },
       "deny": ["/var/www/app/config/*"],
       "strict": false
@@ -192,6 +197,8 @@ aws-survey ssh remove --print <host>        # 撤去スクリプトを標準出�
 - `load-env.sh` は `SSH_USER` と `SSH_HOSTS`（alias の一覧）を読むだけ。
 - 記録は導入が成功し、タグが付いてから書く。途中で失敗したら environment.json・`config`・`known_hosts` には触れない。
   `config` は `ssh.hosts` 全体から毎回作り直し、`known_hosts` はそのインスタンスの行だけ入れ替える。
+- `verified_at` は `ssh verify` が成功したときだけ書く。引数なしの `aws-survey` が `installed_at` と比べ、確認し直しが要るかを判定する（§4.1）。
+  ポリシーを付けたことは `setup.ssh_policy_attached` に、発行時の登録済みホストは `session.json` の `ssh_hosts` に残す。
 - 鍵の作成日時は記録しない。鍵ファイルの更新日時がそのまま作成日時で（`rotate` は新しいファイルを移動するので日時が残る）、
   `ssh list` はそれを表示する。
 
