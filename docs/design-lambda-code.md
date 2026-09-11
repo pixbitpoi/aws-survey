@@ -94,7 +94,8 @@ aws-survey lambda remove <関数名>... | --all
   エイリアス（`live`・`prod`）の先の公開版という構成が多い。`ListAliases` で版を集め、`$LATEST` と `CodeSha256` が違う版だけ
   `<関数名>/<版>/` に別に置く。同じならエイリアス名と版番号を `_manifest.json` に控えるだけにする
 - `list` はホストに取り出してある関数・リージョン・`CodeSha256`・取り出した日時・除外した件数を出す。AWS は叩かない
-- `remove` はホストの取り出し先を消す。AWS には何も残していないので、AWS 側の片付けは無い
+- `remove` はホストの取り出し先を消す。AWS には何も残していないので、AWS 側の片付けは無い。関数名での `remove` は
+  `--region`（既定は `environment.json` の `region`）の関数だけを消し、レイヤーは他の関数と共有するので残す。`--all` は `code/` ごと消す
 - 表示は `libexec/ui.sh` の部品で組む（`.agents/rules/credentials.md`）。`ssh` と同じく任意機能で、段階の判定には組み込まない
 
 ### 4.2 pull が行うこと
@@ -106,11 +107,25 @@ aws-survey lambda remove <関数名>... | --all
    画面にも出さない。`_manifest.json` に環境変数は名前だけ置く（値は調査コンテナが `get-function-configuration` で
    マスクの指示のもとに読む。ここで別経路を作らない）。`Code.Location` の URL も同じく表示・記録しない（署名を含む）
 4. `PackageType` が `Zip` なら、`Code.Location` をホストの `curl` でホストの一時ディレクトリに落とす（`--max-filesize` で
-   zip の上限 50 MB を掛ける。URL は引数ではなく `--config -` か `-K` で標準入力から渡し、`ps` に出さない）。
+   上限を掛ける。URL は引数ではなく `-K -` で標準入力から渡し、`ps` に出さない。`--proto =https`）。
+   上限は 250 MB にした（実装時の判断）。50 MB は zip を直接アップロードするときの上限で、S3 経由でデプロイした関数の zip には掛からない。
+   展開後の上限（250 MB）を超える zip は無いので、それを zip の上限にもする。
    `Image` なら落とさず、控えだけ残す（§5.6）
 5. 参照しているレイヤーの版ごとに `get-layer-version-by-arn` を呼び、同じく落とす。同じ版は 1 回だけ
-6. 使い捨てのコンテナで展開と絞り込みを行う（§5）
+6. 使い捨てのコンテナで展開と絞り込みを行う（§5）。落とした zip が 20 件溜まるごとに 1 回（と、関数の後・レイヤーの後に 1 回ずつ）
+   展開し、その場で zip を消す（`--all` で一時ディレクトリに生の zip を溜めすぎない）
 7. 一時ディレクトリを消す。**生の zip はホストにも残さない**
+
+実装で足したこと。
+
+- 取り出し専用の一時キーの値は、`--query 'Credentials.[…]' --output text` の応答を bash の文字列操作だけで分けて変数に持つ。
+  here-string（bash 3.2 では一時ファイルになる）にも、`env VAR=…`（`ps` に出る）にも載せない。`aws` を起動するときの環境変数で渡し、
+  そのとき `AWS_PROFILE` を外し、`AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE` を `/dev/null` にする（利用者の `~/.aws` の設定を混ぜない）
+- §8 の自己確認（同じキーで `ec2 describe-vpcs` が `UnauthorizedOperation`）が通らなければ、何も落とさずに止める
+- 一時キーが途中で切れたら（`ExpiredToken`）、そこまでに落とした分を展開してから止め、同じコマンドを案内する。もう一度打てば、
+  `CodeSha256` と依存の扱い（`--with-deps`）が同じものは落とさない
+- コードが同じでもエイリアスの向き先は変わりうるので、落とさなかった関数も `_manifest.json` の `Aliases` と `checked_at` は書き換える。
+  どのエイリアスも指さなくなった版のディレクトリは消す（古い版は上書き、の方針）
 
 使い捨てのコンテナは、調査用イメージを Python の実行環境として借りるだけにする。イメージは `run.sh` の `build_image` が作るが、
 `pull` は初回の `run` より前に打たれうる。`build_image` を `libexec/docker.sh` に出して `run` と `pull` の両方から呼ぶ
@@ -136,8 +151,8 @@ docker run --rm --network none --read-only --tmpfs /tmp \
 - 抽出器 `libexec/lambda/extract.py` はホスト側の部品で、調査コンテナのイメージには焼かない
 - マスクと拒否パターンは `gateway.py` の `MASK_RULES` / `DENY_NAMES` を import して使う。写しを作らない
 - ホストに `python3` の依存を増やさない（いまのホスト側は bash・`aws`・`jq`・`docker` だけ）。`curl` は `doctor` の確認項目に足す
-- `/out` に書くのはコンテナの `node` ユーザー。Linux のホストでは取り出し先が uid 1000 所有になる。macOS（Docker Desktop）では気にしなくてよい。
-  `_manifest.json` と `src/` はホストの利用者が読めればよく、調査コンテナからは ro なので実害は無いが、`remove` が消せることをテストで見る
+- 使い捨てのコンテナは `-u <ホストの uid>:<gid>` で動かし、`/out` にはホストの利用者として書かせる。イメージの `node`（uid 1000）のままだと、
+  Linux のホストでは取り出し先が uid 1000 所有になり、`remove` で消せない。macOS（Docker Desktop）ではどちらでも変わらない
 - 失敗しても生の zip を残さないよう、一時ディレクトリの削除は `trap` で持つ
 
 ### 4.3 取り出し先
@@ -302,7 +317,7 @@ zip の大半は依存ライブラリで、読みたいのは関数自身のコ�
 - `--policy-arns` は渡さず、このインラインポリシーだけを渡す。有効な権限は「ロール（`ReadOnlyAccess`）∩ これ」で、
   Lambda の 4 つだけになる（`ListAliases` は §4.1 のエイリアスが指す版のため）。`session-guard.json` の Deny は、このキーには掛からない（別のセッションだから）
 - 長さは 900 秒（最短）。ファイルに書かず、`pull` のプロセスの環境変数にだけ持ち、終わったら捨てる。調査コンテナには渡さない
-- ロールセッション名は `SESSION_NAME_PREFIX` と別の接頭辞にする（CloudTrail で調査の API 呼び出しと見分けるため）
+- ロールセッション名は `SESSION_NAME_PREFIX` と別の接頭辞にする（CloudTrail で調査の API 呼び出しと見分けるため）。実装では `lambda-pull-<日時>`
 - ロールの用意のしかた（自分で作る / 借りる / 信頼してもらう）のどれでも使える。借りるのは既存の調査用ロールで、
   ロールにもポリシーにも何も足さない。**`role --create` の変更は要らない**
 
@@ -376,7 +391,9 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
    ソースマップからの復元もここに入れる。**実装済み**（手元の Python と、調査用イメージの Python で、ネットワーク無し・読み取り専用の
    コンテナの中からテストを確認。実際の関数の zip では未確認）
 3. `build_image` を `libexec/docker.sh` に出す（`run` の挙動は変えない。`tests/test_launcher.py` で確かめる）。
-   `aws-survey lambda pull` / `list` / `remove` と偽の `aws` / `curl` / `docker` のテスト。`doctor` に `curl`
+   `aws-survey lambda pull` / `list` / `remove` と偽の `aws` / `curl` / `docker` のテスト。`doctor` に `curl`。
+   **実装済み**（`tests/test_lambda_pull.py`。偽の `docker` が本物の抽出器を走らせる。`doctor` の `curl` は無くても失敗にせず ⚠ だけ。
+   実 AWS・実 Docker での `pull` は未確認）
 4. `run.sh` のマウント、`settings.json`、`method/07`、`survey-status`、`README.md`、`security.md` の新しい節、`AGENTS.md` の作業前の表
 5. 実環境（§8 の最後の行）。Claude Code と Codex の両方
 6. 後回し: Java のクラスファイルの定数の要約、Go のビルド情報、コンテナイメージ形式

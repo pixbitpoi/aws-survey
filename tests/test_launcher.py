@@ -28,7 +28,7 @@ class Launcher(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         for name in ['bin', 'libexec', 'libexec/commands', 'container']:
             (self.root / name).mkdir()
-        for name in ['bin/aws-survey', 'libexec/commands/run.sh', 'libexec/load-env.sh', 'libexec/ui.sh']:
+        for name in ['bin/aws-survey', 'libexec/commands/run.sh', 'libexec/load-env.sh', 'libexec/ui.sh', 'libexec/docker.sh']:
             shutil.copy(ROOT / name, self.root / name)
         docker = self.root / 'bin/docker'
         docker.write_text('#!/usr/bin/env python3\nimport json, os, sys\nwith open(os.environ["SMOKE_DOCKER_LOG"], "a") as f:\n f.write(json.dumps(sys.argv[1:])+"\\n")\n')

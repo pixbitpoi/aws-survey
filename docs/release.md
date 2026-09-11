@@ -39,7 +39,7 @@ formula と `tests/test_distribution.py` の `INCLUDED_HIDDEN` を揃えるこ�
 | 入るもの | 理由 |
 | --- | --- |
 | `bin/aws-survey` | 入口。keg では `libexec/aws-survey` へ移され、`bin` には env ラッパーが置かれる |
-| `libexec/` | ホスト側の実装。各スクリプトと `session-guard.json`、EC2 へ導入する診断ゲートウェイと、導入・撤去スクリプトの雛形（`ec2/`。`aws-survey ssh setup` / `ssh remove` が組み立てて SSM で送る。`--print` で書き出しだけもできる） |
+| `libexec/` | ホスト側の実装。各スクリプトと `session-guard.json`、イメージのビルド（`docker.sh`。`run` と `lambda pull` が共有）、EC2 へ導入する診断ゲートウェイと、導入・撤去スクリプトの雛形（`ec2/`。`aws-survey ssh setup` / `ssh remove` が組み立てて SSM で送る。`--print` で書き出しだけもできる）、Lambda のコードの抽出器（`lambda/extract.py`。`aws-survey lambda pull` が使い捨てのコンテナにマウントして走らせる。調査コンテナのイメージには入らない） |
 | `container/`・`Dockerfile` | 調査コンテナへ渡る資材と、そのビルド定義。ビルド文脈は `container/`。EC2 の中を調べる `ec2` ラッパー（`container/ec2`）と、その実体の openssh-client・session-manager-plugin はイメージに入るので、ホストには要らない |
 | `templates/` | `init` が使う `environment.json` の雛形 |
 

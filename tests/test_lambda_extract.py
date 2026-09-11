@@ -217,7 +217,7 @@ class UnreadableForms(ExtractCase):
                       'lib/dep.jar': jar_bytes({'META-INF/maven/org.acme/acme-core/pom.properties':
                                                 'groupId=org.acme\nartifactId=acme-core\nversion=1.2.3\n',
                                                 'org/acme/A.class': b'\xca\xfe'})},
-                     meta={'handler': 'com.example.Handler::handleRequest'})
+                     meta={'Handler': 'com.example.Handler::handleRequest'})
         self.assertEqual(self.written(), ['META-INF/MANIFEST.MF', 'application.properties'])
         self.assertEqual(self.src('application.properties').read_text(), 'db.password=***\ndb.url=jdbc:x\n')
         contents = self.contents()

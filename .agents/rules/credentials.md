@@ -40,9 +40,14 @@
 
 利用者に見せる「次に打つコマンド」は `load-env.sh` が入れる `AWS_SURVEY_CMD`（`aws-survey` か `<本体>/aws-survey`）で
 組み立てる。`./run.sh` のようなスクリプト名を案内文に書かない。入口は `aws-survey`（`role` / `credentials` / `verify` /
-`run` / `status` / `doctor` / `init` / `ssh`）。実体は `role` / `credentials` / `verify` / `run` / `doctor` / `ssh` が
-`libexec/commands/<名前>.sh`、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。
-`ssh` は任意の追加機能で、段階の判定には組み込まない（`environment.json` の `ssh.hosts` があれば `status` に出すだけ）。
+`run` / `status` / `doctor` / `init` / `ssh` / `lambda`）。実体は `role` / `credentials` / `verify` / `run` / `doctor` / `ssh` / `lambda` が
+`libexec/commands/<名前>.sh`、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。イメージのビルドは `libexec/docker.sh`
+（`run` と `lambda pull` が共有する）。
+`ssh` と `lambda` は任意の追加機能で、段階の判定には組み込まない（`environment.json` の `ssh.hosts` があれば `status` に出すだけ）。
+
+`lambda pull` の取り出し専用の一時キー（調査用ロールを Lambda の読み取り 4 つだけのインラインポリシーで借りる。`--policy-arns` は渡さない）は、
+ファイルに書かず、コマンドの引数（`ps` に出る）にも here-string（bash 3.2 では一時ファイルになる）にも載せない。`get-function` の応答には
+環境変数の値とコードの署名付き URL が入るので、`--query` で要る項目だけ取り、URL は `curl -K -` の標準入力で渡す。内容は `docs/design-lambda-code.md` の第 4・6.2 節。
 引数なしの `aws-survey` の判定は AWS を叩かずファイルだけで行う。
 案内した 1 手を続けて実行するのは、利用者に `(Y/n)` で聞いて「はい」と答えたときだけ。読めなければ案内だけで終わる
 （端末でない実行環境で黙って AWS を叩かないため）。

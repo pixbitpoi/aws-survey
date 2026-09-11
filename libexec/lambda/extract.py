@@ -472,7 +472,7 @@ class Extraction:
     # ---- result ----
 
     def contents(self):
-        handler = str(self.meta.get('handler') or '').split('::')[0]
+        handler = str(self.meta.get('Handler') or '').split('::')[0]
         package = handler.rsplit('.', 1)[0].replace('.', '/') + '/' if '.' in handler else None
         classes = sorted(self.classes, key=lambda c: (not (package and c.startswith(package)), c))
         result = {

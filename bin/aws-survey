@@ -19,6 +19,10 @@
 #   aws-survey ssh verify <host>    調査コンテナから実際に接続して、通るもの・塞がっているものを確かめる
 #   aws-survey ssh rotate           鍵を作り直して登録済みホスト全部に再導入する
 #   aws-survey ssh remove <host>    EC2 から撤去し、タグと記録を消す（remove --print <host> は撤去スクリプトを出すだけ）
+#   aws-survey lambda pull <関数名>... | --all [--region <r>] [--with-deps]
+#                                   Lambda 関数のデプロイ済みのコードを取り出し、絞り込んで code/ に置く（libexec/commands/lambda.sh。任意の追加機能）
+#   aws-survey lambda list          取り出してある関数とレイヤー（AWS は叩かない）
+#   aws-survey lambda remove <関数名>... | --all   取り出したコードを消す
 #
 #   共通オプション:  --dir <対象フォルダ>   既定はカレントディレクトリ（AWS_SURVEY_DIR でも指定可）
 #
@@ -908,6 +912,12 @@ cmd_doctor() {
       ui_err "$(printf '%-6s' "$t")  見つかりません"; ok=0
     fi
   done
+  # curl は任意機能（lambda pull）でだけ使う。無くても準備と起動は進められる
+  if p=$(command -v curl 2>/dev/null); then
+    ui_ok "$(printf '%-6s' curl)  ${C_DIM}$p${C_RESET}"
+  else
+    ui_warn "curl    見つかりません（$CMD_NAME lambda pull で使います）"
+  fi
   if command -v docker >/dev/null 2>&1; then
     if docker info >/dev/null 2>&1; then
       ui_ok "docker デーモンに接続できます"
@@ -945,7 +955,7 @@ cmd_doctor() {
   [ "$ok" -eq 1 ]
 }
 
-cmd_help() { sed -n '2,23p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,27p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 case "$CMD" in
   "")          cmd_guide_loop ;;
@@ -958,5 +968,6 @@ case "$CMD" in
   verify)      exec "$LIBEXEC_DIR/commands/verify.sh" "$@" ;;
   run)         exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
   ssh)         exec "$LIBEXEC_DIR/commands/ssh.sh" "$@" ;;
+  lambda)      exec "$LIBEXEC_DIR/commands/lambda.sh" "$@" ;;
   *)           die "不明なコマンド: ${CMD}（aws-survey --help）" ;;
 esac
