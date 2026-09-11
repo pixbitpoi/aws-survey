@@ -98,7 +98,7 @@ IAM の `--description` や `--role-session-name` に日本語を入れない。
 
 `PackedPolicySize` を確認する。上限は平文 2048 字ではなく圧縮後のサイズで、
 平文 1,020 字でも 114% 超過した実績がある（2026-09-08 の実測は 71%。2026-09-10 は `ReadOnlyAccess` と対で 31%、
-`diag-ssh-<name>` を並べて 32〜33%）。
+`diag-ssh-<name>` を並べて 32〜33%。2026-09-11 に `lambda:GetFunction` / `lambda:GetLayerVersion` を足して、`diag-ssh-<name>` と並べて 33%）。
 100% を超えると `PackedPolicyTooLarge` で発行できない。
 `aws-survey credentials` が発行時に使用率を表示する。
 

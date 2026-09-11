@@ -3,8 +3,8 @@
 調査コンテナのエージェントが、対象の Lambda 関数に**デプロイされているコード**を読めるようにする機能の設計。
 構成調査（`ReadOnlyAccess` + Deny のみのセッションポリシー）と EC2 の中の調査（`docs/design-ec2-ssh.md`）に続く 3 つ目の経路。
 第 11 節の「決めること」はすべて「推奨」の列に決まった（2026-09-11）。第 10 節の第 4 段まで実装済み。
-第 1 段の `verify` は実 AWS で通った（2026-09-11）。第 5 段は Claude Code で確認した（2026-09-11。下の第 10 節）。
-`PackedPolicySize` の値と、第 5 段の Codex での確認は未了。
+第 1 段の `verify` は実 AWS で通り、`PackedPolicySize` は `diag-ssh-<name>` と並べて上限の 33%（2026-09-11）。
+第 5 段は Claude Code と Codex の両方で確認した（2026-09-11。下の第 10 節）。残りは第 6 段（後回しにしたもの）だけ。
 
 ## 1. 目標と方針
 
@@ -300,7 +300,7 @@ zip の大半は依存ライブラリで、読みたいのは関数自身のコ�
 「AWS から得た URL を開く」経路そのものを閉じる（Codex 側は `web_search = "disabled"` で既に閉じている）。
 これも機能の有無にかかわらず入れる。
 
-`PackedPolicySize` を測る（`.agents/rules/credentials.md`）。
+`PackedPolicySize` を測る（`.agents/rules/credentials.md`）。実測は `diag-ssh-<name>` と並べて上限の 33%（2026-09-11。足す前の 32〜33% とほぼ同じ）。
 
 ### 6.2 取り出し専用の一時キー
 
@@ -533,7 +533,7 @@ ls -l "$W"/*.zip
    `grep boto3` するときにも効く）。`PackedPolicySize` を測り、実 AWS で `verify` を通す。
    **実装済み**（偽の `aws` とフックの単体テストまで。`method/01` の「字面を避ける」の行と `security.md` の第 3 節も合わせた）。
    実 AWS で `verify` が通った（2026-09-11。4 項目目で `get-function` が `AccessDenied`。検証用のアカウントなのでパラメータとキューは飛ばした）。
-   **`PackedPolicySize` の値は未記録**
+   `PackedPolicySize` は `diag-ssh-<name>` と並べて上限の 33%（足す前の 32〜33% とほぼ同じ）
 2. 抽出器 `libexec/lambda/extract.py` と `tests/test_lambda_extract.py`。AWS も Docker も使わずに進められる。
    ソースマップからの復元もここに入れる。**実装済み**（手元の Python と、調査用イメージの Python で、ネットワーク無し・読み取り専用の
    コンテナの中からテストを確認。実際の関数の zip では未確認）
@@ -554,7 +554,9 @@ ls -l "$W"/*.zip
    - `method/07` に沿った読み取り: `CodeSha256` で鮮度を確かめ、入口・呼んでいる AWS・環境変数の名前を行番号つきで拾い、実行ロールの権限・
      トリガー・相手のリソースの有無と両方向で突き合わせた。環境変数の値は `--query` で秘密でないものだけを保存し、`out/` に仕込んだ秘密の値は写らなかった。
      ソースマップから戻したソースとバンドルの食い違い（検証用のデータの作りによるもの）を見抜き、実行されるバンドルの方を正とした
-   - **Codex での確認は未了**
+   - **Codex でも確認した**（同日）: `method/03` の 1〜16 が期待どおり（ファイルの編集・`bash -c` は Codex のアダプタが先に拒否）。
+     `lambda get-function` はフックが拒否し、`grep -rn boto3 code/` は通った。`method/07` に沿った読み取りは Claude Code と独立に同じ結論になり
+     （ソースマップとバンドルの食い違いも含む）、`out/` に仕込んだ秘密の値は写らなかった
 6. 後回し: Java のクラスファイルの定数の要約、Go のビルド情報、コンテナイメージ形式
 
 ## 11. 決めること
