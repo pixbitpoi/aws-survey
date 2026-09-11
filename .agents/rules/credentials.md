@@ -113,6 +113,18 @@ Identity Center でログインしたセッションには、MFA を通ってい
 非対話で true を渡されたら止める。`role` は true なら false にするよう、信頼ポリシーに条件があれば借りられないと不足に挙げ、
 `role --create` は true のままでは条件を書き込まずに止める。Identity Center 以外で借りたロールからの MFA の扱いは未確認なので、今までどおり聞く。
 
+## 一時キーの長さ（`duration_seconds`）とロールチェーン
+
+ロールを借りた状態のログイン（Identity Center は常にこれ。`sts get-caller-identity` の Arn が `assumed-role/`）から調査用ロールを
+借りると、AWS の決まり（ロールチェーン）で一時キーは 1 時間が上限になる。ロール側の `MaxSessionDuration` を延ばしても変わらず、
+`AssumeRole` が `ValidationError ... 1 hour session limit for roles assumed by role chaining` で落ちる（2026-09-12 に実環境で発生。
+`role --create` が上限を 3 時間にしていても同じ）。1 時間を超えるには IAM ユーザーの長期キー（MFA 付き）でログインする経路が要る。
+判定は `ui.sh` の `is_chained_arn`（ログインの Arn）と `is_chained_principal`（`principal_arn`。セッション ARN でもロール ARN でも
+ロールを借りてのログイン）で行い、`init` は 8 問目を聞かずに 3600 に固定（非対話で超える値は拒否）、`role` は ⚠ を出し、
+`credentials` は発行前に判定して「`environment.json` の `auth.duration_seconds` を 3600 に直して、そのまま発行しますか？」と聞く
+（`read_line`。読めなければ案内だけで止まる）。AWS 側で断られたときも同じ案内で直して発行し直す。`update-role` を勧めない。
+既定の 3 時間（`DURATION_DEFAULT`）は IAM ユーザーのログイン向けで、変えない。
+
 ## AWS の API に渡す文字列
 
 IAM の `--description` や `--role-session-name` に日本語を入れない。IAM は ASCII と Latin-1 しか受け付けず、

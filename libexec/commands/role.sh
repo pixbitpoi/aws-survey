@@ -154,6 +154,11 @@ if ! who=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --ou
   die "$PROFILE_SRC が使えません。ログインし直してから、もう一度実行してください。"
 fi
 ui_ok "$who"
+# 借りたロールからのログインは、ロール側の上限にかかわらず 1 時間まで。ロールを直しても変わらないので、ここで environment.json 側を案内する
+if is_chained_arn "$who" && [ "$DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
+  ui_chain_limit "$DURATION"
+  ui_text "environment.json の auth.duration_seconds を ${CHAIN_MAX_SECONDS} にしてください（$AWS_SURVEY_CMD credentials がその場で直すこともできます）。"
+fi
 # 「同じロールでログインした人なら誰でも」（ロール ARN）を選んだときは、いまのログインがそのロールのセッションなら一致とみなす
 if [ -n "$PRINCIPAL_ARN" ] && [ "$who" != "$PRINCIPAL_ARN" ] && ! session_in_role "$who" "$PRINCIPAL_ARN"; then
   ui_warn "environment.json に書いた実体（auth.principal_arn）と一致しません"

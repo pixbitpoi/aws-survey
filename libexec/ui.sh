@@ -53,6 +53,20 @@ is_sso_arn() {
   esac
 }
 
+# ロールを借りた状態でログインしているか（Identity Center のログインも assumed-role）。そこから調査用ロールを借りると
+# AWS の決まり（ロールチェーン）で一時キーは 1 時間が上限になり、ロール側の MaxSessionDuration を延ばしても変わらない。
+# 判定は sts get-caller-identity の Arn で行う（init は principal_arn で行う。is_chained_principal）
+CHAIN_MAX_SECONDS=3600
+is_chained_arn() { case "$1" in *:assumed-role/*) return 0 ;; *) return 1 ;; esac; }
+# 貸す相手（principal_arn）から見て、そのログインが借りたロールか。セッション ARN でもロール ARN でもロールを借りてログインしている
+is_chained_principal() { case "$1" in *:assumed-role/*|*:role/*) return 0 ;; *) return 1 ;; esac; }
+# 上限の説明。ui_chain_limit <environment.json の duration_seconds>
+ui_chain_limit() {
+  ui_warn "いまのログインは借りたロールなので、ここから借りる一時キーは 1 時間が上限です（environment.json は $(( $1 / 60 )) 分）"
+  ui_text "AWS の決まり（ロールチェーン）で、調査用ロールの上限（MaxSessionDuration）を延ばしても変わりません。Identity Center のログインも同じです。"
+  ui_text "1 時間を超える長さにするには、IAM ユーザーの長期キー（MFA 付き）でログインする経路が要ります。"
+}
+
 # 表示幅。3 バイト文字（日本語）を幅 2 とみなす
 ui_width() {
   local chars bytes

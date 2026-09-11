@@ -62,6 +62,9 @@ elif argv[:2] == ["iam", "list-attached-role-policies"]:
 elif "simulate-principal-policy" in argv:
     print("iam:CreateRole\\tallowed\\nec2:DescribeVpcs\\tallowed")
 elif "assume-role" in argv:
+    if os.environ.get("FAKE_ASSUME_CHAINING"):
+        sys.stderr.write("An error occurred (ValidationError) when calling the AssumeRole operation: The requested DurationSeconds exceeds the 1 hour session limit for roles assumed by role chaining.\\n")
+        sys.exit(254)
     print(json.dumps({"Credentials": {"AccessKeyId": "AKIAFAKE", "SecretAccessKey": "fake",
                                       "SessionToken": "fake", "Expiration": "2099-01-01T00:00:00+00:00"},
                       "AssumedRoleUser": {"Arn": "arn:aws:sts::000000000000:assumed-role/fake-role/x"},
@@ -414,6 +417,47 @@ class Dispatch(CliCase):
         self.assertIn('arn=arn:aws:iam::aws:policy/ReadOnlyAccess', assume)
         self.assertIn('--policy', assume)
 
+    def chained_credentials_setup(self):
+        self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08'})
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['auth'].update(principal_arn=SSO_CALLER, mfa_required=False, duration_seconds=10800)
+        (self.target / 'environment.json').write_text(json.dumps(config))
+
+    def test_credentials_offers_to_shorten_the_duration_for_a_chained_login(self):
+        self.chained_credentials_setup()
+        # 読めなければ案内だけで止まり、AWS は叩かない
+        result = self.run_cli('credentials', FAKE_CALLER_ARN=SSO_CALLER)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('1 時間が上限です（environment.json は 180 分）', result.stdout)
+        self.assertIn('auth.duration_seconds を 3600 にしてから', result.stdout)
+        self.assertNotIn('update-role', result.stdout)
+        self.assertFalse(any('assume-role' in c for c in self.calls()))
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 10800)
+        # 「はい」なら environment.json を直して、そのまま発行する
+        result = self.run_cli('credentials', input='y\n', FAKE_CALLER_ARN=SSO_CALLER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('auth.duration_seconds を 3600 にしました', result.stdout)
+        self.assertIn('発行しました', result.stdout)
+        assume = next(c for c in self.calls() if 'assume-role' in c)
+        self.assertEqual(assume[assume.index('--duration-seconds') + 1], '3600')
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 3600)
+        self.assertEqual(json.loads((self.home / '.aws-survey/smoke/session.json').read_text())['duration_seconds'], 3600)
+        # 直した後は聞かれない
+        result = self.run_cli('credentials', FAKE_CALLER_ARN=SSO_CALLER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('上限です', result.stdout)
+
+    def test_credentials_recovers_when_aws_reports_role_chaining(self):
+        # 事前の判定をすり抜けて AWS 側で断られたときも、同じ案内で直して発行し直す（update-role の案内は出さない）
+        self.chained_credentials_setup()
+        result = self.run_cli('credentials', input='\n', FAKE_ASSUME_CHAINING='1')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('role chaining', result.stdout)
+        self.assertIn('1 時間が上限', result.stdout)
+        self.assertNotIn('update-role', result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 3600)
+        self.assertEqual(len([c for c in self.calls() if 'assume-role' in c]), 2)
+
     def test_guidance_always_uses_short_name(self):
         self.write_environment()
         result = self.run_cli()
@@ -539,7 +583,7 @@ class Init(CliCase):
         src.write_text(json.dumps({'name': 'from-json', 'account_id': '111111111111', 'region': 'us-east-1',
                                    'auth': {'source_profile': 'sso-prof', 'principal_arn': 'arn:aws:sts::111111111111:assumed-role/AWSReservedSSO_x/u',
                                             'mfa_required': False, 'refresh_command': 'aws sso login --profile sso-prof',
-                                            'duration_seconds': 7200, 'role_name': 'ro-role'}}))
+                                            'duration_seconds': 3600, 'role_name': 'ro-role'}}))   # 借りたロールからは 1 時間が上限
         result = self.run_cli('init', '--from', str(src), AWS_SURVEY_INIT_NAME='from-env')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         config = json.loads((self.target / 'environment.json').read_text())
@@ -548,7 +592,7 @@ class Init(CliCase):
         self.assertEqual(config['auth']['source_profile'], 'sso-prof')
         self.assertEqual(config['auth']['mfa_required'], False)
         self.assertEqual(config['auth']['refresh_command'], 'aws sso login --profile sso-prof')
-        self.assertEqual(config['auth']['duration_seconds'], 7200)
+        self.assertEqual(config['auth']['duration_seconds'], 3600)
         self.assertEqual(config['auth']['role_name'], 'ro-role')
 
     def test_noninteractive_never_calls_sts(self):
@@ -634,15 +678,23 @@ class Init(CliCase):
         self.assertIn('sso-prof', sts[0])
 
     def init_sso(self, pick, *typed, **extra):
-        # name, profile(2=sso-prof), 貸す相手の番号, [手入力の ARN], account, [mfa], refresh, region, duration, role
-        # mfa は Identity Center 以外の ARN を手で入れたときだけ聞かれる
+        # name, profile(2=sso-prof), 貸す相手の番号, [手入力の ARN], account, [mfa], refresh, region, [duration], role
+        # mfa は Identity Center 以外の ARN を手で入れたときだけ聞かれる。duration は貸す相手が借りたロール
+        # （セッション ARN でもロール ARN でも）なら 1 時間に固定されて聞かれない
         mfa = [''] if typed else []
-        answers = ['', '2', pick, *typed, '', *mfa, '', '', '3600', '']
+        chained = not typed or any(':assumed-role/' in t or ':role/' in t for t in typed)
+        duration = [] if chained else ['3600']
+        answers = ['', '2', pick, *typed, '', *mfa, '', '', *duration, '']
         return self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_ARN=SSO_CALLER, **extra)
 
     def test_interactive_sso_defaults_to_only_me(self):
         result = self.init_sso('')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 借りたロールからのログインは 1 時間が上限（ロールチェーン）。8 問目は聞かずに 3600 に固定する
+        self.assertIn('1 時間が上限', result.stdout)
+        self.assertIn('duration_seconds: 3600', result.stdout)
+        self.assertNotIn('duration_seconds を選んでください', result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 3600)
         self.assertIn('1) 自分だけ（alice）', result.stdout)
         self.assertIn('2) 権限セット AdministratorAccess でログインした人なら誰でも', result.stdout)
         self.assertIn('3) ARN を手で入力する', result.stdout)
@@ -661,6 +713,20 @@ class Init(CliCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('mfa_required を true にできません', result.stdout + result.stderr)
         self.assertFalse((self.target / 'environment.json').exists())
+
+    def test_noninteractive_chained_login_caps_duration_at_one_hour(self):
+        env = {k: v for k, v in INIT_ENV.items() if k != 'AWS_SURVEY_INIT_MFA_REQUIRED'}
+        env['AWS_SURVEY_INIT_PRINCIPAL_ARN'] = SSO_CALLER
+        result = self.run_cli('init', **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 3600)
+        result = self.run_cli('init', '--force', **{**env, 'AWS_SURVEY_INIT_DURATION_SECONDS': '10800'})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('ロールチェーン', result.stderr)
+        self.assertIn('3600', result.stderr)
+        # IAM ユーザーのログインなら既定の 3 時間のまま
+        result = self.run_cli('init', '--force', **{**env, 'AWS_SURVEY_INIT_PRINCIPAL_ARN': 'arn:aws:iam::000000000000:user/fake'})
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 10800)
 
     def test_noninteractive_sso_defaults_mfa_to_false(self):
         env = {k: v for k, v in INIT_ENV.items() if k != 'AWS_SURVEY_INIT_MFA_REQUIRED'}
@@ -874,6 +940,18 @@ class Role(CliCase):
         result = self.run_cli('role', '--create', FAKE_MAX_SESSION='3600')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('セッション上限を 10800 秒に合わせました', result.stdout)
+
+    def test_chained_login_warns_about_the_one_hour_limit(self):
+        # ロール側の上限が 3 時間でも、借りたロールからは 1 時間まで。environment.json を直す案内で、--create は勧めない
+        self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08'})
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['auth'].update(principal_arn=SSO_CALLER, mfa_required=False, duration_seconds=10800)
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_sso('role', FAKE_MAX_SESSION='10800')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1 時間が上限です（environment.json は 180 分）', result.stdout)
+        self.assertIn('auth.duration_seconds を 3600 に', result.stdout)
+        self.assertNotIn('より短い', result.stdout)
 
     def test_role_lent_to_the_permission_set_covers_my_session(self):
         # 信頼ポリシーはロールの形、environment.json はセッションの形。書き方は違うが借りられるので不足にしない

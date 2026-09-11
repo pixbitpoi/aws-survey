@@ -64,6 +64,31 @@ if ! check_source; then
   fi
 fi
 ui_ok "$who"
+# 借りたロール（Identity Center を含む）からのログインは、AWS の決まりで 1 時間まで。ロール側を延ばしても変わらないので、
+# environment.json の auth.duration_seconds をその場で直して続けられるようにする（聞いて「はい」のときだけ。読めなければ案内だけで止まる）
+fix_duration_or_die() {
+  local ans tmp
+  printf '  %s❯%s environment.json の auth.duration_seconds を %s → %s に直して、そのまま発行しますか？ %s(Y/n)%s: ' \
+    "$C_CYAN" "$C_RESET" "$DURATION" "$CHAIN_MAX_SECONDS" "$C_DIM" "$C_RESET"
+  if read_line ans; then
+    [ -t 0 ] || echo ""
+    case "$ans" in
+      ""|y|Y|yes|YES)
+        tmp=$(mktemp) && jq --argjson d "$CHAIN_MAX_SECONDS" '.auth.duration_seconds = $d' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE" \
+          || die "environment.json を書き換えられませんでした: $ENV_FILE"
+        DURATION=$CHAIN_MAX_SECONDS
+        ui_ok "environment.json の auth.duration_seconds を ${CHAIN_MAX_SECONDS} にしました"
+        return 0 ;;
+    esac
+  fi
+  echo ""
+  ui_text "environment.json の auth.duration_seconds を ${CHAIN_MAX_SECONDS} にしてから、もう一度実行してください: $ENV_FILE"
+  die "一時キーを発行できませんでした。$OUT は変更していません。"
+}
+if is_chained_arn "$who" && [ "$DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
+  ui_chain_limit "$DURATION"
+  fix_duration_or_die
+fi
 echo ""
 
 # ---- ロールの存在確認 ----
@@ -121,6 +146,13 @@ if ! json=$(
       ui_text "それでも駄目なら信頼ポリシーを確認してください:"
       ui_text "  aws iam get-role --profile $PROFILE_SRC --role-name $ROLE_NAME --query 'Role.AssumeRolePolicyDocument'"
       ui_text "$AWS_SURVEY_CMD doctor でも切り分けられます。" ;;
+    *"role chaining"*)
+      ui_chain_limit "$DURATION"
+      fix_duration_or_die
+      echo ""
+      ui_text "直した設定で発行し直します。"
+      echo ""
+      exec bash "$0" "$@" ;;
     *DurationSeconds*|*duration*)
       ui_text "ロールのセッション上限より長い時間を要求しています。"
       ui_text "environment.json の auth.duration_seconds を短くするか、ロール側を延ばしてください:"

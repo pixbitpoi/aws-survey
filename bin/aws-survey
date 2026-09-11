@@ -693,7 +693,13 @@ init_interactive() {
   ui_text "1 回の調査セッションに取れる時間。一時キーの長さになります。"
   ui_text "有効期限ではなく、調査エージェントの働き方を決める値です。短ければ守備範囲を狭く、長ければ通しで進めます。"
   ui_text "借りるロールでは、そのロールの上限（既定 1 時間）を超える長さは発行できません。"
-  choose_duration
+  if is_chained_principal "$I_ARN"; then
+    ui_text "貸す相手（3 問目）はロールを借りてのログインなので、AWS の決まり（ロールチェーン）で 1 時間が上限です。ロール側の上限では延ばせません。"
+    I_DURATION=$CHAIN_MAX_SECONDS
+    ui_ok "duration_seconds: ${C_BOLD}${I_DURATION}${C_RESET}（1 時間。借りたロールからの上限）"
+  else
+    choose_duration
+  fi
 
   echo ""
   ui_head "9/9 role_name"
@@ -729,7 +735,9 @@ init_noninteractive() {
   # 既定が決められる項目だけ埋める
   [ -n "$I_NAME" ]     || I_NAME=$(default_name)
   [ -n "$I_MFA" ]      || I_MFA=$(mfa_default_from_arn "$I_ARN")
-  [ -n "$I_DURATION" ] || I_DURATION=$DURATION_DEFAULT
+  if [ -z "$I_DURATION" ]; then
+    if is_chained_principal "$I_ARN"; then I_DURATION=$CHAIN_MAX_SECONDS; else I_DURATION=$DURATION_DEFAULT; fi
+  fi
   [ -n "$I_ROLE" ]     || I_ROLE=aws-survey-readonly
   I_MFA=$(to_bool "$I_MFA")
   local k
@@ -749,6 +757,9 @@ init_validate() {
   fi
   valid_region "$I_REGION"     || init_die "region が不正です: $I_REGION"
   valid_duration "$I_DURATION" || init_die "duration_seconds が不正です: ${I_DURATION}（900〜43200）"
+  if is_chained_principal "$I_ARN" && [ "$I_DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
+    init_die "duration_seconds ${I_DURATION} は長すぎます。貸す相手（${I_ARN}）はロールを借りてのログインなので、AWS の決まり（ロールチェーン）で 1 時間（3600）が上限です。ロール側の上限では延ばせません。"
+  fi
   valid_role "$I_ROLE"         || init_die "role_name が不正です: $I_ROLE"
   profile_exists "$I_PROFILE"  || init_die "source_profile がプロファイル一覧にありません: ${I_PROFILE}（aws configure list-profiles）"
 }
