@@ -463,16 +463,33 @@ cmd_setup() {
   ui_kv "known_hosts" "$KNOWN_HOSTS"
   echo ""
   ui_text "調査コンテナからは ec2 $HOST_ALIAS <動詞> で使います（一覧: ec2 $HOST_ALIAS help）。"
-  ui_text "使えるようにするには、あと 3 手あります。引数なしの $AWS_SURVEY_CMD が 1 手ずつ「実行しますか？」と聞いて進めます。"
-  next_cmd "$AWS_SURVEY_CMD" "続きを進めます: 接続を許すポリシー → 一時キーの発行し直し → 調査コンテナからの接続の確認"
-  if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
-    also_cmd "$AWS_SURVEY_CMD role --create" "（1 手目）このインスタンスへの SSH 接続を許すポリシーを調査用ロールに付けます（初めての登録のとき）"
-  else
-    also_cmd "$AWS_SURVEY_CMD role --create" "（1 手目）SSH 接続を許すポリシーの JSON を表示します（管理者に付けてもらいます）"
-  fi
-  also_cmd "$AWS_SURVEY_CMD credentials" "（2 手目）その権限を含めて一時キーを発行し直します"
-  also_cmd "$AWS_SURVEY_CMD ssh verify $HOST_ALIAS" "（3 手目）調査コンテナから実際に接続して確かめます"
+  ui_text "使えるようにするには、あと 3 手（接続を許すポリシー → 一時キーの発行し直し → 接続の確認）が要ります。"
+  ui_text "引数なしの $AWS_SURVEY_CMD を 1 回打てば、3 手とも順に進みます（1 手ごとに Enter で確認するだけ）。"
+  next_cmd "$AWS_SURVEY_CMD" "残りの 3 手を順に進めます"
   also_cmd "$AWS_SURVEY_CMD ssh list" "登録済みホストと導入状態を確かめます"
+  ui_text "手で 1 手ずつ進めるなら: $AWS_SURVEY_CMD role --create → $AWS_SURVEY_CMD credentials → $AWS_SURVEY_CMD ssh verify $HOST_ALIAS"
+  if [ "$AUTH_ROUTE" != own_role ] && [ -n "$AUTH_ROUTE" ]; then
+    ui_text "ロールを借りているので、1 手目はポリシーの JSON を表示するだけです。管理者に付けてもらってから、もう一度 $AWS_SURVEY_CMD を打ちます。"
+  fi
+  setup_offer_continue
+}
+
+# 端末なら、その場で引数なしの aws-survey に進む（残りの 3 手を順に聞いて実行する）。
+# 端末でなければ（エージェントの実行環境・テスト）案内だけで終わる。黙って AWS を叩かないため。
+setup_offer_continue() {
+  [ "${AWS_SURVEY_CHAIN:-0}" != 1 ] || return 0
+  { [ -t 0 ] && [ -t 1 ]; } || return 0
+  local ans
+  echo ""
+  printf '  %s❯%s 続けて %s を実行しますか？ %s(Y/n)%s: ' \
+    "$C_CYAN" "$C_RESET" "$(ui_cmd "$AWS_SURVEY_CMD")" "$C_DIM" "$C_RESET"
+  read -r ans || { echo ""; return 0; }
+  case "$ans" in
+    ""|y|Y|yes|YES) ;;
+    *) ui_text "ここで止めます。続けるときは上のコマンドを打ってください。"; return 0 ;;
+  esac
+  echo ""
+  exec "$AWS_SURVEY_HOME/bin/aws-survey"
 }
 
 cmd_setup_print() {

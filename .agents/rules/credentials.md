@@ -59,6 +59,9 @@ EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `s
 引数なしの `aws-survey` の判定は AWS を叩かずファイルだけで行う。
 案内した 1 手を続けて実行するのは、利用者に `(Y/n)` で聞いて「はい」と答えたときだけ。読めなければ案内だけで終わる
 （端末でない実行環境で黙って AWS を叩かないため）。
+`ssh setup` の末尾も同じで、標準入力と標準出力の両方が端末のときだけ「続けて `aws-survey` を実行しますか？」と聞き、
+「はい」なら引数なしの `aws-survey` に exec して残りの 3 手へ進む（`setup_offer_continue`）。案内文では `aws-survey` 1 本を主にし、
+`role --create` → `credentials` → `ssh verify` は「手で 1 手ずつ進めるなら」の補足に留める。
 `init` が聞くのは AWS への繋ぎ方の 9 項目だけ（`AGENTS.md`「ホストと調査コンテナ」）。項目を足すときは `environment.json` の雛形・`load-env.sh`・
 非対話モードの `AWS_SURVEY_INIT_*` を揃え、対象の概要や調査項目に踏み込まない。
 `refresh_command` の既定は `aws-login --profile <元プロファイル>`（`refresh_default`）。`<名>-mfa` は aws-login が作る

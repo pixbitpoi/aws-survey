@@ -1025,7 +1025,7 @@ cmd_status() {
     ui_kv "ログインユーザー" "$SSH_USER"
     if [ "$KEY_STATE" = valid ] && ec2_pending; then
       ui_warn "EC2 の中を調べる準備が途中: $EC2_DETAIL"
-      next_cmd "$CMD_NAME" "続きを 1 手ずつ案内します"
+      next_cmd "$CMD_NAME" "残りを順に進めます"
     fi
   fi
 }
