@@ -134,6 +134,16 @@ get_function() {
 
 PULLED=0; UNCHANGED=0; FAILED=0; EXPIRED=0; JOB_SEQ=0; LAYERS=""
 
+# 展開の回ごとに、新しい入れ物（$WORK/in-<n>）を用意する。同じディレクトリで jobs.json を消して作り直すと、
+# Docker Desktop のファイル共有が消えたままの状態を見せることがある（2026-09-11 に再現。2 回目のマウントで ENOENT）。
+# 名前もマウント元も使い回さない。
+BATCH_NO=0; IN_DIR=""
+new_batch() {
+  BATCH_NO=$((BATCH_NO + 1))
+  IN_DIR="$WORK/in-$BATCH_NO"
+  mkdir "$IN_DIR" || die "一時ディレクトリを作れません。"
+}
+
 # 取り出し専用の一時キーが切れたら、そこで止める（もう一度打てば、取り出し済みは飛ばして残りから進む）
 api_failed() {
   local label="$1" out="$2"
@@ -191,8 +201,8 @@ pull_code() {
   if [ "$pkg" = Zip ]; then
     url=$(printf '%s' "$answer" | jq -r '.location // empty')
     JOB_SEQ=$((JOB_SEQ + 1)); zip="$JOB_SEQ.zip"
-    if ! err=$(download "$url" "$WORK/in/$zip"); then
-      rm -f "$WORK/in/$zip"
+    if ! err=$(download "$url" "$IN_DIR/$zip"); then
+      rm -f "$IN_DIR/$zip"
       ui_err "$label  コードを落とせませんでした"
       ui_raw "$err"
       FAILED=$((FAILED + 1))
@@ -212,16 +222,17 @@ flush_jobs() {
   [ -s "$WORK/jobs.jsonl" ] || return 0
   local n out rc=0 line fields status dest error ok=0
   n=$(wc -l < "$WORK/jobs.jsonl" | tr -d ' ')
-  jq -s --argjson deps "$WITH_DEPS" '{with_deps: $deps, jobs: .}' "$WORK/jobs.jsonl" > "$WORK/in/jobs.json" \
+  jq -s --argjson deps "$WITH_DEPS" '{with_deps: $deps, jobs: .}' "$WORK/jobs.jsonl" > "$IN_DIR/jobs.json" \
     || die "展開の指示を組み立てられません。"
   ui_status "展開して絞り込んでいます（${n} 件）…"
   out=$(docker run --rm --network none --read-only --tmpfs /tmp:size=1g \
           -u "$(id -u):$(id -g)" \
-          -v "$WORK/in:/in:ro" -v "$CODE_DIR:/out" \
+          -v "$IN_DIR:/in:ro" -v "$CODE_DIR:/out" \
           -v "$EXTRACT:/x/extract.py:ro" -v "$GATEWAY:/x/gateway.py:ro" \
           "$IMAGE" python3 -B /x/extract.py /in /out 2>&1) || rc=$?
   ui_status_done
-  rm -f "$WORK"/in/*.zip "$WORK/in/jobs.json" "$WORK/jobs.jsonl"
+  rm -rf "$IN_DIR" "$WORK/jobs.jsonl"
+  new_batch
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     if ! fields=$(printf '%s' "$line" | jq -er '[.status, .dest, (.error // ""),
@@ -321,7 +332,7 @@ cmd_pull() {
   WORK=$(mktemp -d) || die "一時ディレクトリを作れません。"
   # 生の zip は途中で止まっても残さない
   trap 'rm -rf "$WORK"' EXIT
-  mkdir "$WORK/in" || die "一時ディレクトリを作れません。"
+  new_batch
   : > "$WORK/jobs.jsonl"
   # 展開のコンテナにマウントする場所（本体の抽出器、取り出し先、一時ディレクトリ）が Docker Desktop から見えるか
   docker_check_shared "$AWS_SURVEY_HOME" "$CODE_DIR" "$WORK" || exit 1

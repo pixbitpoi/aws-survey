@@ -274,6 +274,9 @@ class Pull(LambdaCase):
 
         runs = self.runs()
         self.assertEqual(len(runs), 2)                           # functions, then layers
+        # each extraction mounts a new directory: Docker Desktop may hide a jobs.json deleted and recreated in place
+        self.assertNotEqual(runs[0]['in'], runs[1]['in'])
+        self.assertEqual(runs[1]['in_files'], ['3.zip', 'jobs.json'])     # version 2, $LATEST, then the layer
         for run in runs:
             argv = run['argv']
             self.assertEqual(argv[argv.index('--network') + 1], 'none')
