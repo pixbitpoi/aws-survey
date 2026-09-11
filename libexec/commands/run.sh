@@ -57,6 +57,12 @@ ui_ok "用意できました"
 echo ""
 ui_head "3/3 調査コンテナを起動する"
 ui_text "中では AWS を読むことしかできません。調査の目的と進め方は、中で Claude Code / Codex と決めます。"
+# 取り出した Lambda のコード（aws-survey lambda pull）。あるときだけ読み取り専用で渡す
+code_mount=()
+if [ -d "$AWS_SURVEY_DIR/code" ]; then
+  code_mount=(-v "$AWS_SURVEY_DIR/code:/home/node/aws-survey/code:ro")
+  ui_text "取り出した Lambda のコード（code/）も読み取り専用で渡します。"
+fi
 echo ""
 # exec しない。コンテナが終わったあとに到達点を記録するため（下）。終了コードはそのまま返す。
 status=0
@@ -68,6 +74,7 @@ docker run --rm -it \
   -v "$AWS_SURVEY_HOME/container/instructions/survey-agents.md:/home/node/aws-survey/AGENTS.md:ro" \
   -v "$AWS_SURVEY_HOME/container/method:/home/node/aws-survey/method:ro" \
   -v "$OUT_DIR:/home/node/aws-survey/out" \
+  ${code_mount[@]+"${code_mount[@]}"} \
   -v "$CODEX_VOLUME:/home/node/.codex" \
   -v "$VOLUME:/home/node/.claude" \
   -v "$CLI_VOLUME:/home/node/.local" \

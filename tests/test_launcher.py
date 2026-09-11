@@ -139,6 +139,22 @@ class Launcher(unittest.TestCase):
         self.assertFalse((self.root / 'out').exists())
         self.assertFalse((elsewhere / 'out').exists())
 
+    def test_pulled_code_is_mounted_read_only_only_when_present(self):
+        """code/ (aws-survey lambda pull) reaches the container read-only, and only when it exists."""
+        write_environment(self.root)
+        keys = self.root / 'keys'
+        keys.mkdir()
+        (keys / 'credentials').touch()
+        self.assertEqual(self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root, AWS_DIR=str(keys)).returncode, 0)
+        _, launch = self.last_launch()
+        self.assertFalse(any('/home/node/aws-survey/code' in a for a in launch))
+        (self.root / 'code/lambda').mkdir(parents=True)
+        result = self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root, AWS_DIR=str(keys))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, launch = self.last_launch()
+        self.assertIn(f'{self.root}/code:/home/node/aws-survey/code:ro', launch)
+        self.assertEqual(launch[-2:], ['smoke:latest', 'codex'])
+
     def test_missing_keys_name_the_per_target_location(self):
         write_environment(self.root)
         result = self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root)
@@ -310,6 +326,11 @@ class WebToolsDenied(unittest.TestCase):
         """rg is allowed without a prompt; --pre / --hostname-bin would start any program, so the guard refuses them."""
         self.assertIn('Bash(rg:*)', self.permissions['allow'])
         self.assertIn('--(pre|hostname-bin)', (ROOT / 'container/hooks/aws-readonly-guard.sh').read_text())
+
+    def test_pulled_code_is_readable_not_editable(self):
+        self.assertIn('Read(//home/node/aws-survey/code/**)', self.permissions['allow'])
+        self.assertFalse(any(rule.startswith(('Edit(//home/node/aws-survey/code', 'Write(//home/node/aws-survey/code'))
+                             for rule in self.permissions['allow']))
 
 
 class CliInstallLayout(unittest.TestCase):

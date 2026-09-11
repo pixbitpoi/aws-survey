@@ -2,8 +2,8 @@
 
 調査コンテナのエージェントが、対象の Lambda 関数に**デプロイされているコード**を読めるようにする機能の設計。
 構成調査（`ReadOnlyAccess` + Deny のみのセッションポリシー）と EC2 の中の調査（`docs/design-ec2-ssh.md`）に続く 3 つ目の経路。
-第 11 節の「決めること」はすべて「推奨」の列に決まった（2026-09-11）。第 10 節の第 1 段まで実装済み
-（実 AWS での `verify` と `PackedPolicySize` の測定は未確認）。
+第 11 節の「決めること」はすべて「推奨」の列に決まった（2026-09-11）。第 10 節の第 4 段まで実装済み。
+第 1 段の `verify` は実 AWS で通った（2026-09-11）。`PackedPolicySize` の値と、第 5 段（実環境での `pull` と調査コンテナでの読み取り）は未確認。
 
 ## 1. 目標と方針
 
@@ -386,7 +386,8 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
    `verify` に 1 項目、`security.md` の第 1 節の表。**この機能と独立に価値がある**（いまの穴を塞ぐ。検索の例外は `out/` の中を
    `grep boto3` するときにも効く）。`PackedPolicySize` を測り、実 AWS で `verify` を通す。
    **実装済み**（偽の `aws` とフックの単体テストまで。`method/01` の「字面を避ける」の行と `security.md` の第 3 節も合わせた）。
-   **実 AWS での `verify` の通過と `PackedPolicySize` は未確認**
+   実 AWS で `verify` が通った（2026-09-11。4 項目目で `get-function` が `AccessDenied`。検証用のアカウントなのでパラメータとキューは飛ばした）。
+   **`PackedPolicySize` の値は未記録**
 2. 抽出器 `libexec/lambda/extract.py` と `tests/test_lambda_extract.py`。AWS も Docker も使わずに進められる。
    ソースマップからの復元もここに入れる。**実装済み**（手元の Python と、調査用イメージの Python で、ネットワーク無し・読み取り専用の
    コンテナの中からテストを確認。実際の関数の zip では未確認）
@@ -394,7 +395,10 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
    `aws-survey lambda pull` / `list` / `remove` と偽の `aws` / `curl` / `docker` のテスト。`doctor` に `curl`。
    **実装済み**（`tests/test_lambda_pull.py`。偽の `docker` が本物の抽出器を走らせる。`doctor` の `curl` は無くても失敗にせず ⚠ だけ。
    実 AWS・実 Docker での `pull` は未確認）
-4. `run.sh` のマウント、`settings.json`、`method/07`、`survey-status`、`README.md`、`security.md` の新しい節、`AGENTS.md` の作業前の表
+4. `run.sh` のマウント、`settings.json`、`method/07`、`survey-status`、`README.md`、`security.md` の新しい節、`AGENTS.md` の作業前の表。
+   **実装済み**（`security.md` は第 5 節に入れ、「これで保証されないこと」を第 6 節に送った。`survey-agents.md` と `method/01` に入口を 1 行ずつ、
+   `AGENTS.md` の不変条件に取り出し専用の一時キーの 1 項目を足した。`method/07` の検索の例は、パターンに `|` を使わず `-e` を並べる
+   （`|` は引用符の中でもフックの例外の条件に掛かる））
 5. 実環境（§8 の最後の行）。Claude Code と Codex の両方
 6. 後回し: Java のクラスファイルの定数の要約、Go のビルド情報、コンテナイメージ形式
 

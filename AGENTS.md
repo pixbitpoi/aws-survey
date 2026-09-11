@@ -29,6 +29,8 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 | `bin/aws-survey`・`libexec/**`・`templates/`・接続設定 | `.agents/rules/credentials.md` |
 | `libexec/ec2/**`（EC2 に置く診断ゲートウェイと、導入・撤去スクリプトの雛形）・`libexec/commands/ssh.sh`（SSM 経由の導入と登録、`ssh verify`、`ssh rotate`、`ssh remove`。最後のホストでの `diag-ssh-<name>` の detach / delete も `remove` が持つ） | `docs/design-ec2-ssh.md` の第 2 節（名前）・第 4 節（セットアップと EC2 に作るもの。SSM の上限の実測値は第 4.3 節、`rotate` / `remove` とポリシーの片付けは第 4.6 節）・第 5 節（仕様）。実装の段階と未確認事項は第 10 節。偽の `aws` での検証は `tests/test_ssh_setup.py`（`setup` / `list` / `rotate` / `remove`。IAM の呼び出し順も）、`ssh verify` と `remove --print` は偽の `docker` で `tests/test_ssh_install.py` |
 | `container/ec2`（調査コンテナの `ec2` ラッパー、二層の SSM セッションの後片付け、`--selftest`）・フックの `ec2` / `ssh` の判定・`Dockerfile` の session-manager-plugin・`container/method/06_EC2の中を調べる.md`・`survey-status` の登録済みホスト表示 | `.agents/rules/container.md` に加えて `docs/design-ec2-ssh.md` の第 7 節（自己診断の項目と SSM セッションの終わり方・起動時の後片付けの実測）・第 8 節（コンテナ側の部品とフックの判定）。通る例・落ちる例とラッパーの引数の渡し方・後片付けの呼び出し順は `tests/test_guards.py`（偽の `ssh` と `aws`）、配置は `tests/test_launcher.py`。`method/06` はゲートウェイの動詞（第 5 節）と食い違わせない |
+| `libexec/commands/lambda.sh`（`lambda pull` / `list` / `remove`、取り出し専用の一時キー）・`libexec/lambda/extract.py`（抽出器）・`libexec/docker.sh`（`run` と共有するイメージのビルド） | `.agents/rules/credentials.md` に加えて `docs/design-lambda-code.md` の第 4 節（コマンドと取り出し先）・第 5 節（展開・拒否パターン・マスク・依存・ソースマップ）・第 6.2 節（取り出し専用の一時キー）。抽出器は `tests/test_lambda_extract.py`（組み立てた zip）、`pull` / `list` / `remove` は `tests/test_lambda_pull.py`（偽の `aws` / `curl` / `docker`。偽の `docker` が本物の抽出器を走らせる）。拒否パターンとマスクは `gateway.py` から import し、写さない |
+| `container/method/07_Lambdaのコードを読む.md`・`run.sh` の `code/` のマウント・`survey-status` の取り出してある関数の表示・フックのコードの検索の例外と `lambda get-function` の拒否 | `.agents/rules/container.md` に加えて `docs/design-lambda-code.md` の第 6.1 節（調査コンテナの一時キーとフック）・第 7 節（コンテナ側の部品）。通る例・落ちる例は `tests/test_guards.py`、マウントと `settings.json` は `tests/test_launcher.py`。`method/07` は抽出器が書く `_manifest.json` の項目と食い違わせない |
 | `diag-ssh-<name>` ポリシー（`role.sh` の作成・アタッチ、`credentials.sh` の `--policy-arns`、`verify.sh` の 6・7 項目目） | `.agents/rules/credentials.md` に加えて `docs/design-ec2-ssh.md` の第 6 節（ポリシーの内容と `PackedPolicySize` の実測）・第 7 節（検証）。偽の `aws` での検証は `tests/test_ec2_iam.py` |
 
 上の規則は新規ファイルにも適用する。`.agents/rules/` はどのエージェントも自動では読み込まない。この表に従って読む。
@@ -53,6 +55,8 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 - `--policy-arns arn=...ReadOnlyAccess` を外さない。Deny のみのセッションポリシーと対で使う。
   `diag-ssh-<name>` はその後ろに並べる任意の追加で、許すのは `diag:ssh=<name>` タグ付きインスタンスへの `AWS-StartSSHSession` だけ。
   `ssm:SendCommand` を調査用ロールや一時キーに足さない。
+- Lambda のコードの取り出しはホストだけで行う。取り出し専用の一時キーは Lambda の読み取り 4 つだけで、ファイルに書かず、調査コンテナに渡さない。
+  調査コンテナの一時キーでは `lambda:GetFunction` / `lambda:GetLayerVersion` を Deny したままにする。
 - 長期 AWS キー・元プロファイル・資格情報の再発行機能を調査コンテナに渡さない。
 - EC2 に残すもの（`libexec/ec2/`）の名前に「ai」「agent」「survey」を含めない。root 読み取り段は 5 動詞固定で、任意パスの読み取りを足さない。シェルを経由せず argv を list で渡す。
 - ガードはイメージへ焼き込み、root 所有を保つ。プロンプトだけを安全性の根拠にしない。

@@ -8,6 +8,7 @@
 SESSION_FILE=/home/node/.aws-claude/session.json
 CRED_FILE=/home/node/.aws-claude/credentials
 SSH_CONFIG=/home/node/.aws-claude/ssh/config
+CODE_DIR=/home/node/aws-survey/code
 
 # プロファイル・リージョン・アカウント・フェーズ。資格情報があるときだけ最後に出す。
 show_context() {
@@ -17,6 +18,23 @@ show_context() {
   [ -n "${SURVEY_PHASE_DIR:-}" ] && line="$line ・ フェーズ $SURVEY_PHASE_DIR"
   sui_text "$line"
   show_hosts
+  show_code
+}
+
+# 取り出してある Lambda のコード（ro マウント）。関数ごとの _manifest.json を数えるだけで、AWS は叩かない。
+# 取り出したあとに更新されたかは、読むときに CodeSha256 を比べる（method/07）。無い対象では何も出さない。
+show_code() {
+  local manifests n last at=""
+  [ -d "$CODE_DIR/lambda" ] || return 0
+  manifests=$(find "$CODE_DIR/lambda" -mindepth 3 -maxdepth 3 -name _manifest.json 2>/dev/null)
+  [ -n "$manifests" ] || return 0
+  n=$(printf '%s\n' "$manifests" | wc -l | tr -d ' ')
+  if command -v jq >/dev/null 2>&1; then
+    last=$(printf '%s\n' "$manifests" | while IFS= read -r m; do jq -r '.pulled_at // empty' "$m" 2>/dev/null; done | sort | tail -n 1)
+    [ -z "$last" ] || at=$(date -d "$last" '+%m/%d %H:%M' 2>/dev/null)
+  fi
+  sui_line "取り出してある Lambda のコード: 関数 ${n} 件${at:+（最後の取り出し $at）}"
+  sui_note "code/ に読み取り専用。作法は method/07_Lambdaのコードを読む.md"
 }
 
 # EC2 の中を調べられるホスト。接続設定（ro マウント）に Host があるときだけ出す。無い対象では何も出さない。
