@@ -55,6 +55,7 @@ Identity Center を使うときは `auth.mfa_required` を false にし、MFA �
 | `es:ESHttp*` / `cassandra:*` / `dax:*` / `sdb:Select` | データストアへの直接読み出し | 含まれる | Deny |
 | `athena:GetQueryResults` | クエリ結果 | 含まれる | Deny |
 | `codecommit:GitPull` | ソースコード全体 | 含まれる | Deny |
+| `lambda:GetFunction` / `lambda:GetLayerVersion` | 関数・レイヤーのコードの署名付き URL（開けば zip の中身が取れる） | 含まれる | Deny |
 | `ecr:GetAuthorizationToken` / `codeartifact:GetAuthorizationToken` | レジストリの認証トークン | 含まれる | Deny |
 | `cognito-identity:Get*` | 別の資格情報の取得（権限昇格の経路） | 含まれる | Deny |
 | `sts:AssumeRole*` | ロールを借り直して権限を戻す | 含まれない | Deny（二重） |
@@ -78,6 +79,10 @@ Identity Center を使うときは `auth.mfa_required` を false にし、MFA �
 
 また、`aws-survey verify` が実際に一時キーを使って、読み取りが通り書き込みが拒否されることを確かめます。
 
+調査に外部の Web は要らないため、Claude Code の `WebFetch` と `WebSearch` は `settings.json` で拒否しています
+（Codex は `web_search = "disabled"`）。AWS の応答には署名付き URL が出ることがあり、`curl` / `wget` を止めていても、
+`WebFetch` はコマンドの検査を通らない別のツールなので、開けてしまうからです。「AWS から得た URL を開く」経路そのものを閉じています。
+
 ## 3. エージェント側の対策
 
 エージェントの権限設定は、コマンド文字列の先頭一致で判定します。そのため `aws` を禁止しても、次のように書かれると素通りします。
@@ -97,6 +102,8 @@ python3 -c "import boto3; ..."
 - オペレーションは読み取り動詞のみ（`describe-` / `list-` / `get-` / `lookup-` / `search-` / `search` …）。従量課金の API はここで落ちます
 - 機密が出るオペレーション名は、セッションポリシーと二重に拒否します
 - 資格情報ファイル・ガード設定・監査ログ・`sudo`・`AWS_*` 環境変数への操作は、常に拒否します
+- `grep` / `rg` / `cat` / `head` / `wc` / `ls` は、単独で実行するなら `aws` / `boto3` に言及していても通します（コードや保存した出力の検索のため。
+  これらは引数から `aws` を起動しません）。`rg` の外部プログラムを起動するオプション（`--pre` / `--hostname-bin`）は常に拒否します
 
 検査したコマンドは、通過・拒否のどちらも `out/_環境/aws-audit.log` に記録します。
 

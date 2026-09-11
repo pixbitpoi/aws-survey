@@ -2,7 +2,8 @@
 
 調査コンテナのエージェントが、対象の Lambda 関数に**デプロイされているコード**を読めるようにする機能の設計。
 構成調査（`ReadOnlyAccess` + Deny のみのセッションポリシー）と EC2 の中の調査（`docs/design-ec2-ssh.md`）に続く 3 つ目の経路。
-**草案。未実装。** 第 11 節の「決めること」が決まってから第 10 節の順に進める。
+第 11 節の「決めること」はすべて「推奨」の列に決まった（2026-09-11）。第 10 節の第 1 段まで実装済み
+（実 AWS での `verify` と `PackedPolicySize` の測定は未確認）。
 
 ## 1. 目標と方針
 
@@ -277,7 +278,7 @@ zip の大半は依存ライブラリで、読みたいのは関数自身のコ�
 | 部品 | 置き場 | 役割 |
 | --- | --- | --- |
 | マウント | `libexec/commands/run.sh` | `<対象フォルダ>/code` があれば `/home/node/aws-survey/code:ro`。無ければマウントしない |
-| 読み取りの許可 | `container/settings.json` | `Read(//home/node/aws-survey/code/**)` を allow、`WebFetch` / `WebSearch` を deny（§6.1）。`Bash(rg:*)` を allow に足すかは §11 |
+| 読み取りの許可 | `container/settings.json` | `Read(//home/node/aws-survey/code/**)` を allow、`WebFetch` / `WebSearch` を deny（§6.1）、`Bash(rg:*)` を allow（`--pre` / `--hostname-bin` はフックが拒否。下の「コードの検索とフック」） |
 | フック | `container/hooks/aws-readonly-guard.sh` | §6.1 の拒否と、下の「コードの検索」。Codex 側は `aws` を Bash ガードへ委ねているので追加は無い |
 | `method/07_Lambdaのコードを読む.md` | `container/method/` | `_manifest.json` → ハンドラ → 呼んでいる AWS サービスとリソース名・環境変数の名前、の読み方。設定と突き合わせる。起動しないこと、依存は一覧で見ること、読めない形の扱い、コードが無いときはユーザーにホストでの取り出しを頼むこと |
 | `survey-status` | `container/survey-status` | 取り出してある関数の数と最後に取り出した日時（`_manifest.json` を数えるだけ。AWS は叩かない。`survey-status` はログインのたびに走るので、関数の数だけ `get-function-configuration` を呼ぶのは重い）。取り出したあとに更新されたかは、読むときに調査エージェントが `CodeSha256` を比べる（`method/07`） |
@@ -288,11 +289,17 @@ zip の大半は依存ライブラリで、読みたいのは関数自身のコ�
 `grep 'aws.config'` は落ちる）。Lambda のコードで最初に探すのは `boto3` と `aws-sdk` なので、このままでは読めない。
 `method/01` の「ワイルドカードで字面を避ける」を強いるのはコードの検索では無理がある。
 
-フックの 3 段目に例外を足す: 先頭の語が `grep` / `rg` / `cat` / `head` / `wc` / `ls` で、連結・パイプ・リダイレクト・`$(`
-を含まなければ、`aws` / `boto3` に言及していても通す。これらは `settings.json` で allow 済みの読み取りコマンドで、
-引数から `aws` を起動する経路を持たない（`xargs` / `env` / `eval` は deny 側にある）。`tests/test_guards.py` に通る例
-（`grep -rn boto3 code/`）と落ちる例（`grep boto3 code/ | aws ...`・`grep $(aws ...)`）を足す。Claude Code は
-Bash を通らない Read / Grep ツールでも読めるが、Codex は Bash だけなので、フック側で直す。
+フックの 3 段目に例外を足す: 先頭の語が `grep` / `rg` / `cat` / `head` / `wc` / `ls` で、連結・パイプ・リダイレクト・`$(`・
+バックティック・改行を含まなければ、`aws` / `boto3` に言及していても通す。これらは `settings.json` で allow 済みの読み取りコマンドで、
+引数から `aws` を起動する経路を持たない（`xargs` / `env` / `eval` は deny 側にある）。改行はフックの中で空白に潰してから
+判定しているので、潰す前の生のコマンドで見る（`grep … code/` の 2 行目に別のコマンドを書かせない）。
+例外は `rg` の `--pre` / `--hostname-bin`（任意のプログラムを起動する）で、`Bash(rg:*)` を allow に足すのと合わせて、
+フックの 1 段目で常に拒否する（Codex のアダプタは既に拒否している）。`tests/test_guards.py` に通る例
+（`grep -rn boto3 code/`）と落ちる例（`grep boto3 code/ | aws ...`・`grep $(aws ...)`・改行・`rg --pre=sh`）を足す。
+
+この例外が要るのは Claude Code の側だけである（実装時に確認）。Codex のアダプタ（`codex-guard.py`）は先頭が `aws` / `ec2` の
+コマンドだけを共通ガードに回し、`grep` / `rg` などは自分の許可リストで判定するので、`grep -rn boto3 code/` は元から通る。
+Claude Code は Bash を通らない Read / Grep ツールでも読めるが、Bash で `grep` を打つことも多いので、フック側で直す。
 
 調査エージェント向けの文書（`method/07`）には、ホストの手順・隔離の設計を書かない（`.agents/rules/container.md`）。
 「この環境では、コードは `code/` に読み取り専用で置かれています。コードの URL は取得できません。無い関数はユーザーに
@@ -303,12 +310,12 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
 
 | 項目 | 方法 |
 | --- | --- |
-| 調査コンテナの一時キーでコードの URL が取れない | `aws-survey verify` に 1 項目足す。存在しない関数名で `get-function` を呼び、`AccessDeniedException` を期待する（IAM の評価は資源の有無より先なので、関数が無い対象でも検査できる。実測で確かめる） |
+| 調査コンテナの一時キーでコードの URL が取れない | `aws-survey verify` の 4 項目目（機密の読み出し）に 1 つ足す。存在しない関数名（`verify-canary-does-not-exist`）で `get-function` を呼び、`AccessDeniedException` を期待する（IAM の評価は資源の有無より先なので、関数が無い対象でも検査できる。実測で確かめる。拒否されなければ `ResourceNotFoundException` になり、失敗として数える）。項目の番号は増やさない（EC2 の 6・7 項目目を参照している文書があるため）。偽の `aws` で `tests/test_ec2_iam.py` |
 | 取り出し専用の一時キーが Lambda の 3 つしか持たない | `pull` の自己確認として、同じキーで `ec2 describe-vpcs` が拒否されることを 1 回見る |
 | 抽出器 | `tests/test_lambda_extract.py`。zip を組み立てて、拒否パターン・マスク・`dist-info/RECORD` による依存の判定・`node_modules`・バイナリの判定・zip slip・シンボリックリンク・展開後の上限を見る |
 | `pull` / `list` / `remove` | 偽の `aws` / `curl` / `docker` で呼び出し順と引数、失敗時にホストに生の zip を残さないこと。`tests/test_lambda_pull.py` |
 | フック | `tests/test_guards.py` に通る例（`lambda get-function-configuration`・`cloudfront get-function`・`grep -rn boto3 code/`）と落ちる例（`lambda get-function`・`lambda get-layer-version-by-arn`・`grep boto3 code/ \| aws …`） |
-| `WebFetch` の拒否 | `tests/container_smoke.py`（実コンテナ）で、署名付き URL の形の `WebFetch` が拒否されること。または `settings.json` の deny を `tests/test_launcher.py` で見る |
+| `WebFetch` の拒否 | `settings.json` の deny を `tests/test_launcher.py` の `WebToolsDenied` で見る（`Bash(rg:*)` の allow と、フックの `--pre` の拒否も同じクラス） |
 | 抽出器の追加項目 | ソースコードの拡張子では名前の拒否を掛けないこと・リテラルだけをマスクすること・`sourcesContent` からの復元・`node_modules/` 由来の `sourcesContent` の除外 |
 | マウントと配置 | `tests/test_launcher.py`（`code/` があるときだけマウントされ、ro であること） |
 | 実環境 | 検証用のアカウントに Python と Node.js の関数を 1 つずつ、レイヤー付きで作り（作成は元プロファイルで手作業。このツールの機能ではない）、`pull` → `run` → 調査コンテナで `method/07` に沿って読ませる |
@@ -329,7 +336,9 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
 
 1. `session-guard.json` とフックに §6.1 の拒否、`settings.json` に `WebFetch` / `WebSearch` の deny、フックの「コードの検索」の例外（§7）、
    `verify` に 1 項目、`security.md` の第 1 節の表。**この機能と独立に価値がある**（いまの穴を塞ぐ。検索の例外は `out/` の中を
-   `grep boto3` するときにも効く）。`PackedPolicySize` を測り、実 AWS で `verify` を通す
+   `grep boto3` するときにも効く）。`PackedPolicySize` を測り、実 AWS で `verify` を通す。
+   **実装済み**（偽の `aws` とフックの単体テストまで。`method/01` の「字面を避ける」の行と `security.md` の第 3 節も合わせた）。
+   **実 AWS での `verify` の通過と `PackedPolicySize` は未確認**
 2. 抽出器 `libexec/lambda/extract.py` と `tests/test_lambda_extract.py`。AWS も Docker も使わずに進められる。
    ソースマップからの復元もここに入れる
 3. `build_image` を `libexec/docker.sh` に出す（`run` の挙動は変えない。`tests/test_launcher.py` で確かめる）。

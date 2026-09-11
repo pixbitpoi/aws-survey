@@ -21,5 +21,7 @@
 "cassandra:*",
 "sdb:Select*",
 "codecommit:Git*",
-"athena:GetQueryResults"
+"athena:GetQueryResults",
+"lambda:GetFunction",
+"lambda:GetLayerVersion"
 ],"Resource":"*"}]}

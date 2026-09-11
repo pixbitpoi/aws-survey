@@ -35,6 +35,7 @@ attached.txt = policies attached to the role). Knobs:
   FAKE_OLD_VERSIONS  space-separated non-default version ids answered by list-policy-versions
   FAKE_ASSUME_FAIL   1: assume-role with --policy-arns fails because the diag policy is missing
   FAKE_SESSION_ALLOWED  1: start-session is allowed (the CLI then fails to find the plugin)
+  FAKE_LAMBDA_ALLOWED   1: get-function is allowed (the canary name then answers ResourceNotFoundException)
 """
 import json, os, sys
 argv = sys.argv[1:]
@@ -112,6 +113,10 @@ if op == "create-tags":
     fail("UnauthorizedOperation")
 if op in ("describe-parameters", "list-queues"):
     print("None"); sys.exit(0)
+if op == "get-function":
+    if os.environ.get("FAKE_LAMBDA_ALLOWED") == "1":
+        fail("ResourceNotFoundException) when calling the GetFunction operation: Function not found")
+    fail("AccessDeniedException) when calling the GetFunction operation: not authorized to perform: lambda:GetFunction")
 if op == "describe-instances":
     print(json.dumps([{"id": "__WEB1__", "tag": "smoke"}, {"id": "__OTHER__", "tag": None}])); sys.exit(0)
 if op == "start-session":
@@ -361,6 +366,21 @@ class Verify(IamCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn('接続できてしまいます', result.stdout)
         self.assertIn('diag-ssh-smoke', result.stdout)
+        self.assertIsNone(json.loads((self.target / 'environment.json').read_text())['setup']['readonly_verified'])
+
+    def test_the_code_url_is_asked_for_a_function_that_does_not_exist(self):
+        self.prepare(hosts=False)
+        result = self.run_cli('verify')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        [call] = self.calls('get-function')
+        self.assertEqual(call[call.index('--function-name') + 1], 'verify-canary-does-not-exist')
+        self.assertIn('関数のコードの URL の取得は拒否されました', result.stdout)
+
+    def test_a_reachable_code_url_is_a_failure(self):
+        self.prepare(hosts=False)
+        result = self.run_cli('verify', FAKE_LAMBDA_ALLOWED='1')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('関数のコードの URL を取得できてしまいます', result.stdout)
         self.assertIsNone(json.loads((self.target / 'environment.json').read_text())['setup']['readonly_verified'])
 
     def test_skipped_without_hosts(self):

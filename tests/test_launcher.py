@@ -286,6 +286,32 @@ class BakedNotMounted(unittest.TestCase):
                              f'{source} is mounted; a mounted guard can be edited from inside')
 
 
+class WebToolsDenied(unittest.TestCase):
+    """WebFetch and WebSearch are denied in settings.json.
+
+    AWS answers can carry signed URLs (a Lambda function's Code.Location, for one). The Bash
+    guard refuses curl and wget, but WebFetch is a tool of its own and never passes the Bash
+    hook, so an allowed WebFetch would open such a URL with nothing in the way. The survey
+    needs no outside web at all; Codex has web_search disabled in its requirements.
+    """
+
+    def setUp(self):
+        self.permissions = json.loads((ROOT / 'container/settings.json').read_text())['permissions']
+
+    def test_web_tools_are_denied(self):
+        for tool in ('WebFetch', 'WebSearch'):
+            self.assertIn(tool, self.permissions['deny'])
+            self.assertNotIn(tool, self.permissions['allow'])
+
+    def test_codex_web_search_stays_disabled(self):
+        self.assertIn('allowed_web_search_modes = ["disabled"]', (ROOT / 'container/codex/requirements.toml').read_text())
+
+    def test_rg_is_allowed_and_its_program_options_are_guarded(self):
+        """rg is allowed without a prompt; --pre / --hostname-bin would start any program, so the guard refuses them."""
+        self.assertIn('Bash(rg:*)', self.permissions['allow'])
+        self.assertIn('--(pre|hostname-bin)', (ROOT / 'container/hooks/aws-readonly-guard.sh').read_text())
+
+
 class CliInstallLayout(unittest.TestCase):
     """Claude Code updates itself; Codex is pinned. Neither can touch the npm prefix.
 

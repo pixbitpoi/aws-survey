@@ -11,6 +11,7 @@
       "Bash(head:*)",
       "Bash(wc:*)",
       "Bash(grep:*)",
+      "Bash(rg:*)",
       "Bash(mkdir:*)",
       "Read(//home/node/aws-survey/out/**)",
       "Edit(//home/node/aws-survey/out/**)"
@@ -37,6 +38,8 @@
       "Bash(scp:*)",
       "Bash(sftp:*)",
       "Bash(session-manager-plugin:*)",
+      "WebFetch",
+      "WebSearch",
       "Edit(//home/node/aws-survey/out/_環境/aws-audit.log)",
       "Read(//home/node/.aws-claude/**)",
       "Read(//home/node/aws-survey/.claude/**)",

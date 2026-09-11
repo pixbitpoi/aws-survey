@@ -66,7 +66,7 @@ fi
 
 echo ""
 ui_head "4/7 機密の読み出しは拒否されるか"
-ui_text "読み取り専用でも読めてはいけないもの（パラメータの値、キューのメッセージ）を確かめます。"
+ui_text "読み取り専用でも読めてはいけないもの（パラメータの値、キューのメッセージ、関数のコードの URL）を確かめます。"
 p=$(aws ssm describe-parameters --max-items 1 --query 'Parameters[0].Name' --output text 2>/dev/null)
 if [ -n "$p" ] && [ "$p" != "None" ]; then
   r=$(aws ssm get-parameter --name "$p" 2>&1)
@@ -88,6 +88,14 @@ if [ -n "$q" ] && [ "$q" != "None" ]; then
 else
   note "キューが無いため飛ばしました"
 fi
+
+# get-function の応答にはコードの署名付き URL（Code.Location）が入る。IAM の評価は関数の有無より先なので、
+# 存在しない名前で呼べば関数の無い対象でも確かめられる。拒否されなければ ResourceNotFoundException が返る。
+r=$(aws lambda get-function --function-name verify-canary-does-not-exist --query 'Configuration.FunctionName' --output text 2>&1)
+case "$r" in
+  *AccessDenied*) ok "関数のコードの URL の取得は拒否されました（AccessDenied）" ;;
+  *)              ng "関数のコードの URL を取得できてしまいます" "$r" ;;
+esac
 
 echo ""
 ui_head "5/7 強い権限に戻れないか"

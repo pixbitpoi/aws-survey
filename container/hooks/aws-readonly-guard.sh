@@ -63,6 +63,8 @@ has 'aws-readonly-guard|settings\.local\.json|settings\.json' && deny "ガード
 has 'aws-audit' && deny "監査ログへの操作は禁止です"
 has 'AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|PROFILE|SHARED_CREDENTIALS_FILE|CONFIG_FILE)=' \
   && deny "AWS 認証関連の環境変数は変更できません"
+# rg は読み取りコマンドとして許可しているが、--pre / --hostname-bin は任意のプログラムを起動する。
+has '(^|[[:space:]])--(pre|hostname-bin)([=[:space:]]|$)' && deny "外部プログラムを起動するオプション（--pre / --hostname-bin）は使用できません"
 
 # ---- 2. EC2 の中を調べる経路 ----
 # 入口は ec2 ラッパーだけ。ssh / scp / sftp / session-manager-plugin をコマンドの位置
@@ -85,6 +87,13 @@ esac
 # ---- 3. aws にも ec2 にも言及していなければ、通常の権限設定に委ねる ----
 if [ "$EC2" -eq 0 ] && ! has '(^|[^[:alnum:]_-])(aws|awscli|boto3)([^[:alnum:]_-]|$)'; then
   exit 0
+fi
+# コードや保存した出力の検索。grep / rg / cat / head / wc / ls は引数から aws を起動する経路を持たないので、
+# 単独で実行するなら aws / boto3 に言及していても通常の権限設定に委ねる（grep -rn boto3 code/ など）。
+# 改行は norm で空白に潰れるため、生のコマンドで見る（2 行目に別のコマンドを書かせない）。
+if [[ "$cmd" != *$'\n'* && "$cmd" != *$'\r'* && "$norm" =~ ^(grep|rg|cat|head|wc|ls)([[:space:]]|$) ]] \
+   && ! has '[;&|<>`]|\$\('; then
+  log "ALLOW"; exit 0
 fi
 
 # ---- 4. 以降は aws / ec2 関連。単独コマンドのみ許可 ----
@@ -147,6 +156,13 @@ if printf '%s' "$op" | grep -qE "^($DANGER)$"; then
   deny "$svc $op は機密や業務データが出るため禁止です"
 fi
 [ "$svc" = "kms" ] && [ "$op" = "sign" ] && deny "kms sign は禁止です"
+# 関数とレイヤーのコードの署名付き URL が出る。cloudfront get-function（CloudFront Functions）と名前が重なるので、サービスと組で見る。
+if [ "$svc" = "lambda" ]; then
+  case "$op" in
+    get-function|get-layer-version|get-layer-version-by-arn)
+      deny "lambda $op はコードの URL が出るため禁止です（設定は get-function-configuration で読めます）" ;;
+  esac
+fi
 
 # ---- 7. サービス個別の制限 ----
 case "$svc" in

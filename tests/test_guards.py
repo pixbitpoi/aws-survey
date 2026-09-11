@@ -79,6 +79,28 @@ class Guards(unittest.TestCase):
             ('session-manager-plugin', False),
             ('aws ssm start-session --target i-0 --document-name AWS-StartSSHSession', False),
             ('cat /home/node/.aws-claude/ssh/id_ed25519', False),
+            # Lambda: code URLs are refused by service and verb together; cloudfront get-function is a different API
+            ('aws lambda get-function-configuration --function-name f', True),
+            ('aws lambda list-functions --max-items 10', True),
+            ('aws cloudfront get-function --name f out/01_基礎調査/raw/cf-f.txt', True),
+            ('aws lambda get-function --function-name f', False),
+            ('aws lambda get-function --function-name f > out/01_基礎調査/raw/f.json', False),
+            ('aws lambda get-layer-version --layer-name l --version-number 1', False),
+            ('aws lambda get-layer-version-by-arn --arn arn:aws:lambda:r:0:layer:l:1', False),
+            # searching code and saved output may mention aws / boto3 when the reading command runs alone
+            ('grep -rn boto3 code/', True),
+            ("grep -rn 'aws.config' code/", True),
+            ("rg -n '@aws-sdk/client-s3' code/", True),
+            ('head -20 code/lambda/r/f/src/aws_client.py', True),
+            ('wc -l out/01_基礎調査/raw/aws-lambda.json', True),
+            ('grep boto3 code/ | aws s3 ls', False),
+            ('grep $(aws sts get-caller-identity) code/', False),
+            ('grep -rn boto3 code/ > out/hits.txt', False),
+            ('grep -rn boto3 code/; aws s3 ls', False),
+            ('grep -rn boto3 code/\naws ec2 terminate-instances --instance-ids i-0', False),
+            ('rg --pre=sh boto3 out/', False),
+            ('rg --pre sh boto3 out/', False),
+            ('rg --hostname-bin=sh boto3 out/', False),
         ]
         for command, allowed in cases:
             with self.subTest(command=command):
@@ -105,6 +127,11 @@ class Guards(unittest.TestCase):
             ("grep -c 'ssh' out/01_基礎調査/raw/web1-secure.txt", True),
             ('jq . out/01_基礎調査/raw/raw-ec2.json', True),
             ('cat out/ec2/notes.txt', True),
+            # the search exception is for the reading command alone, not as a prefix to something else
+            ('grep -rn boto3 code/ && aws s3 ls', False),
+            ('grep -rn boto3 `aws sts get-caller-identity`', False),
+            ('ls code/\rpython3 -c "import boto3"', False),
+            ('sed -n /boto3/p code/app.py', False),
         ]
         for command, allowed in cases:
             with self.subTest(command=command):
