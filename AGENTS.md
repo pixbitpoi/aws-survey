@@ -32,6 +32,7 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 | `libexec/commands/lambda.sh`（`lambda pull` / `list` / `remove`、取り出し専用の一時キー）・`libexec/lambda/extract.py`（抽出器）・`libexec/docker.sh`（`run` と共有するイメージのビルド） | `.agents/rules/credentials.md` に加えて `docs/design-lambda-code.md` の第 4 節（コマンドと取り出し先）・第 5 節（展開・拒否パターン・マスク・依存・ソースマップ）・第 6.2 節（取り出し専用の一時キー）。抽出器は `tests/test_lambda_extract.py`（組み立てた zip）、`pull` / `list` / `remove` は `tests/test_lambda_pull.py`（偽の `aws` / `curl` / `docker`。偽の `docker` が本物の抽出器を走らせる）。拒否パターンとマスクは `gateway.py` から import し、写さない |
 | `container/method/07_Lambdaのコードを読む.md`・`run.sh` の `code/` のマウント・`survey-status` の取り出してある関数の表示・フックのコードの検索の例外と `lambda get-function` の拒否 | `.agents/rules/container.md` に加えて `docs/design-lambda-code.md` の第 6.1 節（調査コンテナの一時キーとフック）・第 7 節（コンテナ側の部品）。通る例・落ちる例は `tests/test_guards.py`、マウントと `settings.json` は `tests/test_launcher.py`。`method/07` は抽出器が書く `_manifest.json` の項目と食い違わせない |
 | `diag-ssh-<name>` ポリシー（`role.sh` の作成・アタッチ、`credentials.sh` の `--policy-arns`、`verify.sh` の 6・7 項目目） | `.agents/rules/credentials.md` に加えて `docs/design-ec2-ssh.md` の第 6 節（ポリシーの内容と `PackedPolicySize` の実測）・第 7 節（検証）。偽の `aws` での検証は `tests/test_ec2_iam.py` |
+| 実 AWS での確認（EC2 の経路・Lambda のコードの取り出し）・`tests/live/**` | `tests/live/README.md`。検証用のアカウントに対象を作って `aws-survey` を通し、答案用紙（`check.sh`）で見て、片付ける。unittest にも配布物にも入らない。対象に置くものにテストの意図を残さない（調査エージェントが読む） |
 
 上の規則は新規ファイルにも適用する。`.agents/rules/` はどのエージェントも自動では読み込まない。この表に従って読む。
 `container/instructions/` は配布用の調査指示であり、開発中の自分の役割を切り替える指示ではない。

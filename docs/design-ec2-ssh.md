@@ -626,6 +626,9 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
    `out/<フェーズ>/raw/raw-web1-<何>.txt` に保存させて、監査ログに 4 件の `ALLOW`、EC2 側の journal に 4 件の `allow`、終了後に SSM の
    セッションが残らないことを確認（Claude Code での同じ確認は第 6 段）。
 
+実機の相手は `tests/live/ec2/`（`launch.sh` が AL2023 を 1 台起動して user-data で nginx・API・Redis・PostgreSQL・timer・cron を構成し、
+`cleanup.sh` が片付ける。使い方は `tests/live/README.md`）。第 3 段〜第 8 段の実機の確認は、これで作った web1 / web2 で行った。
+
 実環境で未確認のまま完了扱いにしない項目と、いまの状態。
 
 | 項目 | 状態 |

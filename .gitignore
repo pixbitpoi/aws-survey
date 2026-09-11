@@ -13,3 +13,6 @@ __pycache__/
 
 # macOS が置いていくもの
 .DS_Store
+
+# 実 AWS で手で回すテスト（tests/live/）が作ったものの記録。インスタンス ID などを含む
+tests/live/*/state/
