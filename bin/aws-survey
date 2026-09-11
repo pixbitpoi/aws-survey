@@ -521,14 +521,12 @@ choose_profile() {
 }
 
 # ↑↓ / j k で移動、1〜9 で番号へ、Enter で決定、q または Ctrl-D で中断。描画は ANSI（色・カーソル移動・消去）だけ。
-# 初期カーソルは default があればそこ、なければ先頭。決定後はメニューを消して 1 行に畳む。
+# choose_menu <結果の変数名> <問いの文> <初期カーソル（0 始まり）> <候補>...  決定後はメニューを消して 1 行に畳む（呼ぶ側が ui_ok を出す）。
 # 色は標準出力が端末で NO_COLOR が無いときだけ。
-choose_profile_menu() {
+choose_menu() {
+  local var="$1" title="$2" cursor="$3"; shift 3
   local -a entries=("$@")
-  local count=${#entries[@]} cursor=0 i key rest
-  for i in "${!entries[@]}"; do
-    [ "${entries[i]}" != default ] || cursor=$i
-  done
+  local count=${#entries[@]} i key rest
   # 描く行数 = 候補 + ヒント 1 行。見出しは動かさない
   draw_menu() {
     local i
@@ -544,10 +542,10 @@ choose_profile_menu() {
   show_cursor() { printf '\033[?25h'; }
   trap show_cursor EXIT
   printf '\033[?25l'
-  printf '  %s❯%s source_profile を選んでください\n' "$C_CYAN" "$C_RESET"
+  printf '  %s❯%s %s\n' "$C_CYAN" "$C_RESET" "$title"
   draw_menu
   while :; do
-    IFS= read -rsn1 key || { show_cursor; echo ""; init_die "source_profile の選択が中断されました。"; }
+    IFS= read -rsn1 key || { show_cursor; echo ""; init_die "${title}: 選択が中断されました。"; }
     case "$key" in
       $'\e')
         read -rsn2 -t 0.2 rest || rest=
@@ -560,18 +558,28 @@ choose_profile_menu() {
       j) [ "$cursor" -ge $((count-1)) ] || cursor=$((cursor+1)) ;;
       [1-9]) [ "$key" -gt "$count" ] || cursor=$((key-1)) ;;
       '') break ;;
-      q) show_cursor; echo ""; init_die "source_profile の選択が中断されました。" ;;
+      q) show_cursor; echo ""; init_die "${title}: 選択が中断されました。" ;;
     esac
     printf '\033[%dA' "$((count+1))"
     draw_menu
   done
-  I_PROFILE=${entries[cursor]}
-  # 問い + 候補 + ヒント + Enter で bash が出す改行 1 行を消して、結果 1 行に畳む
+  printf -v "$var" '%s' "${entries[cursor]}"
+  # 問い + 候補 + ヒント + Enter で bash が出す改行 1 行を消して、呼ぶ側の結果 1 行に畳む
   printf '\033[%dA' "$((count+3))"
   printf '\033[J'
-  ui_ok "source_profile: ${C_BOLD}${I_PROFILE}${C_RESET}"
   show_cursor
   trap - EXIT
+}
+
+# 初期カーソルは default があればそこ、なければ先頭
+choose_profile_menu() {
+  local -a entries=("$@")
+  local i cursor=0
+  for i in "${!entries[@]}"; do
+    [ "${entries[i]}" != default ] || cursor=$i
+  done
+  choose_menu I_PROFILE "source_profile を選んでください" "$cursor" "${entries[@]}"
+  ui_ok "source_profile: ${C_BOLD}${I_PROFILE}${C_RESET}"
 }
 
 # 3 問目。いまのログイン（sts get-caller-identity の Arn）から、調査用ロールを貸す相手を番号で選ばせて I_ARN に入れる。
@@ -613,6 +621,48 @@ choose_principal() {
     ui_erase 1
     ui_ok "principal_arn: ${C_BOLD}${I_ARN}${C_RESET}"
   fi
+}
+
+# 8 問目。よく使う長さを番号で選ばせて I_DURATION に入れる。番号の代わりに秒（900〜43200）をそのまま打ってもよい
+# （非対話の入力列と互換。番号は 1〜4 なので秒と混ざらない）。
+DURATION_CHOICES=(3600 10800 18000 28800)
+DURATION_LABELS=("1 時間" "3 時間" "5 時間" "8 時間")
+valid_duration_pick() {
+  { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le "${#DURATION_CHOICES[@]}" ]; } || valid_duration "$1"
+}
+duration_label() {
+  local i
+  for i in "${!DURATION_CHOICES[@]}"; do
+    [ "${DURATION_CHOICES[i]}" != "$1" ] || { echo "${DURATION_LABELS[i]}"; return 0; }
+  done
+  echo "$(( $1 / 60 )) 分"
+}
+DURATION_DEFAULT=10800
+choose_duration() {
+  local i pick chosen
+  local -a entries=()
+  if [ -t 0 ] && [ "$UI_TTY" = 1 ]; then
+    for i in "${!DURATION_CHOICES[@]}"; do entries+=("${DURATION_LABELS[i]}（${DURATION_CHOICES[i]} 秒）"); done
+    entries+=("秒で入力する（900〜43200）")
+    choose_menu chosen "duration_seconds を選んでください" 1 "${entries[@]}"
+    I_DURATION=""
+    for i in "${!DURATION_CHOICES[@]}"; do
+      [ "${entries[i]}" != "$chosen" ] || I_DURATION=${DURATION_CHOICES[i]}
+    done
+    if [ -z "$I_DURATION" ]; then
+      ask I_DURATION "duration_seconds（秒）" "$DURATION_DEFAULT" valid_duration
+      ui_erase 1
+    fi
+  else
+    ui_text "次から番号で選んでください。それ以外の長さは秒で入力します（900〜43200）。"
+    for i in "${!DURATION_CHOICES[@]}"; do
+      ui_text "  $((i+1))) ${DURATION_LABELS[i]}（${DURATION_CHOICES[i]} 秒）"
+    done
+    ask pick "番号か秒" "2" valid_duration_pick
+    if [ "$pick" -le "${#DURATION_CHOICES[@]}" ]; then I_DURATION=${DURATION_CHOICES[pick-1]}; else I_DURATION=$pick; fi
+    ui_erase 1
+  fi
+  ui_ok "duration_seconds: ${C_BOLD}${I_DURATION}${C_RESET}（$(duration_label "$I_DURATION")）"
 }
 
 default_name() {
@@ -725,9 +775,10 @@ init_interactive() {
 
   echo ""
   ui_head "8/9 duration_seconds"
-  ui_text "1 回の調査セッションに取れる時間（秒、900〜43200）。"
+  ui_text "1 回の調査セッションに取れる時間。一時キーの長さになります。"
   ui_text "有効期限ではなく、調査エージェントの働き方を決める値です。短ければ守備範囲を狭く、長ければ通しで進めます。"
-  ask I_DURATION "duration_seconds" "3600" valid_duration
+  ui_text "借りるロールでは、そのロールの上限（既定 1 時間）を超える長さは発行できません。"
+  choose_duration
 
   echo ""
   ui_head "9/9 role_name"
@@ -763,7 +814,7 @@ init_noninteractive() {
   # 既定が決められる項目だけ埋める
   [ -n "$I_NAME" ]     || I_NAME=$(default_name)
   [ -n "$I_MFA" ]      || I_MFA=$(mfa_default_from_arn "$I_ARN")
-  [ -n "$I_DURATION" ] || I_DURATION=3600
+  [ -n "$I_DURATION" ] || I_DURATION=$DURATION_DEFAULT
   [ -n "$I_ROLE" ]     || I_ROLE=aws-survey-readonly
   I_MFA=$(to_bool "$I_MFA")
   local k

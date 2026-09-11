@@ -62,7 +62,7 @@ if op == "get-role":
     if os.environ.get("FAKE_ROLE") != "exists" and not os.path.exists(role_file):
         fail("NoSuchEntity")
     if "json" in argv:
-        print(json.dumps({"Role": {"Arn": "arn:aws:iam::000000000000:role/fake-role", "MaxSessionDuration": 3600,
+        print(json.dumps({"Role": {"Arn": "arn:aws:iam::000000000000:role/fake-role", "MaxSessionDuration": 43200,
                                    "AssumeRolePolicyDocument": {"Statement": [{"Effect": "Allow",
                                        "Principal": {"AWS": "arn:aws:iam::000000000000:user/fake"}, "Action": "sts:AssumeRole",
                                        "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "true"}}}]}}}))

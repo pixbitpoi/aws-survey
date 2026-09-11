@@ -9,7 +9,7 @@
     "mfa_required": true,
     "role_name": "TEMPLATE-調査に使う読み取り専用ロールの名前",
     "refresh_command": "TEMPLATE-元プロファイルを有効にし直すコマンド（例 aws-login --profile foo）。無ければ null",
-    "duration_seconds": 3600
+    "duration_seconds": 10800
   },
   "phase_dir": "01_基礎調査",
   "ssh": {

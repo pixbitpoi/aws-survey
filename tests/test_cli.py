@@ -52,7 +52,8 @@ elif "get-role" in argv:
                      "Principal": {"AWS": os.environ.get("FAKE_TRUST_PRINCIPAL", "arn:aws:iam::000000000000:user/fake")}}
         if not os.environ.get("FAKE_TRUST_NO_MFA"):
             statement["Condition"] = {"Bool": {"aws:MultiFactorAuthPresent": "true"}}
-        print(json.dumps({"Role": {"Arn": "arn:aws:iam::000000000000:role/fake-role", "MaxSessionDuration": 3600,
+        print(json.dumps({"Role": {"Arn": "arn:aws:iam::000000000000:role/fake-role",
+                                   "MaxSessionDuration": int(os.environ.get("FAKE_MAX_SESSION", "43200")),
                                    "AssumeRolePolicyDocument": {"Statement": [statement]}}}))
     else:
         print("arn:aws:iam::000000000000:role/fake-role")
@@ -120,7 +121,7 @@ class CliCase(unittest.TestCase):
             config.update(name=name, account_id='000000000000', region='test-region')
             config['auth'].update(route='own_role', source_profile='fake-src',
                                   principal_arn='arn:aws:iam::000000000000:user/fake',
-                                  role_name='fake-role', refresh_command=None)
+                                  role_name='fake-role', refresh_command=None, duration_seconds=3600)
         if setup:
             config['setup'].update(setup)
         (self.target / 'environment.json').write_text(json.dumps(config))
@@ -522,14 +523,14 @@ class Init(CliCase):
         self.assertEqual(config['auth']['route'], None)
         self.assertEqual(config['auth']['mfa_required'], True)
         self.assertEqual(config['auth']['refresh_command'], None)
-        self.assertEqual(config['auth']['duration_seconds'], 3600)
+        self.assertEqual(config['auth']['duration_seconds'], 10800)     # 既定は 3 時間
         self.assertEqual(config['auth']['role_name'], 'aws-survey-readonly')
         self.assertEqual(config['phase_dir'], '01_基礎調査')
         self.assertEqual(config['setup'], {k: None for k in template['setup']})
         loaded = self.load_env()
         self.assertEqual(loaded.returncode, 0, loaded.stderr)
         self.assertEqual(loaded.stdout.strip(),
-                         f'target|000000000000|ap-northeast-1|fake-src|aws-survey-readonly|3600|{self.home}/.aws-survey/target|true')
+                         f'target|000000000000|ap-northeast-1|fake-src|aws-survey-readonly|10800|{self.home}/.aws-survey/target|true')
         self.assertIn('aws-survey role', result.stdout)
         self.assertNotIn('未実装', result.stdout)
 
@@ -751,11 +752,32 @@ class Init(CliCase):
         text = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', raw)
         self.assertIn('❯ sso-prof', text)
         self.assertIn('✔ source_profile: sso-prof', text)
+        self.assertIn('duration_seconds を選んでください', text)     # 8 問目も矢印キーのメニュー。Enter で既定の 3 時間
+        self.assertIn('✔ duration_seconds: 10800（3 時間）', text)
         self.assertIn('✔ name: target', text)
         self.assertIn('◆ 9/9 role_name', text)
         self.assertNotIn('name [', text)
         config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['auth']['source_profile'], 'sso-prof')
+
+    def test_duration_is_chosen_by_number_or_typed_in_seconds(self):
+        # name, profile(2=sso-prof), arn, account, mfa, refresh, region, duration, role
+        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '', '', '', '4', '']) + '\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('1) 1 時間（3600 秒）', result.stdout)
+        self.assertIn('4) 8 時間（28800 秒）', result.stdout)
+        self.assertIn('duration_seconds: 28800（8 時間）', result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 28800)
+        (self.target / 'environment.json').unlink()
+        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '', '', '', '5400', '']) + '\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('duration_seconds: 5400（90 分）', result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 5400)
+        # 5 は番号でも秒でもない
+        (self.target / 'environment.json').unlink()
+        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '', '', '', '5', '', '']) + '\n')
+        self.assertIn('受け付けられない値', result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 10800)
 
     def test_interactive_retries_invalid_and_fails_on_eof(self):
         answers = ['bad name!', 'ok-name', 'fake-src', '', '', '', '-', '', '']
@@ -827,6 +849,31 @@ class Role(CliCase):
         self.assertIn('このままでは借りられません', result.stdout)
         self.assertIn('合っていないところがあります', result.stdout)
         self.assertIn('aws-survey role --create', result.stdout)
+
+    def test_duration_above_the_role_ceiling_is_a_shortfall(self):
+        # 借りるロール: 上限は変えられないので environment.json を下げる案内。--create は勧めない
+        self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08'})
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['auth'].update(route='existing_role', duration_seconds=10800)
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_cli('role', FAKE_MAX_SESSION='3600')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('セッション上限（3600 秒）が environment.json の duration_seconds（10800 秒）より短い', result.stdout)
+        self.assertIn('auth.duration_seconds を 3600 以下に', result.stdout)
+        self.assertNotIn('次に打つコマンド', result.stdout)
+        # 上限に収まっていれば不足にしない
+        result = self.run_cli('role', FAKE_MAX_SESSION='14400')
+        self.assertNotIn('より短い', result.stdout)
+        # 自分のロール: --create が上限を合わせるので、⚠ にはするが environment.json を直せとは言わない
+        config['auth'].update(route='own_role')
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_cli('role', FAKE_MAX_SESSION='3600')
+        self.assertIn('より短い', result.stdout)
+        self.assertNotIn('以下にしてください', result.stdout)
+        self.assertIn('aws-survey role --create', result.stdout)
+        result = self.run_cli('role', '--create', FAKE_MAX_SESSION='3600')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('セッション上限を 10800 秒に合わせました', result.stdout)
 
     def test_role_lent_to_the_permission_set_covers_my_session(self):
         # 信頼ポリシーはロールの形、environment.json はセッションの形。書き方は違うが借りられるので不足にしない

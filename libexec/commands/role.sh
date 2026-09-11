@@ -170,12 +170,22 @@ shortfalls=()
 if role_json=$(aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME" --output json 2>/dev/null); then
   role_exists=1
   ui_ok "あります"
-  ui_kv "セッション上限" "$(echo "$role_json" | jq -r '.Role.MaxSessionDuration') 秒（environment.json は $DURATION 秒）"
+  max_session=$(echo "$role_json" | jq -r '.Role.MaxSessionDuration // 3600')
+  ui_kv "セッション上限" "${max_session} 秒（environment.json は $DURATION 秒）"
   ui_kv "信頼ポリシー" "$(echo "$role_json" | jq -c '.Role.AssumeRolePolicyDocument.Statement')"
   attached=$(aws iam list-attached-role-policies --profile "$PROFILE_SRC" --role-name "$ROLE_NAME" \
                --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null)
   ui_kv "付いているポリシー" "${attached:-（なし）}"
   # 不足の洗い出し。揃っていれば「作る」のではなく「このロールを使う」案内にする
+  # 1 回のセッションの長さ（init の 8 問目）は、ロールの上限を超えられない。自分のロールなら --create が上限を合わせる。
+  # 借りたロールの上限は変えられないので、environment.json 側を下げてもらう
+  if [ "$DURATION" -gt "$max_session" ]; then
+    if [ -z "$AUTH_ROUTE" ] || [ "$AUTH_ROUTE" = own_role ]; then
+      shortfalls+=("セッション上限（${max_session} 秒）が environment.json の duration_seconds（${DURATION} 秒）より短いです")
+    else
+      shortfalls+=("セッション上限（${max_session} 秒）が environment.json の duration_seconds（${DURATION} 秒）より短いです。借りるロールの上限は変えられないので、auth.duration_seconds を ${max_session} 以下にしてください（${ENV_FILE}）")
+    fi
+  fi
   case "$attached" in
     *ReadOnlyAccess*) ;;
     *) shortfalls+=("ReadOnlyAccess が付いていません") ;;
@@ -311,7 +321,11 @@ if [ "$DO_CREATE" -eq 0 ]; then
       ui_text "先に environment.json の auth.mfa_required を false に書き換えてください（${ENV_FILE}）。"
     fi
     echo ""
-    next_cmd "$AWS_SURVEY_CMD role --create" "合っていないところを直します（信頼ポリシーを environment.json の内容に書き換え、足りないポリシーを付けます。ロールは作り直しません）"
+    if [ -n "$AUTH_ROUTE" ] && [ "$AUTH_ROUTE" != own_role ]; then
+      ui_text "借りるロールは、このコマンドでは直せません。⚠ の案内に沿って environment.json を直すか、管理者に頼んでから、もう一度 $AWS_SURVEY_CMD role で確かめてください。"
+    else
+      next_cmd "$AWS_SURVEY_CMD role --create" "合っていないところを直します（信頼ポリシーを environment.json の内容に書き換え、足りないポリシーを付けます。ロールは作り直しません）"
+    fi
   else
     case "$can_create" in
       yes)
