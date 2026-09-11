@@ -20,7 +20,7 @@ CLI = ROOT / 'bin/aws-survey'
 EC2 = ROOT / 'libexec/ec2'
 TOOLS = ['bash', 'sh', 'env', 'jq', 'sed', 'grep', 'awk', 'cut', 'head', 'tail', 'cat', 'wc', 'tr',
          'dirname', 'basename', 'readlink', 'mkdir', 'chmod', 'cp', 'mv', 'rm', 'stat', 'date',
-         'mktemp', 'python3', 'printf', 'echo', 'test', 'touch', 'uname']
+         'mktemp', 'python3', 'printf', 'echo', 'test', 'touch', 'uname', 'tee']
 FAKE_PUBKEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFak smoke-comment'
 
 

@@ -22,6 +22,7 @@
 set -uo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/container.sh"
 
 EC2_DIR="$LIBEXEC_DIR/ec2"
 TEMPLATE="$EC2_DIR/install.sh.tmpl"
@@ -608,33 +609,12 @@ cmd_verify() {
   echo ""
 
   ui_head "2/3 調査コンテナのイメージを用意する"
-  command -v docker >/dev/null || die "docker コマンドが見つかりません。"
-  local arch awsarch image out
-  arch=$(uname -m)
-  case "$arch" in
-    arm64|aarch64) awsarch=aarch64 ;;
-    x86_64|amd64)  awsarch=x86_64  ;;
-    *) die "未対応のアーキテクチャ: $arch" ;;
-  esac
-  image="${SURVEY_NAME}:latest"
-  ui_status "docker build（初回は数分かかります）…"
-  if ! out=$(docker build -q --build-arg "AWSCLI_ARCH=$awsarch" -t "$image" -f "$AWS_SURVEY_HOME/Dockerfile" "$AWS_SURVEY_HOME/container" 2>&1); then
-    ui_status_done
-    ui_err "イメージのビルドに失敗しました"
-    ui_raw "$(printf '%s\n' "$out" | tail -20)"
-    exit 1
-  fi
-  ui_status_done
-  ui_ok "イメージ $image ${C_DIM}（${awsarch}）${C_RESET}"
+  container_prepare || exit 1
   echo ""
 
   ui_head "3/3 コンテナから ec2 --selftest $host を打つ"
-  local rc=0
-  docker run --rm \
-    -v "$AWS_DIR:/home/node/.aws-claude:ro" \
-    -e TZ=Asia/Tokyo \
-    -e "AWS_DEFAULT_REGION=$REGION" \
-    "$image" ec2 --selftest "$host" 2>&1 | sed 's/^/    /' || rc=${PIPESTATUS[0]}
+  local rc=0 out
+  container_run -- ec2 --selftest "$host" 2>&1 | sed 's/^/    /' || rc=${PIPESTATUS[0]}
   echo ""
   # 元プロファイルで読めるなら、SSM 側にこの対象へのセッションが残っていないことをもう一度見る
   if command -v aws >/dev/null && aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --output text >/dev/null 2>&1; then
