@@ -89,6 +89,16 @@ class Guards(unittest.TestCase):
             # Lambda: code URLs are refused by service and verb together; cloudfront get-function is a different API
             ('aws lambda get-function-configuration --function-name f', True),
             ('aws lambda list-functions --max-items 10', True),
+            # method/07: configuration saved with the variable names and only the chosen non-secret values
+            ("aws lambda get-function-configuration --function-name f --query '{Runtime:Runtime,Handler:Handler,Role:Role,"
+             "CodeSha256:CodeSha256,EnvNames:keys(Environment.Variables),EnvValues:{TABLE_NAME:Environment.Variables.TABLE_NAME}}'"
+             " > out/01_基礎調査/raw/raw-lambda-cfg-f.json", True),
+            ('aws lambda get-policy --function-name f', True),
+            ('aws lambda list-function-url-configs --function-name f --max-items 10', True),
+            ('aws events list-rule-names-by-target --target-arn arn:aws:lambda:r:0:function:f --max-items 20', True),
+            ('aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Invocations '
+             '--dimensions Name=FunctionName,Value=f --start-time 2026-09-11T00:00:00Z --end-time 2026-09-11T01:00:00Z '
+             '--period 3600 --statistics Sum', True),
             ('aws cloudfront get-function --name f out/01_基礎調査/raw/cf-f.txt', True),
             ('aws lambda get-function --function-name f', False),
             ('aws lambda get-function --function-name f > out/01_基礎調査/raw/f.json', False),
