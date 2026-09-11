@@ -58,6 +58,13 @@ class Guards(unittest.TestCase):
             ('aws ec2 describe-vpcs > out//escape.json', False),
             ('aws ec2 describe-vpcs > /tmp/escape.json', False),
             ('aws ec2 describe-vpcs > out/report.md', False),
+            # a second line is a second command: the guard must not read it as more arguments
+            ('aws ec2 describe-vpcs\naws ec2 terminate-instances --instance-ids i-0', False),
+            ('aws ec2 describe-vpcs\raws ec2 terminate-instances --instance-ids i-0', False),
+            ('aws ec2 describe-vpcs --max-items 1\naws lambda get-function --function-name f', False),
+            ('aws ec2 describe-vpcs \\\n  --max-items 5', False),
+            ('aws s3 ls x\\\\\naws ec2 terminate-instances --instance-ids i-0', False),
+            ('ec2 web1 uptime\nid', False),
             # EC2 の中を調べる経路: ec2 ラッパーだけを、aws と同じ規則で通す
             ('ec2 web1 uptime', True),
             ('ec2 web1 help', True),
