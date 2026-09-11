@@ -113,6 +113,10 @@ if ! json=$(
       ui_text "EC2 の中を調べる権限（${DIAG_POLICY_NAME}）がまだ無いか、付いていません。"
       ui_text "$AWS_SURVEY_CMD role --create で作って付けてから、もう一度実行してください。" ;;
     *"not authorized to perform: sts:AssumeRole"*|*AccessDenied*)
+      if is_sso_arn "$PRINCIPAL_ARN"; then
+        ui_text "Identity Center のログインでは、信頼ポリシーに「MFA 済みの人だけ」の条件があると借りられません。"
+        ui_text "$AWS_SURVEY_CMD role で確かめられます（⚠ が出たら、その案内に沿って直します）。"
+      fi
       ui_text "ロールを作った直後なら、IAM の反映待ちかもしれません。10 秒ほど待ってもう一度実行してください。"
       ui_text "それでも駄目なら信頼ポリシーを確認してください:"
       ui_text "  aws iam get-role --profile $PROFILE_SRC --role-name $ROLE_NAME --query 'Role.AssumeRolePolicyDocument'"

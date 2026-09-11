@@ -540,8 +540,10 @@ class Init(CliCase):
         self.assertIn('sso-prof', sts[0])
 
     def init_sso(self, pick, *typed, **extra):
-        # name, profile(2=sso-prof), 貸す相手の番号, [手入力の ARN], account, mfa, refresh, region, duration, role
-        answers = ['', '2', pick, *typed, '', '', '', '', '3600', '']
+        # name, profile(2=sso-prof), 貸す相手の番号, [手入力の ARN], account, [mfa], refresh, region, duration, role
+        # mfa は Identity Center 以外の ARN を手で入れたときだけ聞かれる
+        mfa = [''] if typed else []
+        answers = ['', '2', pick, *typed, '', *mfa, '', '', '3600', '']
         return self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_ARN=SSO_CALLER, **extra)
 
     def test_interactive_sso_defaults_to_only_me(self):
@@ -550,8 +552,27 @@ class Init(CliCase):
         self.assertIn('1) 自分だけ（alice）', result.stdout)
         self.assertIn('2) 権限セット AdministratorAccess でログインした人なら誰でも', result.stdout)
         self.assertIn('3) ARN を手で入力する', result.stdout)
+        # MFA は聞かずに false（Identity Center のセッションは信頼ポリシーの MFA 条件を満たせない）
+        self.assertIn('Identity Center のログインでは、ロールの側で MFA を確かめられません', result.stdout)
+        self.assertNotIn('mfa_required (y/n)', result.stdout)
         config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['auth']['principal_arn'], SSO_CALLER)
+        self.assertEqual(config['auth']['mfa_required'], False)
+        self.assertEqual(config['auth']['role_name'], 'aws-survey-readonly')
+        self.assertEqual(config['auth']['duration_seconds'], 3600)
+
+    def test_noninteractive_sso_refuses_mfa_required(self):
+        env = {**INIT_ENV, 'AWS_SURVEY_INIT_PRINCIPAL_ARN': SSO_CALLER, 'AWS_SURVEY_INIT_MFA_REQUIRED': 'true'}
+        result = self.run_cli('init', **env)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('mfa_required を true にできません', result.stdout + result.stderr)
+        self.assertFalse((self.target / 'environment.json').exists())
+
+    def test_noninteractive_sso_defaults_mfa_to_false(self):
+        env = {k: v for k, v in INIT_ENV.items() if k != 'AWS_SURVEY_INIT_MFA_REQUIRED'}
+        result = self.run_cli('init', **{**env, 'AWS_SURVEY_INIT_PRINCIPAL_ARN': SSO_CALLER})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['auth']['mfa_required'], False)
 
     def test_interactive_sso_can_lend_to_the_whole_permission_set(self):
@@ -693,11 +714,18 @@ class Role(CliCase):
         self.assertIn('aws-survey credentials', result.stdout)
         self.assertNotIn('role --create', result.stdout)
 
-    def use_principal(self, principal):
+    def use_principal(self, principal, mfa=None):
+        # Identity Center のログインは MFA の条件を満たせないので、既定では mfa_required を false にする
         self.write_environment()
         config = json.loads((self.target / 'environment.json').read_text())
         config['auth']['principal_arn'] = principal
+        config['auth']['mfa_required'] = ('AWSReservedSSO_' not in principal) if mfa is None else mfa
         (self.target / 'environment.json').write_text(json.dumps(config))
+
+    def run_sso(self, *args, **extra):
+        # Identity Center でログインしていて、信頼ポリシーに MFA の条件が無い状態（FAKE_TRUST_NO_MFA を消せば条件あり）
+        env = {'FAKE_CALLER_ARN': SSO_CALLER, 'FAKE_TRUST_NO_MFA': '1', **extra}
+        return self.run_cli(*args, **{k: v for k, v in env.items() if v})
 
     def test_existing_role_with_wrong_principal_lists_shortfall(self):
         self.use_principal('arn:aws:iam::000000000000:user/someone-else')
@@ -710,7 +738,7 @@ class Role(CliCase):
     def test_role_lent_to_the_permission_set_covers_my_session(self):
         # 信頼ポリシーはロールの形、environment.json はセッションの形。書き方は違うが借りられるので不足にしない
         self.use_principal(SSO_CALLER)
-        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=SSO_ROLE)
+        result = self.run_sso('role', FAKE_TRUST_PRINCIPAL=SSO_ROLE)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('あなたはこのロールを借りられます', result.stdout)
         self.assertIn('権限セット AdministratorAccess でログインした人なら誰でも', result.stdout)
@@ -721,13 +749,13 @@ class Role(CliCase):
     def test_role_lent_to_another_permission_set_does_not_cover_me(self):
         self.use_principal(SSO_CALLER)
         other = SSO_ROLE.replace('AdministratorAccess', 'ViewOnlyAccess')
-        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=other)
+        result = self.run_sso('role', FAKE_TRUST_PRINCIPAL=other)
         self.assertIn('このままでは借りられません', result.stdout)
 
     def test_role_lent_only_to_me_is_narrower_but_still_mine(self):
         # environment.json は「権限セットの人なら誰でも」、信頼ポリシーは「自分だけ」。あなたは借りられるので不足にしない
         self.use_principal(SSO_ROLE)
-        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=SSO_CALLER)
+        result = self.run_sso('role', FAKE_TRUST_PRINCIPAL=SSO_CALLER)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('あなたはこのロールを借りられます', result.stdout)
         self.assertIn('より狭い範囲です。ほかの人は借りられません', result.stdout)
@@ -736,9 +764,33 @@ class Role(CliCase):
 
     def test_role_lent_to_someone_else_in_my_permission_set_does_not_cover_me(self):
         self.use_principal(SSO_ROLE)
-        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER,
-                              FAKE_TRUST_PRINCIPAL=SSO_CALLER.replace('/alice', '/bob'))
+        result = self.run_sso('role', FAKE_TRUST_PRINCIPAL=SSO_CALLER.replace('/alice', '/bob'))
         self.assertIn('このままでは借りられません', result.stdout)
+
+    def test_sso_with_mfa_required_is_told_to_turn_it_off(self):
+        self.use_principal(SSO_CALLER, mfa=True)
+        result = self.run_sso('role', FAKE_TRUST_PRINCIPAL=SSO_CALLER)
+        self.assertIn('Identity Center のログインではロールの側で MFA を確かめられません。false にしてください', result.stdout)
+        self.assertIn('auth.mfa_required を false に書き換えてください', result.stdout)
+        self.assertNotIn('という条件がありません', result.stdout)
+
+    def test_sso_trust_with_mfa_condition_cannot_be_borrowed(self):
+        # 今回実際に起きた状態: 信頼ポリシーに MFA の条件があり、Identity Center のログインでは AccessDenied になる
+        self.use_principal(SSO_CALLER)
+        result = self.run_sso('role', FAKE_TRUST_PRINCIPAL=SSO_CALLER, FAKE_TRUST_NO_MFA='')
+        self.assertIn('今は借りられません', result.stdout)
+        self.assertNotIn('あなたはこのロールを借りられます', result.stdout)
+        self.assertIn('条件があるため、Identity Center のログインでは借りられません', result.stdout)
+        self.assertIn('aws-survey role --create', result.stdout)
+
+    def test_role_create_refuses_the_mfa_condition_for_sso(self):
+        self.use_principal(SSO_CALLER, mfa=True)
+        result = self.run_sso('role', '--create', FAKE_TRUST_PRINCIPAL=SSO_CALLER)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('借りられなくなります', result.stdout)
+        written = [c for c in self.calls() if 'update-assume-role-policy' in c or 'create-role' in c]
+        self.assertEqual(written, [])
+        self.assertFalse((self.target / 'trust.json').exists())
 
     def test_role_lent_to_the_account_covers_me(self):
         self.write_environment()
@@ -747,9 +799,9 @@ class Role(CliCase):
         self.assertIn('アカウント全体に貸す書き方', result.stdout)
         self.assertNotIn('⚠', result.stdout)
 
-    def test_missing_mfa_condition_is_still_a_shortfall(self):
-        self.use_principal(SSO_CALLER)
-        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=SSO_ROLE, FAKE_TRUST_NO_MFA='1')
+    def test_missing_mfa_condition_is_still_a_shortfall_for_an_iam_user(self):
+        self.write_environment()                  # IAM ユーザー・mfa_required true
+        result = self.run_cli('role', FAKE_TRUST_NO_MFA='1')
         self.assertIn('あなたはこのロールを借りられます', result.stdout)
         self.assertIn('「MFA 済みの人だけ」という条件がありません', result.stdout)
         self.assertIn('合っていないところがあります', result.stdout)

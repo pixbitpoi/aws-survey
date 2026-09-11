@@ -182,32 +182,48 @@ if role_json=$(aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME
       *) shortfalls+=("EC2 の中を調べる権限（${DIAG_POLICY_NAME}）が付いていません") ;;
     esac
   fi
+  # 信頼ポリシーに MFA の条件があるか。Identity Center のログインはこの条件を満たせないので、あると借りられない
+  trust_mfa=0
+  if echo "$role_json" | jq -e \
+       '[.Role.AssumeRolePolicyDocument.Statement[] | .Condition.Bool."aws:MultiFactorAuthPresent"] | index("true") != null' >/dev/null 2>&1; then
+    trust_mfa=1
+  fi
+  can_borrow="あなたはこのロールを借りられます"
+  if [ "$trust_mfa" -eq 1 ] && is_sso_arn "$PRINCIPAL_ARN"; then
+    can_borrow="貸す相手には、あなたが入っています（ただし下の ⚠ のため、今は借りられません）"
+  fi
   # 貸す相手は文字の一致ではなく「principal_arn の相手が含まれるか」で見る。含まれていれば書き方の違いは不足にしない
   trust_principals=$(echo "$role_json" | jq -r '[.Role.AssumeRolePolicyDocument.Statement[] | select(.Effect=="Allow")
                        | .Principal | objects | .AWS // empty] | flatten | .[] | strings' 2>/dev/null)
   if [ -n "$PRINCIPAL_ARN" ]; then
     case "$(principal_coverage "$PRINCIPAL_ARN" "$trust_principals" "$who")" in
       exact)
-        ui_ok "あなたはこのロールを借りられます（信頼ポリシーの貸す相手が environment.json と同じです）" ;;
+        ui_ok "$can_borrow"
+        ui_text "信頼ポリシーの貸す相手は environment.json と同じです。" ;;
       role)
-        ui_ok "あなたはこのロールを借りられます"
+        ui_ok "$can_borrow"
         ui_text "信頼ポリシーは「$(ui_role_audience "$(principal_role "$PRINCIPAL_ARN")")」に貸す書き方で、"
         ui_text "environment.json の「自分だけ」より広い範囲です。このままでも使えます。"
         ui_text "自分だけに絞るなら $AWS_SURVEY_CMD role --create で書き換えます。" ;;
       narrow)
-        ui_ok "あなたはこのロールを借りられます"
+        ui_ok "$can_borrow"
         ui_text "信頼ポリシーは「自分だけ」に貸す書き方で、environment.json の"
         ui_text "「$(ui_role_audience "$PRINCIPAL_ARN")」より狭い範囲です。ほかの人は借りられません。"
         ui_text "ほかの人にも貸すなら $AWS_SURVEY_CMD role --create で書き換えます。" ;;
       account)
-        ui_ok "あなたはこのロールを借りられます"
+        ui_ok "$can_borrow"
         ui_text "信頼ポリシーはアカウント全体に貸す書き方です。借りられるかは、あなた側の権限で決まります。" ;;
       *)
         shortfalls+=("信頼ポリシーの貸す相手に、あなた（${PRINCIPAL_ARN}）が入っていません。このままでは借りられません") ;;
     esac
   fi
-  if [ "$MFA_REQUIRED" = "true" ] && ! echo "$role_json" | jq -e \
-       '[.Role.AssumeRolePolicyDocument.Statement[] | .Condition.Bool."aws:MultiFactorAuthPresent"] | index("true") != null' >/dev/null 2>&1; then
+  if is_sso_arn "$PRINCIPAL_ARN"; then
+    if [ "$MFA_REQUIRED" = "true" ]; then
+      shortfalls+=("environment.json で MFA 必須（mfa_required: true）になっていますが、Identity Center のログインではロールの側で MFA を確かめられません。false にしてください")
+    elif [ "$trust_mfa" -eq 1 ]; then
+      shortfalls+=("信頼ポリシーに「MFA 済みの人だけ」という条件があるため、Identity Center のログインでは借りられません")
+    fi
+  elif [ "$MFA_REQUIRED" = "true" ] && [ "$trust_mfa" -eq 0 ]; then
     shortfalls+=("environment.json では MFA 必須ですが、信頼ポリシーに「MFA 済みの人だけ」という条件がありません")
   fi
   for sf in "${shortfalls[@]}"; do ui_warn "$sf"; done
@@ -281,6 +297,9 @@ if [ "$DO_CREATE" -eq 0 ]; then
     fi
   elif [ "$role_exists" -eq 1 ]; then
     ui_warn "ロールはありますが、environment.json と合っていないところがあります（上の ⚠）"
+    if [ "$MFA_REQUIRED" = "true" ] && is_sso_arn "$PRINCIPAL_ARN"; then
+      ui_text "先に environment.json の auth.mfa_required を false に書き換えてください（${ENV_FILE}）。"
+    fi
     echo ""
     next_cmd "$AWS_SURVEY_CMD role --create" "合っていないところを直します（信頼ポリシーを environment.json の内容に書き換え、足りないポリシーを付けます。ロールは作り直しません）"
   else
@@ -328,6 +347,14 @@ if [ "$AUTH_ROUTE" != "own_role" ]; then
     ui_text "付いたら $AWS_SURVEY_CMD credentials で一時キーを発行し直します。"
     exit 0
   fi
+  exit 1
+fi
+
+# Identity Center のログインに MFA の条件を付けると、誰も借りられないロールになる。書き込む前に止める
+if [ "$MFA_REQUIRED" = "true" ] && is_sso_arn "$PRINCIPAL_ARN"; then
+  ui_err "environment.json で MFA 必須（mfa_required: true）になっていますが、Identity Center のログインではロールの側で MFA を確かめられません。"
+  ui_text "このまま信頼ポリシーに条件を付けると、借りられなくなります（MFA はログインのときに求められています）。"
+  ui_text "environment.json の auth.mfa_required を false に書き換えてから、もう一度実行してください（${ENV_FILE}）。"
   exit 1
 fi
 

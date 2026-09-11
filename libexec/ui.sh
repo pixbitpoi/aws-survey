@@ -44,6 +44,15 @@ ui_role_audience() {
   esac
 }
 
+# Identity Center（SSO）のログインを表す ARN か。セッション ARN とパス付きのロール ARN のどちらも受ける。
+# このログインのセッションには aws:MultiFactorAuthPresent が付かないため、信頼ポリシーの MFA 条件を満たせない（init・role・credentials で使う）
+is_sso_arn() {
+  case "$1" in
+    *:assumed-role/AWSReservedSSO_*|*:role/*AWSReservedSSO_*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # 表示幅。3 バイト文字（日本語）を幅 2 とみなす
 ui_width() {
   local chars bytes

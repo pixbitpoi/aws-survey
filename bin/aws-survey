@@ -616,9 +616,16 @@ init_interactive() {
 
   echo ""
   ui_head "5/9 mfa_required"
-  ui_text "MFA が必須のアカウントか。信頼ポリシーの条件と権限判定が変わります。"
-  mfa_def=$(mfa_default_from_arn "$I_ARN")
-  ask I_MFA "mfa_required (y/n)" "$([ "$mfa_def" = true ] && echo y || echo n)" valid_bool to_bool
+  if is_sso_arn "$I_ARN"; then
+    # 聞いても y は選べない（y にすると信頼ポリシーに満たせない条件が付き、借りられなくなる）
+    I_MFA=false
+    ui_text "Identity Center のログインでは、ロールの側で MFA を確かめられません（MFA はログインのときに求めます）。"
+    ui_ok "mfa_required: ${C_BOLD}false${C_RESET}"
+  else
+    ui_text "ロールを借りるときに MFA 済みであることを求めるか。y にすると、信頼ポリシーに「MFA 済みの人だけ」の条件を付けます。"
+    mfa_def=$(mfa_default_from_arn "$I_ARN")
+    ask I_MFA "mfa_required (y/n)" "$([ "$mfa_def" = true ] && echo y || echo n)" valid_bool to_bool
+  fi
 
   echo ""
   ui_head "6/9 refresh_command"
@@ -688,6 +695,9 @@ init_validate() {
   valid_account "$I_ACCOUNT"   || init_die "account_id が不正です: ${I_ACCOUNT}（12 桁）"
   valid_arn "$I_ARN"           || init_die "principal_arn が不正です: $I_ARN"
   valid_bool "$I_MFA"          || init_die "mfa_required が不正です: ${I_MFA}（y/n）"
+  if [ "$I_MFA" = true ] && is_sso_arn "$I_ARN"; then
+    init_die "Identity Center のログイン（${I_ARN}）では mfa_required を true にできません。ロールの側で MFA を確かめられず、借りられなくなります。false にしてください。"
+  fi
   valid_region "$I_REGION"     || init_die "region が不正です: $I_REGION"
   valid_duration "$I_DURATION" || init_die "duration_seconds が不正です: ${I_DURATION}（900〜43200）"
   valid_role "$I_ROLE"         || init_die "role_name が不正です: $I_ROLE"

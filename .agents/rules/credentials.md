@@ -80,6 +80,9 @@
 Identity Center でログインしたセッションには、MFA を通っていても `aws:MultiFactorAuthPresent` が付かない。信頼ポリシーに MFA の条件を
 付けると AssumeRole が AccessDenied になる（2026-09-11 に実測。条件ごとに別のロールを作り、反映を待ってから約 1 分試して確かめた。
 1 つのロールの信頼ポリシーを書き換えた直後の 1 回目で判定すると、古いポリシーで評価されて逆の結論になる。実際に一度そう誤った）。
+そのため Identity Center のログイン（`is_sso_arn`。ロール名が `AWSReservedSSO_` で始まる）では、`init` は MFA を聞かずに false にし、
+非対話で true を渡されたら止める。`role` は true なら false にするよう、信頼ポリシーに条件があれば借りられないと不足に挙げ、
+`role --create` は true のままでは条件を書き込まずに止める。Identity Center 以外で借りたロールからの MFA の扱いは未確認なので、今までどおり聞く。
 
 ## AWS の API に渡す文字列
 
