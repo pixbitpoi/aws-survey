@@ -141,6 +141,9 @@ ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
 ui_kv "アカウント" "$ACCOUNT_ID"
 ui_kv "ロール" "$ROLE_NAME"
 ui_kv "ロールの用意" "$(route_label "$AUTH_ROUTE")"
+if [ "$DO_CREATE" -eq 1 ]; then
+  ui_text "まず、いまの状態（直す前）を確かめます。そのあと、足りないところを直します。"
+fi
 echo ""
 
 # ---- 1. 元プロファイルが生きているか ----
@@ -227,6 +230,12 @@ if role_json=$(aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME
     shortfalls+=("environment.json では MFA 必須ですが、信頼ポリシーに「MFA 済みの人だけ」という条件がありません")
   fi
   for sf in "${shortfalls[@]}"; do ui_warn "$sf"; done
+  # --create はこのあと直す。ただし直さずに止まる場合（借りたロール、Identity Center で MFA 必須）はそう言わない
+  if [ "$DO_CREATE" -eq 1 ] && [ "${#shortfalls[@]}" -gt 0 ] \
+     && { [ -z "$AUTH_ROUTE" ] || [ "$AUTH_ROUTE" = own_role ]; } \
+     && ! { [ "$MFA_REQUIRED" = "true" ] && is_sso_arn "$PRINCIPAL_ARN"; }; then
+    ui_text "ここまでは直す前のいまの状態です。⚠ の点は、このあと「ロールを整えます」で直します。"
+  fi
 else
   ui_skip "まだありません"
 fi
@@ -417,6 +426,9 @@ env_mark_setup route_decided "ロールの用意のしかたを決めた"
 env_mark_setup role_created "ロールを用意した"
 
 echo ""
+if [ "${#shortfalls[@]}" -gt 0 ]; then
+  ui_ok "直す前にあった ⚠ の点（${#shortfalls[@]} 件）は直しました"
+fi
 ui_ok "ロールの準備ができました"
 echo ""
 next_cmd "$AWS_SURVEY_CMD credentials" "読み取り専用の一時キーを発行します"

@@ -251,9 +251,10 @@ cmd_guide() {
 
   if [ -z "$(setup_value route_decided)" ] || [ -z "$(setup_value role_created)" ]; then
     show_track 2 "setup.route_decided / setup.role_created が未記録（ロール ${ROLE_NAME}）"
+    ui_text "ロールがまだ無ければ自分で作れるかを、もうあれば environment.json と合っているかを調べます。"
     ui_text "作れないときは、既にあるロールを借りるか管理者に頼む形になります。どちらになるか・そのあと何を書き換えるかは、この判定が出します。"
-    guide_next "role" "このアカウントでロールを自分で作れるか調べます（読むだけで、何も作りません）"
-    guide_also "role --create" "作れると分かったら、続けてこれで読み取り専用ロールを作ります"
+    guide_next "role" "調査用ロールの状態を調べます（読むだけで、何も変えません）"
+    guide_also "role --create" "続けて、ロールが無ければ作り、あれば environment.json に合わせて整えます"
     return 0
   fi
   STAGE_DONE[2]="${AUTH_ROUTE:-未定} / $ROLE_NAME"

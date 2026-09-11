@@ -192,7 +192,9 @@ class StateTable(CliCase):
 
     def test_stage_2_route_and_role_unset(self):
         self.write_environment()
-        self.assert_stage(self.run_cli(), 2, 'aws-survey role', 'role --create')
+        # ロールが既にある場合にも合う案内（「作ります」と言い切らない）
+        self.assert_stage(self.run_cli(), 2, 'aws-survey role', 'role --create',
+                          'あれば environment.json に合わせて整えます')
         self.write_environment(setup={'route_decided': '2026-09-08'})
         self.assert_stage(self.run_cli(), 2, 'aws-survey role')
 
@@ -791,6 +793,28 @@ class Role(CliCase):
         written = [c for c in self.calls() if 'update-assume-role-policy' in c or 'create-role' in c]
         self.assertEqual(written, [])
         self.assertFalse((self.target / 'trust.json').exists())
+        # 直さずに止まるので「このあと直します」とは言わない
+        self.assertNotIn('このあと「ロールを整えます」で直します', result.stdout)
+        self.assertNotIn('は直しました', result.stdout)
+
+    def test_role_create_says_the_warnings_were_before_and_are_fixed(self):
+        # --create は直す前の判定を先に出す。⚠ が直す前の状態だと分かり、最後に直したと分かること
+        self.use_principal('arn:aws:iam::000000000000:user/someone-else')
+        result = self.run_cli('role', '--create')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        out = result.stdout
+        self.assertIn('まず、いまの状態（直す前）を確かめます', out)
+        self.assertIn('ここまでは直す前のいまの状態です', out)
+        self.assertLess(out.index('ここまでは直す前'), out.index('ロールを整えます'))
+        self.assertIn('直す前にあった ⚠ の点（1 件）は直しました', out)
+        self.assertLess(out.index('ロールを整えます'), out.index('は直しました'))
+
+    def test_role_create_without_warnings_does_not_claim_a_fix(self):
+        self.write_environment()
+        result = self.run_cli('role', '--create')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('ここまでは直す前', result.stdout)
+        self.assertNotIn('は直しました', result.stdout)
 
     def test_role_lent_to_the_account_covers_me(self):
         self.write_environment()
