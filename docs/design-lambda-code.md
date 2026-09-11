@@ -368,6 +368,149 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
 | マウントと配置 | `tests/test_launcher.py`（`code/` があるときだけマウントされ、ro であること） |
 | 実環境 | 検証用のアカウントに Python と Node.js の関数を 1 つずつ、レイヤー付きで作り（作成は元プロファイルで手作業。このツールの機能ではない）、`pull` → `run` → 調査コンテナで `method/07` に沿って読ませる |
 
+### 8.1 第 5 段の手順（実環境）
+
+検証用の空アカウントで行う。関数・レイヤー・実行ロールの作成と削除は、元プロファイルで手で打つ（このツールの機能ではない）。
+`<元>`・`<ID>`・`<r>` は対象フォルダの `environment.json` の `auth.source_profile`・`account_id`・`region`。
+名前の `lambda-code-trial-*` は検証用で、片付けで消す。
+
+1. 一時キーを発行し直し、`PackedPolicySize` を控える（第 1 段の Deny を含むキーになる）
+
+   ```
+   aws-survey credentials
+   aws-survey verify
+   ```
+
+2. 検証用の zip を作る（下のスクリプト。`py.zip` / `py-v2.zip` / `node.zip` / `layer.zip`。AWS は叩かない）
+
+   ```
+   bash build-trial-zips.sh ./trial-zips && cd ./trial-zips
+   ```
+
+3. 実行ロール（関数は起動しないので、信頼ポリシーだけでよい）。作ったあと 10 秒ほど待つ
+
+   ```
+   aws iam create-role --profile <元> --role-name lambda-code-trial-exec --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+   ```
+
+4. レイヤー（出力の ARN を 5 で使う）
+
+   ```
+   aws lambda publish-layer-version --profile <元> --region <r> --layer-name lambda-code-trial-layer --zip-file fileb://layer.zip --compatible-runtimes python3.12 --query LayerVersionArn --output text
+   ```
+
+5. Python の関数。版 1 を公開してエイリアス `live` を付け、そのあと `$LATEST` だけを 1 行変える（`live` の先が別のディレクトリになることを見る）
+
+   ```
+   aws lambda create-function --profile <元> --region <r> --function-name lambda-code-trial-py --runtime python3.12 --handler app.lambda_handler --role arn:aws:iam::<ID>:role/lambda-code-trial-exec --zip-file fileb://py.zip --layers <4 の ARN> --environment 'Variables={TABLE_NAME=trial-table,DB_PASSWORD=trial-env-value}'
+   aws lambda wait function-active-v2 --profile <元> --region <r> --function-name lambda-code-trial-py
+   aws lambda publish-version --profile <元> --region <r> --function-name lambda-code-trial-py --query Version --output text
+   aws lambda create-alias --profile <元> --region <r> --function-name lambda-code-trial-py --name live --function-version 1
+   aws lambda update-function-code --profile <元> --region <r> --function-name lambda-code-trial-py --zip-file fileb://py-v2.zip
+   ```
+
+6. Node.js の関数（ソースマップと `node_modules` の依存を含む）
+
+   ```
+   aws lambda create-function --profile <元> --region <r> --function-name lambda-code-trial-node --runtime nodejs20.x --handler index.handler --role arn:aws:iam::<ID>:role/lambda-code-trial-exec --zip-file fileb://node.zip --environment 'Variables={BUCKET=trial-bucket}'
+   ```
+
+7. 取り出す（対象フォルダで）
+
+   ```
+   aws-survey lambda pull lambda-code-trial-py lambda-code-trial-node
+   ```
+
+   見ること: 3/5 の自己確認（Lambda 以外は拒否）、画面に `https://` や `X-Amz-` が出ないこと、`code/lambda/<r>/lambda-code-trial-py/1/` があること
+   （`live` の版 1 と `$LATEST` が違う）、`code/lambda-layers/<r>/lambda-code-trial-layer/1/_manifest.json` の `contents.contains_own_code` が `false`、
+   `_manifest.json` の `EnvironmentVariableNames` が名前だけであること。次の 4 つの値がどこにも無いこと
+
+   ```
+   grep -rl -e trial-hardcoded-value -e trial-dotenv-value -e trial-api-key-value -e trial-env-value code/
+   ```
+
+8. 取り直しと一覧（2 回目は 3 件とも「変わっていません」、`--all` は同じリージョンの他の関数も取る）
+
+   ```
+   aws-survey lambda pull lambda-code-trial-py lambda-code-trial-node
+   aws-survey lambda pull --all
+   aws-survey lambda list
+   ```
+
+9. 調査コンテナ（Claude Code と Codex の両方）。`survey-status` に取り出してある関数の数が出ること。フックと `settings.json` を変えたので、
+   `method/03` の動作確認をやり直させて `out/_環境/00_動作確認.md` に追記させる。加えて次を確かめる:
+   `aws lambda get-function --function-name lambda-code-trial-py` が拒否されること、`WebFetch` が拒否されること（Claude Code）、
+   `grep -rn boto3 code/` が通ること、`method/07` に沿って 2 つの関数の入口・呼んでいる AWS・環境変数の名前を読み、設定と突き合わせられること
+
+   ```
+   aws-survey run
+   ```
+
+10. 片付け
+
+    ```
+    aws lambda delete-function --profile <元> --region <r> --function-name lambda-code-trial-py
+    aws lambda delete-function --profile <元> --region <r> --function-name lambda-code-trial-node
+    aws lambda delete-layer-version --profile <元> --region <r> --layer-name lambda-code-trial-layer --version-number 1
+    aws iam delete-role --profile <元> --role-name lambda-code-trial-exec
+    aws-survey lambda remove --all
+    ```
+
+2 の `build-trial-zips.sh`（手元の抽出器に掛けて、上の 7 の見ることが満たされることを確認済み）。
+
+```bash
+#!/usr/bin/env bash
+# 第 5 段の検証用の関数とレイヤーの zip を、引数のフォルダに組み立てる。AWS は叩かない。
+set -euo pipefail
+W="${1:?組み立て先のフォルダを指定してください}"
+rm -rf "$W" && mkdir -p "$W/py" "$W/node/node_modules/trial-dep" "$W/layer/python/triallib" "$W/layer/python/triallib-1.0.0.dist-info"
+
+cat > "$W/py/app.py" <<'EOF'
+import os
+import boto3
+from secrets_client import read_secret
+
+password = "trial-hardcoded-value"
+TABLE = os.environ["TABLE_NAME"]
+
+
+def lambda_handler(event, context):
+    boto3.client("s3").list_objects_v2(Bucket="trial-bucket-name", MaxKeys=1)
+    return {"table": TABLE, "has_secret": bool(read_secret("trial/db"))}
+EOF
+cat > "$W/py/secrets_client.py" <<'EOF'
+import boto3
+
+
+def read_secret(name):
+    return boto3.client("secretsmanager").get_secret_value(SecretId=name)["SecretString"]
+EOF
+printf 'DB_PASSWORD=trial-dotenv-value\n' > "$W/py/.env"
+(cd "$W/py" && zip -qr ../py.zip .)
+printf '# v2\n' >> "$W/py/app.py"
+(cd "$W/py" && zip -qr ../py-v2.zip .)
+
+cat > "$W/node/index.js" <<'EOF'
+"use strict";
+exports.handler = async () => ({ bucket: process.env.BUCKET });
+//# sourceMappingURL=index.js.map
+EOF
+cat > "$W/node/index.js.map" <<'EOF'
+{"version":3,"sources":["../src/handler.ts","../node_modules/trial-dep/index.js"],"sourcesContent":["import { S3Client } from \"@aws-sdk/client-s3\";\nconst apiKey = \"trial-api-key-value\";\nexport const handler = async () => ({ bucket: process.env.BUCKET });\n","module.exports = {};\n"],"mappings":""}
+EOF
+printf '{"name": "trial-node", "version": "1.0.0", "dependencies": {"trial-dep": "1.0.0"}}\n' > "$W/node/package.json"
+printf '{"name": "trial-dep", "version": "1.0.0"}\n' > "$W/node/node_modules/trial-dep/package.json"
+printf 'module.exports = {};\n' > "$W/node/node_modules/trial-dep/index.js"
+(cd "$W/node" && zip -qr ../node.zip .)
+
+printf 'VALUE = 1\n' > "$W/layer/python/triallib/__init__.py"
+printf 'Metadata-Version: 2.1\nName: triallib\nVersion: 1.0.0\n' > "$W/layer/python/triallib-1.0.0.dist-info/METADATA"
+printf 'triallib/__init__.py,,\ntriallib-1.0.0.dist-info/METADATA,,\ntriallib-1.0.0.dist-info/RECORD,,\n' \
+  > "$W/layer/python/triallib-1.0.0.dist-info/RECORD"
+(cd "$W/layer" && zip -qr ../layer.zip python)
+ls -l "$W"/*.zip
+```
+
 ## 9. security.md に足すこと
 
 - 第 1 節の表に `lambda:GetFunction` / `lambda:GetLayerVersion`（コードの署名付き URL）を足す
