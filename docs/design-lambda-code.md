@@ -125,6 +125,13 @@ docker run --rm --network none --read-only --tmpfs /tmp \
   "$IMAGE" python3 /x/extract.py /in /out
 ```
 
+- `/in` には zip と `jobs.json` を置く。`jobs.json` は `{"with_deps": false, "jobs": [{"zip": "<名前>" | null, "dest": "lambda/<region>/<関数名>[/<版>]", "meta": {…}}]}` で、
+  `meta` はホストが `get-function` から控えた設定（§4.2 の 3）。抽出器は `meta` をそのまま `_manifest.json` の上位に置き、
+  展開の結果を `contents` の下に足す。`zip` が `null`（コンテナイメージ形式）なら `_manifest.json` だけを書く。
+  標準出力には 1 件 1 行の JSON（`dest`・`status`・置いた数・除外した数・`error`）を出し、ホストはそれを `ui.sh` の部品で表示する。
+  `dest` は `lambda/…` か `lambda-layers/…` の 3〜4 段に限り、`..` を含むものは受け付けない
+- 取り直しは `<dest>/.src.new` に書いてから `src/` と差し替える。失敗したら前の `src/` と `_manifest.json` を残す。
+  `<dest>` の下の版のディレクトリ（`<関数名>/<版>/`）は差し替えの対象にしない
 - ネットワークも資格情報も渡さない。展開するのは対象のファイルで、zip の中身を信用しない（§5.1）
 - 抽出器 `libexec/lambda/extract.py` はホスト側の部品で、調査コンテナのイメージには焼かない
 - マスクと拒否パターンは `gateway.py` の `MASK_RULES` / `DENY_NAMES` を import して使う。写しを作らない
@@ -138,7 +145,8 @@ docker run --rm --network none --read-only --tmpfs /tmp \
 ```
 <対象フォルダ>/code/
   lambda/<region>/<関数名>/
-    _manifest.json      設定の控え・CodeSha256・取り出した日時・除外したファイルと理由・依存の一覧・バイナリの一覧
+    _manifest.json      上位: 設定の控え・CodeSha256・取り出した日時（ホストの meta）
+                        contents: 置いた数・除外したファイルと理由・依存の一覧・バイナリ / jar / クラスの一覧・ソースマップとバンドル
     src/                絞り込み済みのコード
   lambda-layers/<region>/<レイヤー名>/<版>/
     _manifest.json
@@ -157,9 +165,11 @@ zip の中身は対象のものなので信用しない。
 - `..` を含むパス・絶対パスの項目は展開しない（zip slip）
 - シンボリックリンクの項目は実体化せず、`_manifest.json` にリンク先の文字列だけ残す
 - 展開後の合計に上限を掛ける（Lambda の展開後の上限は 250 MB。それを超える zip は壊れているか意図的なものとして止める）。
-  ヘッダの `file_size` は信用せず、実際に書いたバイト数で数える（zip bomb）。1 ファイルの上限も別に持つ（同じ値でよい）
-- 展開先の tmpfs には大きさを指定する（`--tmpfs /tmp:size=1g` のように、上限より一回り大きい値）
-- 展開はホストではなく、ネットワークの無い使い捨てのコンテナの `/tmp`（tmpfs）で行う
+  ヘッダの `file_size` は信用せず、実際に展開したバイト数で数える（zip bomb。Python の `zipfile` もヘッダの大きさまでしか
+  展開しないが、それとは別に数える）。1 ファイルの上限も別に持つ（同じ値でよい）。項目の数にも上限を持つ（10 万件）
+- 展開はホストではなく、ネットワークの無い使い捨てのコンテナで行う。**生の中身はメモリ上だけで扱い**、ディスクには
+  マスク済みのテキストだけを書く（バイナリ・jar・ソースマップは読むだけで書かない）。tmpfs には大きさを指定する
+  （`--tmpfs /tmp:size=1g` のように）が、抽出器自身は `/tmp` に書かない
 
 ### 5.2 拒否パターン
 
@@ -186,6 +196,14 @@ EC2 の経路と同じ規則で、同じく**経験則**である。コードに
 `gateway.py` の規則は変えない）。他の規則（`AKIA`・秘密鍵・URL のユーザー情報・`aws_secret_access_key`）はそのまま掛ける。
 リテラル以外への代入を素通しにする分、`base64` の定数や連結で組み立てた値は前と同じくすり抜ける（§9）。
 
+リテラルの規則の細部（実装）。キーは `gateway.py` の 1 つ目と同じ語に `secret_key` を足したもの（Django の `SECRET_KEY = '…'`）で、
+キーの直後に `=`・`:`・`:=`（Go）・`==`（直書きの比較）が来て、右辺が引用符 3 種（`"` `'` `` ` ``。`f"…"` のような接頭辞も）で囲まれた
+1 行の文字列のとき、中身を `***` にする。キーは引用符で囲まれていてもよい（`"password": "…"`）。キーの後ろに語が続くもの
+（`secret_name = "prod/db"`・`SecretId="prod/db"`）は伏せない。Secrets Manager のシークレット名はリソース名として読みたいからである。
+
+`gateway.py` の 1 つ目の規則は `"password": "…"`（キーの直後が引用符）を伏せない。Lambda の zip には `config.json` のような
+JSON の設定がよく入るので、ソース以外のテキストには `gateway.py` の規則すべてに加えて、このリテラルの規則も掛ける（伏せる範囲が増えるだけ）。
+
 ### 5.4 依存ライブラリ
 
 zip の大半は依存ライブラリで、読みたいのは関数自身のコードである。既定では依存を `src/` に置かず、名前と版を一覧にする。
@@ -206,6 +224,16 @@ zip の大半は依存ライブラリで、読みたいのは関数自身のコ�
 `_manifest.json` に「バンドル済み・ソースマップ無し」と書き、バンドルは `src/` にそのまま置く（マスク済み。読めないことは読めないが、
 `grep` で呼んでいるサービス名・環境変数名は拾える）。これは初版に入れる（§11）。
 
+ソースマップの扱いの細部（実装）。
+
+- `*.map` そのものは `src/` に置かない。`sourcesContent` は JSON の文字列で、引用符が `\"` にエスケープされているため
+  リテラルの規則が掛からず、生のソースがそのまま残る。`_manifest.json` の `sourcemaps` に元の数・戻した数・依存として飛ばした数だけ残す
+- バンドルの末尾のインラインのソースマップ（`//# sourceMappingURL=data:…;base64,…`）は、base64 の中身にマスクが届かない。
+  バンドルから外して 1 行の注記に置き換え、デコードしたものから `_sources/` に戻す
+- 戻したファイルにも拒否パターン・ソースの拡張子の判定・マスクを同じく掛ける（`_sources/src/.env.local` は置かない）
+- バンドルの判定は経験則（100 KiB 以上で、esbuild / webpack の目印（`__commonJS(`・`__webpack_require__` など）があるか、1 行の平均が 500 字を超える）。
+  判定したものは `bundles` に、ソースマップの状態（`restored`・`no-sourcesContent`・`none`）と一緒に残す。バンドルの外にあるソースマップも戻す
+
 ### 5.5 ソースが読めないもの
 
 | 形 | `src/` に置くもの | `_manifest.json` に残すもの |
@@ -214,6 +242,11 @@ zip の大半は依存ライブラリで、読みたいのは関数自身のコ�
 | Go / Rust などのカスタムランタイム（`bootstrap`） | なし | ファイル名・大きさ。Go なら埋め込みのビルド情報（モジュール名と依存） |
 | .NET（`.dll`） | `*.deps.json`・`*.runtimeconfig.json`・`appsettings*.json`（マスク済み） | アセンブリの一覧 |
 | その他のバイナリ | なし | 名前・大きさ・SHA-256 |
+
+実装の範囲（初版）。Java の zip は、クラスと設定ファイルが直下に並び、依存が `lib/*.jar` に入る形である。直下の設定ファイルと
+`META-INF/` はテキストとして置き、クラスは一覧だけにする。`lib/` などの**入れ子の jar は展開しない**（`--with-deps` でも）。
+`pom.properties` から依存と版、クラスの数、大きさと SHA-256 を `jars` に残す。Go のビルド情報は第 6 段に回し、初版では `bootstrap` も
+他のバイナリと同じく名前・大きさ・SHA-256 だけにする。.NET の `*.deps.json` などは JSON なので、テキストとして置く。
 
 **逆コンパイルはしない**（初版）。JDK や逆コンパイラをイメージに入れると重く、読める形になるのは Java だけである。
 クラスファイルの定数（文字列・メソッド名）の要約は、需要があれば後の段で足す（§10）。
@@ -340,7 +373,8 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
    **実装済み**（偽の `aws` とフックの単体テストまで。`method/01` の「字面を避ける」の行と `security.md` の第 3 節も合わせた）。
    **実 AWS での `verify` の通過と `PackedPolicySize` は未確認**
 2. 抽出器 `libexec/lambda/extract.py` と `tests/test_lambda_extract.py`。AWS も Docker も使わずに進められる。
-   ソースマップからの復元もここに入れる
+   ソースマップからの復元もここに入れる。**実装済み**（手元の Python と、調査用イメージの Python で、ネットワーク無し・読み取り専用の
+   コンテナの中からテストを確認。実際の関数の zip では未確認）
 3. `build_image` を `libexec/docker.sh` に出す（`run` の挙動は変えない。`tests/test_launcher.py` で確かめる）。
    `aws-survey lambda pull` / `list` / `remove` と偽の `aws` / `curl` / `docker` のテスト。`doctor` に `curl`
 4. `run.sh` のマウント、`settings.json`、`method/07`、`survey-status`、`README.md`、`security.md` の新しい節、`AGENTS.md` の作業前の表
