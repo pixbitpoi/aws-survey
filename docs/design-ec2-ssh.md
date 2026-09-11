@@ -328,7 +328,7 @@ EC2 側が失敗したらタグも記録も触らない。タグ外しが失敗�
 | `vmstat` | `vmstat 1 N` | `--count N`（≤10、既定 5） |
 | `df` | `df -hT` と `df -ih` | なし |
 | `sar <種別>` | `sar -u` / `-r` / `-b` / `-n DEV` / `-q`、`-f` で当日と前日 | `cpu\|mem\|io\|net\|load`、`--day today\|yesterday` |
-| `net` | `ip -br addr`、`ip route`、`ss -tuln`（`-p` 無し） | なし |
+| `net` | `ip -br addr`、`ip route`、`ss -tuln`、`ss -tn state established`（どれも `-p` 無し） | なし |
 | `services` | `systemctl list-units --type=service --all --no-pager` | なし |
 | `failed` | `systemctl --failed --no-pager` | なし |
 | `service <unit>` | `systemctl status <unit> --no-pager -l -n 50` | unit は `^[A-Za-z0-9@._-]{1,80}$` |

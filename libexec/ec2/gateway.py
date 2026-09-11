@@ -736,7 +736,8 @@ def verb_sar(pos, opt, conf):
 
 def verb_net(pos, opt, conf):
     check_positional(pos, 0, 0, '')
-    return Plan('net').exec(['ip', '-br', 'addr']).exec(['ip', 'route']).exec(['ss', '-tuln'])
+    return (Plan('net').exec(['ip', '-br', 'addr']).exec(['ip', 'route']).exec(['ss', '-tuln'])
+            .exec(['ss', '-tn', 'state', 'established']))
 
 
 def verb_services(pos, opt, conf):

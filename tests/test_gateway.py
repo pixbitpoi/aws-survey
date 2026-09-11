@@ -103,7 +103,8 @@ class Verbs(unittest.TestCase):
         self.assertEqual(self.commands('uptime'), [['uptime']])
         self.assertEqual(self.commands('free'), [['free', '-m']])
         self.assertEqual(self.commands('df'), [['df', '-hT'], ['df', '-ih']])
-        self.assertEqual(self.commands('net'), [['ip', '-br', 'addr'], ['ip', 'route'], ['ss', '-tuln']])
+        self.assertEqual(self.commands('net'), [['ip', '-br', 'addr'], ['ip', 'route'], ['ss', '-tuln'],
+                                                ['ss', '-tn', 'state', 'established']])
         self.assertEqual(self.commands('ps --top 5 --sort mem'),
                          [['ps', '-eo', 'pid,ppid,user,%cpu,%mem,rss,etime,stat,args', '--sort=-%mem']])
         self.assertEqual(self.commands('vmstat --count 3'), [['vmstat', '1', '3']])
