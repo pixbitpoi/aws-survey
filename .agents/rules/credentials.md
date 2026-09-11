@@ -74,7 +74,9 @@
 セッション ARN から `arn:aws:iam::<ID>:role/<名前>` と組み立てるとパス（Identity Center なら `aws-reserved/sso.amazonaws.com/<region>/`）が落ち、
 信頼ポリシーが `MalformedPolicyDocument` で拒否される（2026-09-10 に実環境で発生）。
 `role` の判定は文字の一致ではなく「`principal_arn` の相手が貸す相手に含まれるか」で見る（`principal_coverage`）。
-含まれるが書き方が違うだけなら不足にしない。含まれないときと、MFA 必須なのに条件が無いときだけ不足にする。
+含まれるが書き方が違うだけなら不足にしない。信頼ポリシーのほうが広い（ロール ARN）場合も、狭い（いまのログインのセッション ARN だけ）場合も同じ。
+含まれないときと、MFA 必須なのに条件が無いときだけ不足にする。1 段目の「いまのログインと `principal_arn` が一致するか」も、
+`principal_arn` がいまのログインの借りているロール ARN なら一致とみなす（`session_in_role`）。
 Identity Center に MFA でログインしたセッションには `aws:MultiFactorAuthPresent` が付く（2026-09-11 に実測。条件付きでも借りられる）。
 
 ## AWS の API に渡す文字列

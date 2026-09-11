@@ -41,24 +41,31 @@ route_label() {
 # セッション ARN（arn:…:sts::<ID>:assumed-role/<ロール>/<人>）から、借りているロールの名前を取り出す
 principal_role() { local r="${1#*:assumed-role/}"; printf '%s' "${r%%/*}"; }
 
-# principal_arn の相手が、信頼ポリシーの貸す相手（改行区切りの Principal.AWS）に含まれるか。
+# $1 のセッション ARN が、$2 のロール ARN（パスは問わない）を借りているセッションか
+session_in_role() {
+  case "$1" in arn:*:sts::*:assumed-role/*/*) ;; *) return 1 ;; esac
+  case "$2" in arn:*:iam::*:role/*) ;; *) return 1 ;; esac
+  [ "$(printf '%s' "$1" | cut -d: -f2,5)" = "$(printf '%s' "$2" | cut -d: -f2,5)" ] \
+    && [ "$(principal_role "$1")" = "${2##*/}" ]
+}
+
+# principal_arn の相手が、信頼ポリシーの貸す相手（改行区切りの Principal.AWS）に含まれるか。$3 はいまのログイン。
 #   exact   そのまま載っている
-#   role    principal_arn がセッション ARN で、借りているロール（パスは問わない）が載っている
+#   role    principal_arn がセッション ARN で、借りているロール（パスは問わない）が載っている（信頼ポリシーのほうが広い）
+#   narrow  principal_arn がロール ARN で、そのロールを借りているいまのログインが載っている（信頼ポリシーのほうが狭い）
 #   account principal_arn のアカウント全体（:root かアカウント ID）が載っている
 #   none    含まれない
 principal_coverage() {
-  local me="$1" list="$2" p part acct
+  local me="$1" list="$2" now="${3:-}" p part acct
   if printf '%s\n' "$list" | grep -qxF -- "$me"; then echo exact; return 0; fi
+  while IFS= read -r p; do
+    ! session_in_role "$me" "$p" || { echo role; return 0; }
+  done <<< "$list"
+  if [ -n "$now" ] && session_in_role "$now" "$me" && printf '%s\n' "$list" | grep -qxF -- "$now"; then
+    echo narrow; return 0
+  fi
   part=${me#arn:}; part=${part%%:*}
   acct=$(printf '%s' "$me" | cut -d: -f5)
-  case "$me" in
-    arn:*:sts::*:assumed-role/*/*)
-      while IFS= read -r p; do
-        case "$p" in
-          "arn:$part:iam::$acct:role/"*) [ "${p##*/}" != "$(principal_role "$me")" ] || { echo role; return 0; } ;;
-        esac
-      done <<< "$list" ;;
-  esac
   if printf '%s\n' "$list" | grep -qxF -e "arn:$part:iam::$acct:root" -e "$acct"; then echo account; return 0; fi
   echo none
 }
@@ -143,7 +150,8 @@ if ! who=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --ou
   die "$PROFILE_SRC が使えません。ログインし直してから、もう一度実行してください。"
 fi
 ui_ok "$who"
-if [ -n "$PRINCIPAL_ARN" ] && [ "$who" != "$PRINCIPAL_ARN" ]; then
+# 「同じロールでログインした人なら誰でも」（ロール ARN）を選んだときは、いまのログインがそのロールのセッションなら一致とみなす
+if [ -n "$PRINCIPAL_ARN" ] && [ "$who" != "$PRINCIPAL_ARN" ] && ! session_in_role "$who" "$PRINCIPAL_ARN"; then
   ui_warn "environment.json に書いた実体（auth.principal_arn）と一致しません"
   ui_kv "environment.json" "$PRINCIPAL_ARN"
   ui_kv "実際" "$who"
@@ -178,7 +186,7 @@ if role_json=$(aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME
   trust_principals=$(echo "$role_json" | jq -r '[.Role.AssumeRolePolicyDocument.Statement[] | select(.Effect=="Allow")
                        | .Principal | objects | .AWS // empty] | flatten | .[] | strings' 2>/dev/null)
   if [ -n "$PRINCIPAL_ARN" ]; then
-    case "$(principal_coverage "$PRINCIPAL_ARN" "$trust_principals")" in
+    case "$(principal_coverage "$PRINCIPAL_ARN" "$trust_principals" "$who")" in
       exact)
         ui_ok "あなたはこのロールを借りられます（信頼ポリシーの貸す相手が environment.json と同じです）" ;;
       role)
@@ -186,6 +194,11 @@ if role_json=$(aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME
         ui_text "信頼ポリシーは「$(ui_role_audience "$(principal_role "$PRINCIPAL_ARN")")」に貸す書き方で、"
         ui_text "environment.json の「自分だけ」より広い範囲です。このままでも使えます。"
         ui_text "自分だけに絞るなら $AWS_SURVEY_CMD role --create で書き換えます。" ;;
+      narrow)
+        ui_ok "あなたはこのロールを借りられます"
+        ui_text "信頼ポリシーは「自分だけ」に貸す書き方で、environment.json の"
+        ui_text "「$(ui_role_audience "$PRINCIPAL_ARN")」より狭い範囲です。ほかの人は借りられません。"
+        ui_text "ほかの人にも貸すなら $AWS_SURVEY_CMD role --create で書き換えます。" ;;
       account)
         ui_ok "あなたはこのロールを借りられます"
         ui_text "信頼ポリシーはアカウント全体に貸す書き方です。借りられるかは、あなた側の権限で決まります。" ;;

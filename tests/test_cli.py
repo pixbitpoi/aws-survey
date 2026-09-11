@@ -724,6 +724,22 @@ class Role(CliCase):
         result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=other)
         self.assertIn('このままでは借りられません', result.stdout)
 
+    def test_role_lent_only_to_me_is_narrower_but_still_mine(self):
+        # environment.json は「権限セットの人なら誰でも」、信頼ポリシーは「自分だけ」。あなたは借りられるので不足にしない
+        self.use_principal(SSO_ROLE)
+        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER, FAKE_TRUST_PRINCIPAL=SSO_CALLER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('あなたはこのロールを借りられます', result.stdout)
+        self.assertIn('より狭い範囲です。ほかの人は借りられません', result.stdout)
+        self.assertIn('ロールは用意できています', result.stdout)
+        self.assertNotIn('⚠', result.stdout)
+
+    def test_role_lent_to_someone_else_in_my_permission_set_does_not_cover_me(self):
+        self.use_principal(SSO_ROLE)
+        result = self.run_cli('role', FAKE_CALLER_ARN=SSO_CALLER,
+                              FAKE_TRUST_PRINCIPAL=SSO_CALLER.replace('/alice', '/bob'))
+        self.assertIn('このままでは借りられません', result.stdout)
+
     def test_role_lent_to_the_account_covers_me(self):
         self.write_environment()
         result = self.run_cli('role', FAKE_TRUST_PRINCIPAL='arn:aws:iam::000000000000:root')
