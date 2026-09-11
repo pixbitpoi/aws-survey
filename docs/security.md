@@ -25,7 +25,8 @@ flowchart LR
 ```
 
 信頼ポリシー（調査用ロールを借りられる相手の名簿）は `environment.json` の `auth.principal_arn` から生成し、`auth.mfa_required` が true なら `aws:MultiFactorAuthPresent` の条件を付けます。
-Identity Center に MFA でログインしたセッションにもこの条件の値は付くので、条件を付けても借りられます。
+ただし Identity Center でログインしたセッションには、ログインで MFA を通っていてもこの値が付かないため、条件を付けると借りられなくなります。
+Identity Center を使うときは `auth.mfa_required` を false にし、MFA は Identity Center のログインで求めます。
 
 `aws-survey init` では、借りられる相手を次から選びます。
 
