@@ -166,7 +166,7 @@ esac
 # ---- 8. オペレーションは読み取り系の動詞のみ ----
 if ! printf '%s' "$op" | grep -qE '^(describe|list|get|lookup|search|batch-get|batch-describe|estimate|validate|simulate|check|preview|view|test|generate)-'; then
   case "$op" in
-    help) ;;
+    help|search) ;;
     *) deny "読み取り系のオペレーションのみ許可です（describe- / list- / get- / lookup- / search- など）" ;;
   esac
 fi

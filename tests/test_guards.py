@@ -47,6 +47,7 @@ class Guards(unittest.TestCase):
         cases = [
             ('aws ec2 describe-vpcs', True),
             ('aws ec2 describe-vpcs > out/01_基礎調査/raw/vpcs.json', True),
+            ('aws resource-explorer-2 search --query-string "*" > out/01_基礎調査/raw/rex.json', True),
             ('aws ec2 terminate-instances --instance-ids i-0', False),
             ('aws sqs receive-message --queue-url example', False),
             ('aws ssm get-parameter --name example', False),
