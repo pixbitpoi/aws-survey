@@ -40,8 +40,8 @@
 
 利用者に見せる「次に打つコマンド」は `load-env.sh` が入れる `AWS_SURVEY_CMD`（`aws-survey` か `<本体>/aws-survey`）で
 組み立てる。`./run.sh` のようなスクリプト名を案内文に書かない。入口は `aws-survey`（`role` / `credentials` / `verify` /
-`scan` / `claude` / `codex` / `run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh`）。実体は `role` / `credentials` / `verify` /
-`run` / `scan` / `doctor` / `ls` / `ec2` / `ssh` / `lambda` が `libexec/commands/<名前>.sh`、`claude` / `codex` は `libexec/commands/agent.sh`
+`scan` / `claude` / `codex` / `login` / `run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh`）。実体は `role` / `credentials` / `verify` /
+`run` / `scan` / `login` / `doctor` / `ls` / `ec2` / `ssh` / `lambda` が `libexec/commands/<名前>.sh`、`claude` / `codex` は `libexec/commands/agent.sh`
 （第 1 引数がエージェント名）、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。
 イメージのビルドは `libexec/docker.sh`（`run` と `lambda pull` と `libexec/container.sh` が共有する）。
 調査コンテナ一式（一時キー・指示書・`method/`・`out/`・`code/`・Claude / Codex のボリューム）のマウント列は `libexec/launch.sh`
@@ -65,8 +65,16 @@ Claude / Codex の認証はコンテナ内のボリュームに残る。判定�
 未認証なら端末で `-it` のログインだけ先に行う（`claude auth login` / `codex login --device-auth`）。
 Claude はさらに `-p` の前にワークスペースの信頼を `.claude.json`（ボリュームの中）に記録する（`launch_trust_workspace`）。
 未信頼だと非対話では信頼の確認画面が出ず、作業ディレクトリの `settings.json` の allow が無視される（2026-09-12 に実測）。
-使うエージェントは `environment.json` の `agent` に「最後に使ったもの」として記録する（`scan --agent` も `aws-survey claude` / `codex` も上書きする）。
-記録の使い道は `scan` の既定と案内文だけ。
+この「イメージの用意 → 認証の確認 → ログイン → 信頼の記録」は `launch.sh` の `launch_agent_login` が 1 つで持ち、`init`（聞き取りの最後。
+端末で docker があるとき）・`login`（`libexec/commands/login.sh`）・`scan` が呼ぶ。`init` が済ませておくので、`scan` では通常「済んでいます」で通る。
+使うエージェントは `environment.json` の `agent`（`{name, model, effort}`。`libexec/agents.sh`）に記録する。`init` が聞いて書き、
+`scan --agent` も `aws-survey claude` / `codex` も `name` を「最後に使ったもの」として上書きする（別のエージェントに切り替えたときは
+`model` / `effort` もそのエージェントの既定に戻る。前のものの値は渡せないため）。古い形（`"agent": "claude"`）も名前だけとして読む。
+`model` / `effort` は起動時に CLI のフラグにして渡す（Claude Code は `--model` / `--effort`、Codex は `-m` / `-c model_reasoning_effort=`。
+対話も非対話も同じ。`launch_agent_flags`）。既定は Claude Code が `opus` / `medium`、Codex が `gpt-5.6-sol` / `low`。モデルの候補は
+`agents.sh` に並べるだけで、候補に無ければ手で入れられる（名前は各 CLI の都合で増減する）。イメージや設定ファイルには焼かない。
+利用者に見せる `scan` の説明は「対象アカウントの初期調査を <エージェント> が行います（…数十分かかります）」（`scan_desc`）で、
+「白紙の棚卸し」は開発側の言葉として文書とコメントに留める。
 起動前に `docker ps` で `<name>`（対話コンテナ）と `<name>-scan` を見て、動いていれば止まる（同じ `out/` に 2 つのエージェントを走らせない）。
 一時キーの残りが短ければ（総時間の半分、上限 30 分。この絶対値はホスト側だけに置く）発行し直してから始める。
 
@@ -103,11 +111,21 @@ EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `s
 端末でなければ 1 手ごとに `(Y/n)` で聞き、読めなければ案内だけで終わる（端末でない実行環境で黙って AWS を叩かないため）。
 `ssh setup` の末尾も同じで、標準入力と標準出力の両方が端末なら聞かずに引数なしの `aws-survey` に exec して残りの 3 手へ進み、
 端末でなければ `aws-survey` 1 本を案内する（`setup_continue`）。`role --create` → `credentials` → `ssh verify` は「手で 1 手ずつ進めるなら」の補足に留める。
-`init` が聞くのは AWS への繋ぎ方だけ（`AGENTS.md`「ホストと調査コンテナ」）。`name` / `source_profile` / `account_id` / `region` / `role_name` の
-5 つと、IAM ユーザーのログインでは `mfa_required` / `duration_seconds`。貸す相手（`principal_arn`）はいまのログインの自分だけ、`refresh_command` は
-aws-login に固定して聞かない（非対話の `--from` / `AWS_SURVEY_INIT_*` では渡せる）。項目を足すときは `environment.json` の雛形・`load-env.sh`・
-非対話モードの `AWS_SURVEY_INIT_*` を揃え、対象の概要や調査項目に踏み込まない。`init` は `.gitignore` に `environment.json` / `trust.json` を入れる
-（無ければ作り、あれば足りない行だけ足す）。画面に出すパスはホームの下なら `~` で省略する（`ui_path`。`ui_kv` は値に自動で掛ける。
+`init` が聞くのは AWS への繋ぎ方と、調査に使うエージェントだけ（`AGENTS.md`「ホストと調査コンテナ」）。`name` / `source_profile` / `region` /
+`role_name` の 4 つと、IAM ユーザーのログインでは `mfa_required` / `duration_seconds`、そのあとエージェント（`claude` / `codex`）とモデル・effort
+（矢印キーの候補。候補に無ければ入力）。`account_id` は `source_profile` でログインしたアカウント（`sts get-caller-identity` の `Account`）で聞かない。
+ロールはそのログインのアカウントに作られるので、別のアカウントを `account_id` にしても自分で作る経路では意味が無く、`role` はログインの
+アカウント（Arn の 5 番目）と `account_id` が違えば自分で作る経路では止まり、借りる経路では ⚠ を出す。AWS Organizations で複数のアカウントが
+あるときは「調べたいアカウントに入るプロファイルを選ぶ」が入口で、プロファイルの候補には Identity Center の `sso_account_id`（`aws configure get`。
+AWS は叩かない）を添える。Organizations の一覧（`organizations list-accounts`）は管理アカウントでしか通らず、選んでもロールを作れないので使わない。
+貸す相手（`principal_arn`）はいまのログインの自分だけ、`refresh_command` は aws-login に固定して聞かない（非対話の `--from` / `AWS_SURVEY_INIT_*` では
+`account_id` も含めてどれも渡せる。エージェントは `AWS_SURVEY_INIT_AGENT` / `_AGENT_MODEL` / `_AGENT_EFFORT`、`--from` では `.agent.{name,model,effort}`。
+未指定なら未定のまま `scan` が聞く）。項目を足すときは `environment.json` の雛形・`load-env.sh`・非対話モードの `AWS_SURVEY_INIT_*` を揃え、対象の
+概要や調査項目に踏み込まない。`init` は `.gitignore` に `environment.json` / `trust.json` を入れる（無ければ作り、あれば足りない行だけ足す）。
+書き出しと器の用意（`out/`・`AGENTS.md`・`CLAUDE.md`・`.gitignore`）は黙って行い、出すのは失敗と置き換えなかったものだけ。「対象」のまとめも
+出さず、準備完了の案内（`guide_ready`）が対象・ロール・エージェントを出す。
+画面は、決まった項目を「◆ 項目: 値」の 1 行に畳む（`init_begin` で見出しと補足を出し、`ask` / メニューのあと `init_done` が端末なら
+そこまでを消して 1 行にする。聞かずに決まる項目は `init_fixed`）。端末でなければ消さず、見出しと補足のあとに 1 行が足される（テストはこちらを見る）。画面に出すパスはホームの下なら `~` で省略する（`ui_path`。`ui_kv` は値に自動で掛ける。
 ファイルやコマンドに書く値には使わない）。
 `refresh_command` の既定は `aws-login --profile <元プロファイル>`（`refresh_default`）。`<名>-mfa` は aws-login が作る
 一時キーの保存先なので、渡すのは `-mfa` を外した元の名前。aws-login は formula の依存なので、在る前提で既定に出す。
@@ -130,7 +148,7 @@ aws-login に固定して聞かない（非対話の `--from` / `AWS_SURVEY_INIT
 最後の `ui_ok` の文言で ✔ の 1 行にし、失敗したら記録の全部を見せて止まる。だから各コマンドの最後の `ui_ok` は、1 行で結果が
 分かる文にする（「発行しました」ではなく「一時キーを発行しました（60 分）」）。子の標準出力は記録へ向くので、利用者に聞く・
 ログインのコマンドを走らせるところは `ui_pause` → `ui_tty` / `/dev/tty` → `ui_resume` で囲む（`credentials` の 2 か所が例）。
-`run` は端末を渡すので畳まず `AWS_SURVEY_COMPACT=1` だけ（見出し・補足を出さず ✔ ⚠ ✗ だけ）。`init` は質問なので畳まない。
+`run` は端末を渡すので畳まず `AWS_SURVEY_COMPACT=1` だけ（見出し・補足を出さず ✔ ⚠ ✗ だけ）。`init` は質問なので親は畳まず、自分で 1 項目 1 行に畳む。
 利用者向けの文に `own_role` / `route` / `setup.*` / `PackedPolicySize` のような内部の値名を書かない。
 「ロールの用意のしかた（自分で作る / 既存のロールを借りる / 管理者に信頼してもらう）」のように言い換え、
 値名は利用者が `environment.json` を手で直す場面でだけ添える。「次に打つコマンド」は `next_cmd` で、説明は「何をするか」を書く。

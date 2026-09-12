@@ -12,7 +12,11 @@
     "duration_seconds": 10800
   },
   "phase_dir": "01_基礎調査",
-  "agent": null,
+  "agent": {
+    "name": null,
+    "model": null,
+    "effort": null
+  },
   "ssh": {
     "user": "diag",
     "hosts": {}

@@ -39,7 +39,7 @@ formula と `tests/test_distribution.py` の `INCLUDED_HIDDEN` を揃えるこ�
 | 入るもの | 理由 |
 | --- | --- |
 | `bin/aws-survey` | 入口。keg では `libexec/aws-survey` へ移され、`bin` には env ラッパーが置かれる |
-| `libexec/` | ホスト側の実装。各スクリプトと `session-guard.json`、イメージのビルド（`docker.sh`。`run` と `lambda pull` と `container.sh` が共有）、一時キーだけで調査コンテナに 1 コマンド走らせる部品（`container.sh`）とコンテナに貸す列挙（`inventory.sh`。`ls` / `ec2` / `lambda` が使う）、矢印キーの選択と一時キーの判定（`menu.sh` / `keys.sh`）、EC2 へ導入する診断ゲートウェイと、導入・撤去スクリプトの雛形（`ec2/`。`aws-survey ssh setup` / `ssh remove` が組み立てて SSM で送る。`--print` で書き出しだけもできる）、Lambda のコードの抽出器（`lambda/extract.py`。`aws-survey lambda pull` が使い捨てのコンテナにマウントして走らせる。調査コンテナのイメージには入らない） |
+| `libexec/` | ホスト側の実装。各スクリプトと `session-guard.json`、イメージのビルド（`docker.sh`。`run` と `lambda pull` と `container.sh` が共有）、一時キーだけで調査コンテナに 1 コマンド走らせる部品（`container.sh`）とコンテナに貸す列挙（`inventory.sh`。`ls` / `ec2` / `lambda` が使う）、矢印キーの選択と一時キーの判定（`menu.sh` / `keys.sh`）、エージェントのモデル・effort の既定と CLI のフラグ（`agents.sh`）、EC2 へ導入する診断ゲートウェイと、導入・撤去スクリプトの雛形（`ec2/`。`aws-survey ssh setup` / `ssh remove` が組み立てて SSM で送る。`--print` で書き出しだけもできる）、Lambda のコードの抽出器（`lambda/extract.py`。`aws-survey lambda pull` が使い捨てのコンテナにマウントして走らせる。調査コンテナのイメージには入らない） |
 | `container/`・`Dockerfile` | 調査コンテナへ渡る資材と、そのビルド定義。ビルド文脈は `container/`。EC2 の中を調べる `ec2` ラッパー（`container/ec2`）と、その実体の openssh-client・session-manager-plugin はイメージに入るので、ホストには要らない |
 | `templates/` | `init` が使う `environment.json` の雛形 |
 

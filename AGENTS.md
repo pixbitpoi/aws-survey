@@ -22,7 +22,7 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 | 依頼・対象 | 読むもの |
 | --- | --- |
 | 準備・立ち上げ・起動・一時キー | 手順書は置かない。`aws-survey`（引数なし）の出力に従う。段階の判定・次の 1 手・実行までコマンドが持つ |
-| `libexec/commands/scan.sh`（非対話の棚卸し）・`agent.sh`（`claude` / `codex` の対話起動）・`libexec/launch.sh`（`run` と `scan` が共有する調査コンテナ一式のマウント列）・段階「初期調査」と `guide_ready` | `.agents/rules/credentials.md` の「非対話の棚卸し（`scan`）」の段落。偽の `docker` での検証は `tests/test_scan.py`（`scan` の docker 引数と指示文・認証の判定とログイン・エージェントの記憶、`claude` / `codex` の pty 起動）、段階と案内は `tests/test_cli.py` |
+| `libexec/commands/scan.sh`（非対話の初期調査）・`agent.sh`（`claude` / `codex` の対話起動）・`login.sh`（エージェントのログイン）・`libexec/launch.sh`（`run` と `scan` が共有する調査コンテナ一式のマウント列。ログインと CLI のフラグも）・`libexec/agents.sh`（エージェント名・モデル・effort の既定と候補）・段階「初期調査」と `guide_ready` | `.agents/rules/credentials.md` の「非対話の棚卸し（`scan`）」の段落。偽の `docker` での検証は `tests/test_scan.py`（`scan` の docker 引数と指示文・認証の判定とログイン・エージェントの記憶とフラグ、`claude` / `codex` の pty 起動）、段階と案内は `tests/test_cli.py` |
 | フェーズ運用・調査中の進め方 | ホストでは持たない。調査エージェント（`container/instructions/`・`container/method/`）が自分で持つ |
 | エラー | 手順書は置かない。`aws-survey doctor`（ツールの有無と発行の切り分け）と各コマンドの出力から読む |
 | リリース・Homebrew の formula 更新 | `docs/release.md`（配布物の範囲もここ） |

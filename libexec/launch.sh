@@ -105,3 +105,51 @@ launch_agent_authenticated() {
 launch_trust_workspace() {
   launch_agent_cli -- sh -c 'f=/home/node/.claude/.claude.json; [ -s "$f" ] || echo "{}" > "$f"; t=$(mktemp) && jq ".projects[\"/home/node/aws-survey\"].hasTrustDialogAccepted = true" "$f" > "$t" && cat "$t" > "$f" && rm -f "$t"'
 }
+
+# エージェントに渡すフラグ（モデルと effort。libexec/agents.sh）。environment.json の agent の値で、無ければ既定。
+# 配列 AGENT_FLAGS に入れる。run / scan が CLI のコマンド列に並べる
+#   launch_agent_flags claude; claude "${AGENT_FLAGS[@]}" ...
+launch_agent_flags() {
+  if [ "$1" = "$SURVEY_AGENT" ]; then
+    agent_flags "$1" "$SURVEY_AGENT_MODEL" "$SURVEY_AGENT_EFFORT"
+  else
+    agent_flags "$1" "" ""
+  fi
+}
+
+# エージェントのログインを済ませる（イメージ・ボリュームの用意 → 認証の確認 → 未認証なら端末でログイン → Claude は信頼の記録）。
+# init（聞き取りの最後）・login・scan が使う。認証はボリュームに残るので、この対象では初回だけ実際のログインになる。
+# 端末でなければ未認証のところで 1 を返す（案内は出す）。docker.sh を source してから呼ぶ（build_image）
+#   launch_agent_login claude
+launch_agent_login() {
+  local agent="$1"
+  command -v docker >/dev/null || { ui_err "docker コマンドが見つかりません。Docker Desktop を導入して起動してください。"; return 1; }
+  docker_check_shared "$AWS_SURVEY_HOME" "$AWS_SURVEY_DIR" || return 1
+  docker_awsarch
+  ui_head "コンテナのイメージを用意する（$IMAGE, ${awsarch}）"
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || ui_text "初回は数分かかります。2 回目からは差分だけです。"
+  build_image
+  launch_prepare_volumes
+  ui_head "$(agent_label "$agent") の認証を確かめる"
+  if launch_agent_authenticated "$agent"; then
+    ui_ok "$(agent_label "$agent") の認証は済んでいます"
+  else
+    if ! { [ -t 0 ] && [ -t 1 ]; }; then
+      ui_err "$(agent_label "$agent") のログインがまだです。端末で $AWS_SURVEY_CMD login を実行してログインしてください。"
+      return 1
+    fi
+    ui_warn "$(agent_label "$agent") のログインがまだです。先にログインだけ済ませます（この対象では初回だけ）"
+    ui_text "画面の案内に従ってログインしてください。"
+    echo ""
+    case "$agent" in
+      codex)  launch_agent_cli -it --name "${SURVEY_NAME}-login" -- codex login --device-auth || true ;;
+      claude) launch_agent_cli -it --name "${SURVEY_NAME}-login" -- claude auth login || true ;;
+    esac
+    echo ""
+    launch_agent_authenticated "$agent" || { ui_err "ログインを確かめられませんでした。$AWS_SURVEY_CMD login をもう一度実行してください。"; return 1; }
+    ui_ok "$(agent_label "$agent") にログインしました"
+  fi
+  # 非対話の claude -p でも作業ディレクトリの許可とフックが効くように、ワークスペースの信頼を記録しておく
+  [ "$agent" != claude ] || launch_trust_workspace || { ui_err "ワークスペースの信頼を記録できませんでした。"; return 1; }
+  return 0
+}

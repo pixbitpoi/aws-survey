@@ -28,7 +28,7 @@ class Launcher(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         for name in ['bin', 'libexec', 'libexec/commands', 'container']:
             (self.root / name).mkdir()
-        for name in ['bin/aws-survey', 'libexec/commands/run.sh', 'libexec/load-env.sh', 'libexec/ui.sh', 'libexec/docker.sh',
+        for name in ['bin/aws-survey', 'libexec/commands/run.sh', 'libexec/load-env.sh', 'libexec/ui.sh', 'libexec/agents.sh', 'libexec/docker.sh',
                      'libexec/launch.sh']:
             shutil.copy(ROOT / name, self.root / name)
         docker = self.root / 'bin/docker'

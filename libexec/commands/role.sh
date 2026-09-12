@@ -154,6 +154,19 @@ if ! who=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --ou
   die "$PROFILE_SRC が使えません。ログインし直してから、もう一度実行してください。"
 fi
 ui_ok "$who"
+# ロールはこのログインのアカウントに作られる。environment.json の account_id が別のアカウントなら、自分で作る経路では
+# 作っても調べたいアカウントには無いので止まる。借りる経路（管理者が対象アカウントに用意したロール）なら ⚠ だけ出す
+who_account=$(printf '%s' "$who" | cut -d: -f5)
+if [ -n "$who_account" ] && [ "$who_account" != "$ACCOUNT_ID" ]; then
+  if [ -z "$AUTH_ROUTE" ] || [ "$AUTH_ROUTE" = own_role ]; then
+    ui_err "ログインしているアカウント（${who_account}）と、調べるアカウント（environment.json の account_id: ${ACCOUNT_ID}）が違います"
+    ui_text "ロールはログインしているアカウントに作られるので、このままでは調べたいアカウントのロールになりません。"
+    ui_text "調べたいアカウントにログインするプロファイルを auth.source_profile にするか、account_id を直してください（${ENV_FILE}）。"
+    ui_text "対象アカウントのロールを管理者に用意してもらって借りるなら、auth.route を granted_role にします。"
+    die "アカウントが一致しません。"
+  fi
+  ui_warn "ログインしているアカウント（${who_account}）と、調べるアカウント（${ACCOUNT_ID}）が違います。借りるロールは調べるアカウント側に要ります"
+fi
 # 借りたロールからのログインは、ロール側の上限にかかわらず 1 時間まで。ロールを直しても変わらないので、ここで environment.json 側を案内する
 if is_chained_arn "$who" && [ "$DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
   ui_chain_limit "$DURATION"

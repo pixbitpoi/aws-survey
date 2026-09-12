@@ -36,6 +36,8 @@ elif argv[:2] == ["configure", "get"]:
         print("ap-northeast-1")
     elif key in ("sso_session", "sso_start_url") and prof == "sso-prof":
         print("fake-sso")
+    elif key == "sso_account_id" and prof == "sso-prof":
+        print(os.environ.get("FAKE_SSO_ACCOUNT", "000000000000"))
     else:
         sys.exit(1)
 elif "get-caller-identity" in argv:
@@ -89,6 +91,36 @@ SSO_ROLE = ('arn:aws:iam::000000000000:role/aws-reserved/sso.amazonaws.com/test-
 
 def iso(dt):
     return dt.strftime('%Y-%m-%dT%H:%M:%S+00:00')
+
+
+def render_screen(raw):
+    """What a terminal would show after the raw pty output: \r, \n, cursor up (ESC[nA), erase to end of line (ESC[K)
+    and to end of screen (ESC[J). Other escapes (colours, cursor visibility) are dropped. Lines are returned rstripped."""
+    screen = ['']; row = col = 0; i = 0
+    while i < len(raw):
+        ch = raw[i]
+        if ch == '\x1b':
+            m = re.match(r'\x1b\[([0-9;?]*)([A-Za-z])', raw[i:])
+            if m:
+                n, c = m.group(1), m.group(2); i += m.end()
+                if c == 'A':
+                    row = max(0, row - int(n or 1))
+                elif c == 'K':
+                    screen[row] = screen[row][:col]
+                elif c == 'J':
+                    screen = screen[:row + 1]; screen[row] = screen[row][:col]
+                continue
+        if ch == '\r':
+            col = 0
+        elif ch == '\n':
+            row += 1; col = 0
+            if row >= len(screen):
+                screen.append('')
+        else:
+            line = screen[row]
+            screen[row] = line[:col] + ch + line[col + 1:]; col += 1
+        i += 1
+    return [line.rstrip() for line in screen]
 
 
 class CliCase(unittest.TestCase):
@@ -181,10 +213,10 @@ class StateTable(CliCase):
         self.assertFalse((self.target / 'environment.json').exists())
 
     def test_stage_1_yes_runs_init(self):
-        # y, name, profile(1=fake-src), account, mfa, region, duration, role
-        answers = ['y', 'demo', '1', '', '', '', '1800', '']
+        # y, name, profile(1=fake-src), mfa, region, duration, role, agent, model, effort
+        answers = ['y', 'demo', '1', '', '', '1800', '', '', '', '']
         result = self.run_cli(input='\n'.join(answers) + '\n')
-        self.assert_stage(result, 1, '書き出しました')
+        self.assert_stage(result, 1, '◆ name: demo')
         config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['name'], 'demo')
         self.assertEqual(config['auth']['duration_seconds'], 1800)
@@ -247,6 +279,11 @@ class StateTable(CliCase):
         self.assert_stage(result, 5, 'aws-survey scan', '未実施', '準備完了', 'aws-survey ls',
                           'aws-survey claude', 'aws-survey codex')
         self.assertRegex(result.stdout, r'約 4[45] 分 / 60 分')
+        # 準備完了に対象のまとめ（init はもう出さない）と、scan の説明（誰が何をするか・時間の目安）
+        self.assertIn('対象              smoke（アカウント 000000000000 / test-region）', result.stdout)
+        self.assertIn('エージェント      未定（scan のときに選びます）', result.stdout)
+        self.assertIn('対象アカウントの初期調査を Claude Code / Codex が行います（インフラ構成の複雑さによっては数十分かかります）', result.stdout)
+        self.assertNotIn('白紙', result.stdout)
         self.assertNotIn('aws-survey run', result.stdout)        # the bare shell is not part of the guided path
         self.assertEqual(self.calls(), [])                        # nothing runs by itself past the key
 
@@ -270,9 +307,10 @@ class StateTable(CliCase):
         (self.target / 'environment.json').write_text(json.dumps(config))
         self.write_keys(iso(datetime.now(timezone.utc) + timedelta(minutes=45)))
         result = self.run_cli()
-        self.assert_stage(result, 6, '済（2026-09-12T10:32+0900）', '棚卸し済み', 'aws-survey codex',
+        self.assert_stage(result, 6, '済（2026-09-12T10:32+0900）', '初期調査済み', 'aws-survey codex',
                           'aws-survey codex resume --last', 'aws-survey scan')
         self.assertNotIn('aws-survey claude', result.stdout)
+        self.assertIn('エージェント      Codex（gpt-5.6-sol / low）', result.stdout)     # 古い形（文字列）も既定で読む
 
     def test_stage_5_lists_the_optional_additions(self):
         self.verified()
@@ -506,9 +544,9 @@ class Status(CliCase):
         self.assertIn('✔ ロールの用意のしかたを決めた  2026-09-01', result.stdout)
         self.assertIn('✔ ロールを用意した  2026-09-02', result.stdout)
         self.assertIn('－ 読み取り専用であることを確かめた  まだ', result.stdout)
-        self.assertIn('－ 白紙の棚卸しを済ませた  まだ', result.stdout)
-        self.assertIn('棚卸し: まだ（aws-survey scan）', result.stdout)
-        self.assertIn('エージェント      Claude Code / Codex', result.stdout)
+        self.assertIn('－ 初期調査を済ませた  まだ', result.stdout)
+        self.assertIn('初期調査: まだ（aws-survey scan）', result.stdout)
+        self.assertIn('エージェント      未定（scan のときに選びます）', result.stdout)
         self.assertRegex(result.stdout, r'約 (19|20) 分 / 30 分')
         self.assertIn('一時キー          ~/.aws-survey/smoke', result.stdout)
         self.assertIn(f'対象フォルダ: {self.target}', result.stdout)
@@ -691,9 +729,9 @@ class Init(CliCase):
         self.assertEqual(json.loads((self.target / 'environment.json').read_text())['name'], 'keep')
 
     def test_interactive_defaults_come_from_profile_and_sts(self):
-        # IAM ユーザーのログイン: name, profile(2=sso-prof), account, mfa, region, duration, role の 7 問。
-        # 貸す相手（いまのログインの自分だけ）と refresh_command（aws-login）は聞かずに決まる
-        answers = ['', '2', '', '', '', '3600', '']
+        # IAM ユーザーのログイン: name, profile(2=sso-prof), mfa, region, duration, role の 6 問と、agent, model, effort の 3 問。
+        # account_id（ログインのアカウント）・貸す相手（いまのログインの自分だけ）・refresh_command（aws-login）は聞かずに決まる
+        answers = ['', '2', '', '', '3600', '', '', '', '']
         result = self.run_cli('init', input='\n'.join(answers) + '\n')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         config = json.loads((self.target / 'environment.json').read_text())
@@ -704,14 +742,21 @@ class Init(CliCase):
         self.assertEqual(config['auth']['mfa_required'], True)
         self.assertEqual(config['auth']['refresh_command'], 'aws-login --profile sso-prof')
         self.assertEqual(config['region'], 'ap-northeast-1')
-        for head in ('◆ name', '◆ source_profile', '◆ account_id', '◆ mfa_required', '◆ region', '◆ duration_seconds', '◆ role_name'):
-            self.assertIn(head, result.stdout)
-        self.assertIn('調査用ロールを貸す相手: 自分だけ（arn:aws:iam::000000000000:user/fake）', result.stdout)
-        self.assertIn('ロールを貸す相手', result.stdout.split('◆ 対象')[1])
-        self.assertIn('セッションの上限  1 時間', result.stdout.split('◆ 対象')[1])
-        self.assertIn('再ログイン        aws-login --profile sso-prof', result.stdout)
-        for gone in ('9 問', '準備して', '調べたい', '◆ principal_arn', '◆ refresh_command', 'Git で管理', '1/'):
+        # 決まった項目は「◆ 項目: 値」の 1 行（端末なら見出しと補足を消してこの 1 行だけが残る）
+        for line in ('◆ name: target', '◆ source_profile: sso-prof', '◆ account_id: 000000000000', '◆ mfa_required: true',
+                     '◆ region: ap-northeast-1', '◆ duration_seconds: 3600（1 時間）', '◆ role_name: aws-survey-readonly',
+                     '◆ エージェント: Claude Code', '◆ モデル: opus', '◆ effort: medium',
+                     '◆ 調査用ロールを貸す相手: 自分だけ（arn:aws:iam::000000000000:user/fake）',
+                     '◆ 再ログイン: aws-login --profile sso-prof'):
+            self.assertIn(line, result.stdout)
+        self.assertEqual(config['agent'], {'name': 'claude', 'model': 'opus', 'effort': 'medium'})
+        # account_id は聞かない（このログインのアカウント）。書き出しの報告と「対象」のまとめは出さない
+        for gone in ('9 問', '準備して', '調べたい', '◆ principal_arn', '◆ refresh_command', 'Git で管理', '1/', 'account_id (',
+                     '◆ 対象', '書き出しました', 'を用意しました', 'を置きました', '.gitignore に'):
             self.assertNotIn(gone, result.stdout)
+        # 端末でないのでログインは後回し。docker は呼ばない
+        self.assertIn('aws-survey login', result.stdout)
+        self.assertFalse(any(c[0] == 'docker' for c in self.calls()))
         self.assertIn('aws-survey role --create', result.stdout)
         sts = [c for c in self.calls() if 'get-caller-identity' in c]
         self.assertEqual(len(sts), 1)
@@ -719,9 +764,9 @@ class Init(CliCase):
         self.assertFalse(any('get-role' in c for c in self.calls()))
 
     def init_sso(self, **extra):
-        # Identity Center のログイン: name, profile(2=sso-prof), account, region, role の 5 問。
-        # 貸す相手は自分（セッション ARN）、MFA は false、duration は 1 時間に固定され、どれも聞かれない
-        answers = ['', '2', '', '', '']
+        # Identity Center のログイン: name, profile(2=sso-prof), region, role の 4 問と、agent, model, effort の 3 問。
+        # account_id はログインのアカウント、貸す相手は自分（セッション ARN）、MFA は false、duration は 1 時間に固定され、どれも聞かれない
+        answers = ['', '2', '', '', '', '', '']
         return self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_ARN=SSO_CALLER, **extra)
 
     def test_interactive_sso_asks_five_questions_and_fixes_the_rest(self):
@@ -732,7 +777,7 @@ class Init(CliCase):
             self.assertNotIn(gone, result.stdout)
         self.assertIn(f'調査用ロールを貸す相手: 自分だけ（{SSO_CALLER}）', result.stdout)
         # 借りたロールからのログインは 1 時間が上限（ロールチェーン）。まとめにセッションの制限時間として出す
-        self.assertIn('セッションの上限  1 時間（借りたロールからのログインは、AWS の決まりで 1 時間が上限）', result.stdout)
+        self.assertIn('◆ セッションの上限: 1 時間 （借りたロールからのログインは、AWS の決まりで 1 時間が上限）', result.stdout)
         config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['auth']['principal_arn'], SSO_CALLER)
         self.assertEqual(config['auth']['mfa_required'], False)
@@ -742,11 +787,13 @@ class Init(CliCase):
         self.assertFalse(any('get-role' in c for c in self.calls()))
 
     def test_interactive_asks_the_principal_only_when_the_login_cannot_be_read(self):
-        # ログインできていなければ、貸す相手と account_id は手で入れる（既定が無い）
-        answers = ['', '2', 'arn:aws:iam::000000000000:user/typed', '000000000000', '', '', '3600', '']
+        # ログインできていなければ、貸す相手と account_id は手で入れる（account_id の既定は ARN のアカウント）
+        answers = ['', '2', 'arn:aws:iam::000000000000:user/typed', '', '', '', '3600', '', '', '', '']
         result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_FAIL='1')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('ログインできていません', result.stdout)
+        self.assertIn('account_id [000000000000]', result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['account_id'], '000000000000')
         config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['auth']['principal_arn'], 'arn:aws:iam::000000000000:user/typed')
 
@@ -790,7 +837,7 @@ class Init(CliCase):
     def test_interactive_hides_base_profile_when_mfa_destination_exists(self):
         # 一覧に <名>-mfa があるとき、元の <名> は候補に出ず、番号は残った候補で振り直される
         profiles = 'fake-src\\nsso-prof\\nbase\\nbase-mfa'
-        answers = ['', 'base', '3', '', '', '', '3600', '']
+        answers = ['', 'base', '3', '', '', '3600', '', '', '', '']
         result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_PROFILES=profiles)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('base は <名>-mfa がある長期キー側なので省いています', result.stdout)
@@ -836,9 +883,14 @@ class Init(CliCase):
         os.write(fd, b'\x1b[B')
         time.sleep(0.5)
         os.write(fd, b'\r')
-        read_until('account_id'.encode())
-        for _ in range(5):                  # account, mfa, region, duration（メニュー）, role
-            read_until(b': ')
+        for marker in ('mfa_required (y/n)', 'region (ap-northeast-1)'):
+            read_until(marker.encode())
+            os.write(fd, b'\r')
+            time.sleep(0.3)
+        # duration・エージェント・モデル・effort は矢印キーのメニュー。Enter で既定
+        for marker in ('duration_seconds を選んでください', 'role_name (aws-survey-readonly)', 'エージェントを選んでください',
+                       'モデル を選んでください', 'effort を選んでください'):
+            read_until(marker.encode())
             os.write(fd, b'\r')
             time.sleep(0.3)
         read_until('次に打つコマンド'.encode())
@@ -850,42 +902,133 @@ class Init(CliCase):
         self.assertIn('\x1b[K', raw)
         text = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', raw)
         self.assertIn('❯ sso-prof', text)
-        self.assertIn('✔ source_profile: sso-prof', text)
-        self.assertIn('duration_seconds を選んでください', text)     # duration も矢印キーのメニュー。Enter で既定の 3 時間
-        self.assertIn('✔ duration_seconds: 10800（3 時間）', text)
-        self.assertIn('✔ name: target', text)
-        self.assertIn('◆ role_name', text)
         self.assertNotIn('name [', text)
+        # 決まった項目は 1 行に畳む。見出し・補足・入力行・メニューは画面から消え、各項目の 1 行だけが順に残る
+        screen = render_screen(raw)
+        expected = ['◆ name: target', '◆ source_profile: sso-prof', '◆ 調査用ロールを貸す相手: 自分だけ（arn:aws:iam::000000000000:user/fake）',
+                    '◆ account_id: 000000000000', '◆ mfa_required: true', '◆ region: ap-northeast-1', '◆ duration_seconds: 10800（3 時間）',
+                    '◆ role_name: aws-survey-readonly', '◆ エージェント: Claude Code', '◆ モデル: opus', '◆ effort: medium',
+                    '◆ MFA: ロールを借りるときに MFA 済みであることを求める', '◆ 再ログイン: aws-login --profile sso-prof']
+        marks = [line.strip() for line in screen if line.strip().startswith('◆ ') and ': ' in line]
+        self.assertEqual([m.split(' （')[0] for m in marks[:len(expected)]], expected, '\n'.join(screen))
+        for gone in ('❯', 'Enter 決定', '対象を表す短い英数字名', '  ◆ name\n', '  ◆ モデル\n'):
+            self.assertNotIn(gone, '\n'.join(screen) + '\n')
+        # effort のメニューは低い順に並び、カーソルは既定の medium に置かれる（Enter でそれが選ばれる）
+        self.assertIn('❯ medium', text)
+        self.assertLess(text.index('  low\n') if '  low\n' in text else text.index('  low'), text.index('❯ medium'))
+        # 端末で docker があるので、聞き取りの最後にエージェントのログインまで確かめる（偽の docker は認証済みと答える）
+        self.assertIn('Claude Code の認証は済んでいます', text)
+        checks = [c for c in self.calls() if c[0] == 'docker' and c[-4:] == ['claude', 'auth', 'status', '--json']]
+        self.assertEqual(len(checks), 1)
         config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['auth']['source_profile'], 'sso-prof')
 
     def test_duration_is_chosen_by_number_or_typed_in_seconds(self):
-        # name, profile(2=sso-prof), account, mfa, region, duration, role
-        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '', '4', '']) + '\n')
+        # name, profile(2=sso-prof), mfa, region, duration, role, agent, model, effort
+        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '4', '', '', '', '']) + '\n')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('1) 1 時間（3600 秒）', result.stdout)
         self.assertIn('4) 8 時間（28800 秒）', result.stdout)
         self.assertIn('duration_seconds: 28800（8 時間）', result.stdout)
         self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 28800)
         (self.target / 'environment.json').unlink()
-        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '', '5400', '']) + '\n')
+        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '5400', '', '', '', '']) + '\n')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('duration_seconds: 5400（90 分）', result.stdout)
         self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 5400)
         # 5 は番号でも秒でもない
         (self.target / 'environment.json').unlink()
-        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '', '5', '', '']) + '\n')
+        result = self.run_cli('init', input='\n'.join(['', '2', '', '', '5', '', '', '', '', '']) + '\n')
         self.assertIn('受け付けられない値', result.stdout)
         self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 10800)
 
     def test_interactive_retries_invalid_and_fails_on_eof(self):
-        answers = ['bad name!', 'ok-name', 'fake-src', '', '']          # region の前で入力が尽きる
+        answers = ['bad name!', 'ok-name', 'fake-src', '', '']          # duration の前で入力が尽きる
         result = self.run_cli('init', input='\n'.join(answers) + '\n')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('受け付けられない値', result.stdout)
         self.assertIn('入力が尽きました', result.stderr)
         self.assertIn('--from', result.stderr)
         self.assertFalse((self.target / 'environment.json').exists())
+
+    def test_noninteractive_agent_model_and_effort(self):
+        # エージェントは任意。渡せばモデル・effort は既定で埋まり、値は確かめる
+        result = self.run_cli('init', **INIT_ENV, AWS_SURVEY_INIT_AGENT='codex')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['agent'],
+                         {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
+        result = self.run_cli('init', '--force', **INIT_ENV, AWS_SURVEY_INIT_AGENT='claude', AWS_SURVEY_INIT_AGENT_MODEL='sonnet',
+                              AWS_SURVEY_INIT_AGENT_EFFORT='high')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['agent'],
+                         {'name': 'claude', 'model': 'sonnet', 'effort': 'high'})
+        result = self.run_cli('init', '--force', **INIT_ENV, AWS_SURVEY_INIT_AGENT='claude', AWS_SURVEY_INIT_AGENT_EFFORT='ultra')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('agent.effort', result.stderr)
+        result = self.run_cli('init', '--force', **INIT_ENV, AWS_SURVEY_INIT_AGENT_MODEL='opus')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('agent（claude か codex）も要ります', result.stderr)
+        src = self.base / 'from.json'
+        src.write_text(json.dumps({'name': 'j', 'account_id': '000000000000', 'region': 'us-east-1',
+                                   'auth': {'source_profile': 'fake-src', 'principal_arn': 'arn:aws:iam::000000000000:user/fake'},
+                                   'agent': {'name': 'codex', 'model': 'gpt-6-astra', 'effort': 'medium'}}))
+        result = self.run_cli('init', '--force', '--from', str(src))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['agent'],
+                         {'name': 'codex', 'model': 'gpt-6-astra', 'effort': 'medium'})
+
+    def test_noninteractive_warns_when_the_account_is_not_the_login_account(self):
+        # 別のアカウントを account_id にしても書けるが、ロールはログインのアカウントに作られるので ⚠（role が止める）
+        result = self.run_cli('init', **{**INIT_ENV, 'AWS_SURVEY_INIT_ACCOUNT_ID': '111111111111'})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ログインしているアカウント（000000000000）が違います', result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['account_id'], '111111111111')
+
+    def test_interactive_profiles_show_the_identity_center_account(self):
+        # AWS Organizations で複数のアカウントがあるとき、どのプロファイルがどのアカウントに入るかを候補に添える（AWS は叩かない）。
+        # 調べるアカウントは選んだプロファイルのログインのアカウントで、別に聞かない
+        answers = ['', '2', '', '', '', '', '']
+        result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_ARN=SSO_CALLER, FAKE_SSO_ACCOUNT='000000000000')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(' 1) fake-src\n', result.stdout)
+        self.assertIn(' 2) sso-prof  （アカウント 000000000000）', result.stdout)
+        self.assertIn('◆ account_id: 000000000000', result.stdout)
+        self.assertIn('別のアカウントを調べるには', result.stdout)
+        self.assertNotIn('account_id [', result.stdout)
+        self.assertNotIn('account_id (', result.stdout)
+        self.assertFalse(any('organizations' in c for c in self.calls()))
+        self.assertTrue(all(c[1] == 'configure' or 'get-caller-identity' in c for c in self.calls() if c[0] == 'aws'))
+
+    def test_interactive_picks_the_agent_by_number_or_name(self):
+        # name, profile, region, role（Identity Center）, agent=2, model=名前, effort=3
+        answers = ['', '2', '', '', '2', 'gpt-5.5', '3']
+        result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_ARN=SSO_CALLER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('  1) Claude Code（claude）', result.stdout)
+        self.assertIn('  1) gpt-5.6-sol', result.stdout)
+        self.assertIn('  1) low', result.stdout)
+        for line in ('◆ エージェント: Codex', '◆ モデル: gpt-5.5', '◆ effort: high'):
+            self.assertIn(line, result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['agent'],
+                         {'name': 'codex', 'model': 'gpt-5.5', 'effort': 'high'})
+        # 候補に無いモデルは名前で、効かない effort は受け付けない
+        (self.target / 'environment.json').unlink()
+        answers = ['', '2', '', '', 'codex', 'my model', 'gpt-x', 'ultra', '2']
+        result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_ARN=SSO_CALLER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count('受け付けられない値'), 2)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['agent'],
+                         {'name': 'codex', 'model': 'gpt-x', 'effort': 'medium'})
+        # effort は低い順に並び、既定（Claude Code は medium）は番号の既定で示す。Enter で既定
+        (self.target / 'environment.json').unlink()
+        answers = ['', '2', '', '', '1', '', '']
+        result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_CALLER_ARN=SSO_CALLER)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('  1) low\n', result.stdout)
+        self.assertIn('  2) medium\n', result.stdout)
+        self.assertIn('effort（番号か名前） [2]:', result.stdout)
+        self.assertIn('モデル（番号か名前） [1]:', result.stdout)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['agent']['effort'], 'medium')
 
     def test_init_in_home_itself_does_not_touch_home_agents(self):
         # A stand-in for the installed body: libexec/ is the real one, AGENTS.md is the body's own.
@@ -927,6 +1070,23 @@ class Role(CliCase):
         self.assertIn('ロールは用意できています', result.stdout)
         self.assertIn('aws-survey credentials', result.stdout)
         self.assertNotIn('role --create', result.stdout)
+
+    def test_another_account_stops_the_own_role_route(self):
+        # ロールはログインのアカウントに作られる。account_id が別なら、自分で作る経路では止まり、借りる経路では ⚠ だけ
+        self.write_environment()
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['account_id'] = '111111111111'
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_cli('role')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('ログインしているアカウント（000000000000）と、調べるアカウント（environment.json の account_id: 111111111111）が違います', result.stdout)
+        self.assertIn('アカウントが一致しません', result.stderr)
+        self.assertFalse(any('get-role' in c for c in self.calls()))
+        config['auth']['route'] = 'granted_role'
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_cli('role')
+        self.assertIn('⚠ ログインしているアカウント（000000000000）と、調べるアカウント（111111111111）が違います', result.stdout)
+        self.assertTrue(any('get-role' in c for c in self.calls()))
 
     def use_principal(self, principal, mfa=None):
         # Identity Center のログインは MFA の条件を満たせないので、既定では mfa_required を false にする

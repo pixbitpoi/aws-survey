@@ -52,7 +52,7 @@ if cmd[:3] == ["codex", "login", "--device-auth"] or cmd[:3] == ["claude", "auth
     print("logged in"); sys.exit(0)
 if cmd[:2] == ["sh", "-c"] and "hasTrustDialogAccepted" in cmd[2]:
     state["trusted"] = True; save(); sys.exit(0)
-if cmd[:2] == ["claude", "-p"] or cmd[:2] == ["codex", "exec"]:
+if (cmd[0] == "claude" and "-p" in cmd) or (cmd[0] == "codex" and "exec" in cmd):
     assert "-it" not in argv and "-t" not in argv, "scan must not allocate a terminal"
     if cmd[0] == "claude":
         assert state.get("trusted"), "claude -p needs the workspace trusted first, or the allow list is ignored"
@@ -83,6 +83,7 @@ class ScanCase(test_cli.CliCase, PtyMixin):
         self.state_file.write_text('{}')
 
     def ready(self, minutes=45, setup=None, agent=None):
+        # agent は古い形（文字列。名前だけ）でも {name, model, effort} でも渡せる
         self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08',
                                       'readonly_verified': '2026-09-08', **(setup or {})})
         if agent:
@@ -133,11 +134,37 @@ class Scan(ScanCase):
             self.assertIn(mount, launch)
         self.assertIn('SURVEY_PHASE_DIR=01_基礎調査', launch)
         image = launch.index('smoke:latest')
-        self.assertEqual(launch[image + 1:image + 3], ['claude', '-p'])
-        self.assertEqual(launch[image + 4:], ['--output-format', 'text'])
+        # モデルと effort は environment.json の agent から（未定なら既定の opus / medium）
+        self.assertEqual(launch[image + 1:image + 7], ['claude', '--model', 'opus', '--effort', 'medium', '-p'])
+        self.assertEqual(launch[image + 8:], ['--output-format', 'text'])
         self.assertIn('inventory in progress', result.stdout)           # the agent's output is streamed
-        self.assertIn('棚卸しを終えました（生データ 2 件', result.stdout)
+        self.assertIn('初期調査を終えました（生データ 2 件', result.stdout)
         self.assertIn('aws-survey claude', result.stdout)               # the next step is the conversation
+
+    def test_the_recorded_model_and_effort_are_passed_as_flags(self):
+        self.ready(agent={'name': 'claude', 'model': 'sonnet', 'effort': 'high'})
+        self.authed('claude')
+        result = self.run_cli('scan')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        launch = self.agent_run()
+        image = launch.index('smoke:latest')
+        self.assertEqual(launch[image + 1:image + 7], ['claude', '--model', 'sonnet', '--effort', 'high', '-p'])
+        self.assertIn('エージェント: Claude Code（sonnet / high）', result.stdout)
+        self.assertEqual(self.environment()['agent'], {'name': 'claude', 'model': 'sonnet', 'effort': 'high'})
+        # 別のエージェントに切り替えると、そのエージェントの既定に戻る（前の値は渡せない）
+        self.authed('claude', 'codex')
+        result = self.run_cli('scan', '--agent', 'codex')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.environment()['agent'], {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
+        self.assertIn('model_reasoning_effort=low', self.agent_run())
+
+    def test_a_bad_effort_in_environment_is_refused_before_docker(self):
+        self.ready(agent={'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'max'})
+        self.authed('codex')
+        result = self.run_cli('scan')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('agent.effort', result.stderr)
+        self.assertFalse(any(c[0] == 'docker' for c in self.calls()))
 
     def test_the_instruction_hands_over_no_survey_items(self):
         self.ready()
@@ -157,9 +184,9 @@ class Scan(ScanCase):
         result = self.run_cli('scan', '--agent', 'codex')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         launch = self.agent_run()
-        self.assertEqual(launch[launch.index('codex'):launch.index('codex') + 5],
-                         ['codex', 'exec', '--skip-git-repo-check', '--color', 'never'])
-        self.assertEqual(self.environment()['agent'], 'codex')
+        self.assertEqual(launch[launch.index('codex'):launch.index('codex') + 9],
+                         ['codex', '-m', 'gpt-5.6-sol', '-c', 'model_reasoning_effort=low', 'exec', '--skip-git-repo-check', '--color', 'never'])
+        self.assertEqual(self.environment()['agent'], {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
         self.assertIn('aws-survey codex', result.stdout)
         self.log.unlink()
         result = self.run_cli('scan')                                   # no --agent: the remembered one
@@ -176,7 +203,7 @@ class Scan(ScanCase):
         result = self.run_cli('scan', '--agent', 'claude')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('-p', self.agent_run())
-        self.assertEqual(self.environment()['agent'], 'claude')
+        self.assertEqual(self.environment()['agent']['name'], 'claude')
 
     def test_without_a_recorded_agent_off_a_terminal_it_stops_naming_the_flag(self):
         self.ready()
@@ -184,22 +211,22 @@ class Scan(ScanCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('aws-survey scan --agent claude', result.stdout)
         self.assertFalse(any(c[0] == 'docker' for c in self.calls()))
-        self.assertIsNone(self.environment()['agent'])
+        self.assertIsNone(self.environment()['agent']['name'])
 
     def test_on_a_terminal_the_agent_is_chosen_with_arrow_keys(self):
         self.ready()
         self.authed('codex')
         code, text = self.drive(['scan'], [('エージェントを選んでください', b'\x1b[B\r')])
         self.assertEqual(code, 0, text)
-        self.assertIn('エージェント: Codex', text)
-        self.assertEqual(self.environment()['agent'], 'codex')
+        self.assertIn('エージェント: Codex（gpt-5.6-sol / low）', text)
+        self.assertEqual(self.environment()['agent']['name'], 'codex')
         self.assertIn('exec', self.agent_run())
 
     def test_unauthenticated_off_a_terminal_stops_before_the_agent(self):
         self.ready(agent='claude')
         result = self.run_cli('scan')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('aws-survey claude', result.stdout + result.stderr)
+        self.assertIn('aws-survey login', result.stdout + result.stderr)
         self.assertIsNone(self.agent_run())
         self.assertIsNone(self.environment()['setup']['scanned'])
 
@@ -308,6 +335,55 @@ class Scan(ScanCase):
         self.assertFalse((self.target / 'out/_環境/scan.log').exists())
 
 
+class Login(ScanCase):
+    """`aws-survey login` settles the agent's login on its own (init calls it last), with no key and no survey mounts."""
+
+    def test_authenticated_off_a_terminal_reports_and_needs_no_key(self):
+        self.write_environment()                                        # 一時キーも到達点も無い
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['agent'] = {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'}
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        self.authed('codex')
+        result = self.run_cli('login')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Codex の認証は済んでいます', result.stdout)
+        self.assertIn('エージェント      Codex（gpt-5.6-sol / low）', result.stdout)
+        for c in self.docker_runs():
+            self.assertFalse(any('.aws-claude' in a or 'aws-survey/out' in a for a in c))
+        self.assertIsNone(self.agent_run())
+
+    def test_unauthenticated_off_a_terminal_names_login(self):
+        self.ready(agent='claude')
+        result = self.run_cli('login')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('aws-survey login', result.stdout)
+        self.assertFalse(any(any('hasTrustDialogAccepted' in a for a in c) for c in self.docker_runs()))
+
+    def test_unauthenticated_on_a_terminal_logs_in_and_trusts(self):
+        self.ready(agent='claude')
+        code, text = self.drive(['login'], [])
+        self.assertEqual(code, 0, text)
+        self.assertIn('Claude Code にログインしました', text)
+        runs = self.docker_runs()
+        login = next(c for c in runs if c[-3:] == ['claude', 'auth', 'login'])
+        self.assertIn('-it', login)
+        self.assertTrue(any(any('hasTrustDialogAccepted' in a for a in c) for c in runs))
+
+    def test_a_named_agent_replaces_the_memory(self):
+        self.ready(agent='claude')
+        self.authed('codex')
+        result = self.run_cli('login', 'codex')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.environment()['agent'], {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
+
+    def test_without_an_agent_it_names_the_choice(self):
+        self.ready()
+        result = self.run_cli('login')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('aws-survey login claude', result.stdout)
+        self.assertFalse(any(c[0] == 'docker' for c in self.calls()))
+
+
 class InteractiveAgent(ScanCase):
     def test_claude_dispatches_to_run_with_the_agent_and_records_it(self):
         self.ready()
@@ -316,17 +392,17 @@ class InteractiveAgent(ScanCase):
         launch = self.docker_runs()[-1]
         self.assertIn('-it', launch)
         self.assertEqual(launch[launch.index('--name') + 1], 'smoke')
-        self.assertEqual(launch[-3:], ['smoke:latest', 'claude', '-c'])
+        self.assertEqual(launch[-7:], ['smoke:latest', 'claude', '--model', 'opus', '--effort', 'medium', '-c'])
         self.assertIn(f'{self.target}/out:/home/node/aws-survey/out', launch)
-        self.assertEqual(self.environment()['agent'], 'claude')
+        self.assertEqual(self.environment()['agent'], {'name': 'claude', 'model': 'opus', 'effort': 'medium'})
         self.assertIn('◆ aws-survey claude', text)
 
     def test_codex_replaces_the_remembered_agent(self):
         self.ready(agent='claude')
         code, text = self.drive(['codex'], [])
         self.assertEqual(code, 0, text)
-        self.assertEqual(self.docker_runs()[-1][-2:], ['smoke:latest', 'codex'])
-        self.assertEqual(self.environment()['agent'], 'codex')
+        self.assertEqual(self.docker_runs()[-1][-6:], ['smoke:latest', 'codex', '-m', 'gpt-5.6-sol', '-c', 'model_reasoning_effort=low'])
+        self.assertEqual(self.environment()['agent'], {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
 
     def test_off_a_terminal_it_stops(self):
         self.ready()

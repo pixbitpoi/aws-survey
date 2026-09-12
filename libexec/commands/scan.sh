@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 調査コンテナでエージェントを非対話で 1 回走らせ、白紙の棚卸しだけを行わせる（ホストで実行）
-#   aws-survey scan                    記録してあるエージェント（初回は矢印キーで選ぶ）で棚卸しを行う
+# 調査コンテナでエージェントを非対話で 1 回走らせ、対象アカウントの初期調査（白紙の棚卸し）だけを行わせる（ホストで実行）
+#   aws-survey scan                    記録してあるエージェント（未定なら矢印キーで選ぶ）で初期調査を行う
 #   aws-survey scan --agent codex      エージェントを指定する（記録も更新する）
 # 実体は libexec/commands/scan.sh。通常は aws-survey 経由で呼ぶ。
 #
@@ -8,13 +8,13 @@
 # 残して終わる。目的の聞き取りと深掘りはしない（それは aws-survey claude / codex で対話して進める）。
 # ホストから渡す指示は「棚卸しだけ・ユーザーに聞かずに終える」に限る。対象の概要・調査項目・サービス名は渡さない
 # （AGENTS.md「ホストと調査コンテナ」。白紙で棚卸しさせる設計は、先に教えると発見ではなく確認になるため）。
-# Claude / Codex の認証はコンテナ内のボリュームに残る。無ければ先に対話でログインだけ済ませ（claude auth login / codex login --device-auth）、
-# そのあと非対話で続ける。Claude はさらにワークスペースの信頼を記録する（未信頼だと -p で settings.json の許可が無視される）。
+# Claude / Codex の認証はコンテナ内のボリュームに残る。無ければ先に対話でログインだけ済ませ（launch.sh の launch_agent_login。
+# 通常は init が済ませている）、そのあと非対話で続ける。モデルと effort は environment.json の agent から渡す（libexec/agents.sh）。
 set -euo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
 . "$LIBEXEC_DIR/container.sh"
-. "$LIBEXEC_DIR/launch.sh"
+. "$LIBEXEC_DIR/launch.sh"   # container.sh が docker.sh を読む
 . "$LIBEXEC_DIR/menu.sh"
 
 AGENT_OPT=""
@@ -48,7 +48,7 @@ scan_progress() {
     n=$(find "$OUT_DIR" -type f -newer "$dir/keep" 2>/dev/null | wc -l | tr -d ' ')
     last=$(find "$OUT_DIR" -type f -newer "$dir/keep" -exec ls -t {} + 2>/dev/null | head -n 1)
     last=${last#"$OUT_DIR/"}
-    msg="棚卸し中  経過 $(ui_duration "$el")  out/ に書いた記録 ${n:-0} 件${last:+  最新 ${last}}"
+    msg="初期調査中  経過 $(ui_duration "$el")  out/ に書いた記録 ${n:-0} 件${last:+  最新 ${last}}"
     printf '%s' "$msg" > "$dir/msg.tmp" && mv -f "$dir/msg.tmp" "$dir/msg"
     sleep 1
   done
@@ -95,12 +95,13 @@ if [ -z "$AGENT" ]; then
     case "$pick" in Codex*) AGENT=codex ;; *) AGENT=claude ;; esac
   else
     ui_err "調査に使うエージェントがまだ決まっていません"
-    next_cmd "$AWS_SURVEY_CMD scan --agent claude" "Claude Code で棚卸しを行います（--agent codex なら Codex）"
+    next_cmd "$AWS_SURVEY_CMD scan --agent claude" "Claude Code で初期調査を行います（--agent codex なら Codex）"
     exit 1
   fi
 fi
 env_set_agent "$AGENT"
-ui_ok "エージェント: $(agent_label "$AGENT")"
+launch_agent_flags "$AGENT"
+ui_ok "エージェント: $(agent_summary "$AGENT" "$SURVEY_AGENT_MODEL" "$SURVEY_AGENT_EFFORT")"
 
 # ---- 3. 同じ out/ に向いたコンテナが動いていないか ----
 command -v docker >/dev/null || ui_die "docker コマンドが見つかりません。Docker Desktop を導入して起動してください。"
@@ -110,41 +111,15 @@ for n in "$SURVEY_NAME" "${SURVEY_NAME}-scan"; do
   fi
 done
 
-# ---- 4. イメージとボリューム ----
-docker_check_shared "$AWS_SURVEY_HOME" "$AWS_SURVEY_DIR" "$AWS_DIR" || exit 1
-docker_awsarch
-ui_head "1/3 コンテナのイメージを用意する（$IMAGE, ${awsarch}）"
-docker image inspect "$IMAGE" >/dev/null 2>&1 || ui_text "初回は数分かかります。2 回目からは差分だけです。"
-build_image
+# ---- 4. イメージ・ボリューム・認証（launch.sh） ----
+docker_check_shared "$AWS_DIR" || exit 1
 launch_prepare_dirs
-launch_prepare_volumes
-ui_ok "用意できました"
-echo ""
-
-# ---- 5. 認証 ----
-ui_head "2/3 $(agent_label "$AGENT") の認証を確かめる"
-if launch_agent_authenticated "$AGENT"; then
-  ui_ok "認証は済んでいます"
-else
-  on_terminal || ui_die "$(agent_label "$AGENT") のログインがまだです。端末で $AWS_SURVEY_CMD $AGENT を一度起動してログインしてください。"
-  ui_warn "$(agent_label "$AGENT") のログインがまだです。先にログインだけ済ませます（この対象では初回だけ）"
-  ui_text "画面の案内に従ってログインしてください。終わると棚卸しに進みます。"
-  echo ""
-  case "$AGENT" in
-    codex)  launch_agent_cli -it --name "${SURVEY_NAME}-login" -- codex login --device-auth || true ;;
-    claude) launch_agent_cli -it --name "${SURVEY_NAME}-login" -- claude auth login || true ;;
-  esac
-  echo ""
-  launch_agent_authenticated "$AGENT" || ui_die "ログインを確かめられませんでした。$AWS_SURVEY_CMD $AGENT で起動して、ログインできているか見てください。"
-  ui_ok "ログインしました"
-fi
-# 非対話の claude -p でも作業ディレクトリの許可とフックが効くように、ワークスペースの信頼を記録しておく（launch.sh）
-[ "$AGENT" != claude ] || launch_trust_workspace || ui_die "ワークスペースの信頼を記録できませんでした。"
+launch_agent_login "$AGENT" || exit 1
 echo ""
 
 # ---- 6. 実行 ----
-ui_head "3/3 白紙の棚卸しを行わせる（$(agent_label "$AGENT")）"
-ui_text "ユーザーへの質問はせず、見つけたものと聞きたいことを out/ に残して終わります。数分から数十分かかります。"
+ui_head "初期調査を行わせる（$(agent_label "$AGENT")）"
+ui_text "ユーザーへの質問はせず、見つけたものと聞きたいことを out/ に残して終わります。インフラ構成の複雑さによっては数十分かかります。"
 ui_text "止めるときは Ctrl-C（もう一度 $AWS_SURVEY_CMD scan で最初からになります）。"
 echo ""
 # 出力は画面に流しつつ、失敗の原因（ログイン切れなど）を読むために一時ファイルにも残す。out/ には書かない（out/ は調査エージェントの領分）
@@ -152,15 +127,15 @@ SCAN_LOG=$(mktemp) || ui_die "一時ファイルを作れません。"
 trap 'rm -f "$SCAN_LOG"' EXIT
 agent_cmd() {
   case "$AGENT" in
-    claude) launch_run --name "${SURVEY_NAME}-scan" -- claude -p "$SCAN_PROMPT" --output-format text ;;
-    codex)  launch_run --name "${SURVEY_NAME}-scan" -- codex exec --skip-git-repo-check --color never "$SCAN_PROMPT" ;;
+    claude) launch_run --name "${SURVEY_NAME}-scan" -- claude "${AGENT_FLAGS[@]}" -p "$SCAN_PROMPT" --output-format text ;;
+    codex)  launch_run --name "${SURVEY_NAME}-scan" -- codex "${AGENT_FLAGS[@]}" exec --skip-git-repo-check --color never "$SCAN_PROMPT" ;;
   esac
 }
 status=0
 if on_terminal; then
   # 端末では回転する印と進み具合を 1 行に出し続け、エージェントの出力はその上に流す
   SPIN_DIR=$(mktemp -d) || ui_die "一時ディレクトリを作れません。"
-  : > "$SPIN_DIR/keep"; printf '%s' "棚卸しを始めています" > "$SPIN_DIR/msg"
+  : > "$SPIN_DIR/keep"; printf '%s' "初期調査を始めています" > "$SPIN_DIR/msg"
   ui_spin_loop "$SPIN_DIR" &
   spid=$!
   scan_progress "$SPIN_DIR" &
@@ -177,7 +152,7 @@ echo ""
 launch_record_verified
 
 if [ "$status" -ne 0 ]; then
-  ui_err "棚卸しが途中で終わりました（終了コード ${status}）"
+  ui_err "初期調査が途中で終わりました（終了コード ${status}）"
   if grep -qiE 'not logged in|log ?in|unauthorized|authentication' "$SCAN_LOG" 2>/dev/null; then
     ui_text "ログインが切れているようです。$(ui_cmd "$AWS_SURVEY_CMD $AGENT") で起動して入り直してから、もう一度 $AWS_SURVEY_CMD scan を実行してください。"
   else
@@ -188,7 +163,7 @@ fi
 
 raw_count=0
 for f in "$OUT_DIR/$SURVEY_PHASE_DIR"/raw/raw-*; do [ -f "$f" ] && raw_count=$((raw_count + 1)); done
-env_mark_setup scanned "白紙の棚卸しを済ませた" "$(date '+%FT%H:%M%z')"
-ui_ok "棚卸しを終えました（生データ ${raw_count} 件: out/$SURVEY_PHASE_DIR/raw/）"
+env_mark_setup scanned "初期調査を済ませた" "$(date '+%FT%H:%M%z')"
+ui_ok "初期調査を終えました（生データ ${raw_count} 件: out/$SURVEY_PHASE_DIR/raw/）"
 echo ""
-next_cmd "$AWS_SURVEY_CMD $AGENT" "棚卸しを手に、何を明らかにしたいかを中で決めて調査を進めます"
+next_cmd "$AWS_SURVEY_CMD $AGENT" "初期調査の結果を手に、何を明らかにしたいかを中で決めて調査を進めます"

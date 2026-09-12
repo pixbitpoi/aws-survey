@@ -14,9 +14,11 @@
 #   aws-survey verify               読み取り専用の検証（libexec/commands/verify.sh）
 #   aws-survey ls [サービス名...]   アカウントで使っているリソースの一覧（libexec/commands/ls.sh。調査コンテナの中で
 #                                   一時キーが読む。画面に出すだけで out/ には書かない）
+#   aws-survey login [claude|codex] エージェントのログインを済ませる（libexec/commands/login.sh。init が最後に呼ぶ。認証は
+#                                   コンテナ内のボリュームに残るので、対象ごとに初回だけ）
 #   aws-survey scan [--agent claude|codex]
-#                                   調査コンテナでエージェントを非対話で 1 回走らせ、白紙の棚卸しだけを行わせる
-#                                   （libexec/commands/scan.sh。待つだけ。初回はエージェントを選び、そのログインを求められる）
+#                                   調査コンテナでエージェントを非対話で 1 回走らせ、対象アカウントの初期調査（白紙の棚卸し）だけを
+#                                   行わせる（libexec/commands/scan.sh。待つだけ。構成の複雑さによっては数十分かかる）
 #   aws-survey claude [引数...]     調査コンテナで Claude Code を対話で起動する（libexec/commands/agent.sh。-c で続き）
 #   aws-survey codex [引数...]      同じく Codex（resume --last で続き）
 #   aws-survey run [cmd]            調査コンテナの素のシェルに入る（libexec/commands/run.sh。通常は使わない）
@@ -39,8 +41,9 @@
 #
 #   共通オプション:  --dir <対象フォルダ>   既定はカレントディレクトリ（AWS_SURVEY_DIR でも指定可）
 #
-#   init が聞くのは AWS への繋ぎ方だけ（name / source_profile / account_id / region / role_name。IAM ユーザーのログインでは
-#   mfa_required と duration_seconds も）。貸す相手は自分だけ、refresh_command は aws-login に固定する。対象の概要・調査項目は聞かない。
+#   init が聞くのは AWS への繋ぎ方（name / source_profile / region / role_name。IAM ユーザーのログインでは mfa_required と
+#   duration_seconds も）と、調査に使うエージェント（claude / codex とモデル・effort）。account_id と貸す相手はいまのログインから決め、
+#   refresh_command は aws-login に固定する。対象の概要・調査項目は聞かない。
 #
 # 本体（AWS_SURVEY_HOME）はこのファイルの実体パス（シンボリックリンク解決後）の親。環境変数で上書き可。
 # 対象固有の値は対象フォルダの environment.json が持つ。ここには書かない。
@@ -218,6 +221,7 @@ init_guidance() { next_cmd "$CMD_NAME init" "AWS への繋ぎ方を聞いて env
 
 # ---- 表示 ----
 . "$LIBEXEC_DIR/ui.sh"
+. "$LIBEXEC_DIR/agents.sh"
 . "$LIBEXEC_DIR/keys.sh"
 . "$LIBEXEC_DIR/menu.sh"
 
@@ -328,7 +332,7 @@ cmd_guide() {
   esac
   STAGE_DONE[4]="残り約 ${KEY_LEFT_MIN} 分 / ${KEY_TOTAL_MIN} 分${KEY_NOTE}（期限 ${KEY_EXP}）"
 
-  # 段階 5（初期調査）は scan で白紙の棚卸しを済ませたか。対話で始めていれば（out/00_進捗.md あり）済んだ扱いで 6 へ
+  # 段階 5（初期調査）は scan で初期調査（白紙の棚卸し）を済ませたか。対話で始めていれば（out/00_進捗.md あり）済んだ扱いで 6 へ
   local cur=5
   if scan_done; then
     cur=6; STAGE_DONE[5]="済（$(setup_value scanned)）"
@@ -347,23 +351,28 @@ cmd_guide() {
   fi
 
   if [ "$cur" -eq 5 ]; then
-    show_track 5 "初期調査: 未実施。白紙の棚卸しをエージェントに 1 回で行わせます（ユーザーには聞きません）"
+    show_track 5 "初期調査: 未実施。$(agent_label "${SURVEY_AGENT:-}") が非対話で 1 回行います（ユーザーには聞きません）"
   elif survey_started; then
     show_track 6 "調査: 開始済み（out/00_進捗.md あり）。続きはコンテナ内の台帳に従います"
   else
-    show_track 6 "調査: 棚卸し済み。何を明らかにしたいかは、コンテナ内でユーザーと決めます"
+    show_track 6 "調査: 初期調査済み。何を明らかにしたいかは、コンテナ内でユーザーと決めます"
   fi
   show_extras
   guide_ready
 }
 
 # 準備が終わったあとの案内。ここから先は自動では実行しない（scan は時間がかかり、claude / codex は端末を渡す）
-# 順は ls（何があるか）→ scan（棚卸し）→ claude / codex（対話）。run（素のシェル）は出さない。
+# 順は scan（初期調査）→ claude / codex（対話）→ ls。run（素のシェル）は出さない。対象のまとめ（init のあと）もここに出す
 guide_ready() {
   local agent="${SURVEY_AGENT:-}"
-  ui_head "準備完了。次はこの順で進めます"
+  ui_head "準備完了"
+  ui_kv "対象" "${SURVEY_NAME}（アカウント ${ACCOUNT_ID} / ${REGION}）"
+  ui_kv "ロール" "${ROLE_NAME}（$(route_label "${AUTH_ROUTE:-}")）"
+  ui_kv "エージェント" "$([ -n "$agent" ] && agent_summary "$agent" "$SURVEY_AGENT_MODEL" "$SURVEY_AGENT_EFFORT" || echo "未定（scan のときに選びます）")"
+  echo ""
+  ui_head "次はこの順で進めます"
   if ! scan_done; then
-    also_cmd "$CMD_NAME scan" "まず、白紙の棚卸しをエージェントに 1 回で行わせます（非対話。待つだけ。初回はエージェントを選びます）"
+    also_cmd "$CMD_NAME scan" "$(scan_desc "$agent")"
   fi
   if [ -n "$agent" ]; then
     also_cmd "$CMD_NAME $agent" "$(agent_label "$agent") と対話で調査を進めます"
@@ -376,7 +385,7 @@ guide_ready() {
     also_cmd "$CMD_NAME codex" "Codex と対話で調査を進めます"
   fi
   if scan_done; then
-    also_cmd "$CMD_NAME scan" "白紙の棚卸しをやり直します（$(agent_label "$agent") が非対話で。待つだけ）"
+    also_cmd "$CMD_NAME scan" "初期調査をやり直します（$(agent_label "$agent") が非対話で。待つだけ）"
   fi
   also_cmd "$CMD_NAME ls" "任意。アカウントで使っているリソースの一覧を眺めます（読むだけで、out/ には書きません）"
 }
@@ -501,12 +510,16 @@ cmd_guide_loop() {
 }
 
 # ---- init ----
-# 聞くのは AWS への繋ぎ方だけ。name / source_profile / account_id / region / role_name の 5 つと、IAM ユーザーのログインでは
-# mfa_required / duration_seconds。貸す相手（principal_arn）はいまのログイン（自分だけ）、refresh_command は aws-login に固定し、
-# auth.route・phase_dir・ssh（EC2 の中を調べる任意機能）も聞かずに既定を書く。非対話（--from / AWS_SURVEY_INIT_*）ではどれも渡せる。
-# 対話・非対話のどちらでも、検証（init_validate）と書き出し（init_write）は同じ経路を通る。
+# 聞くのは AWS への繋ぎ方と、調査に使うエージェントだけ。name / source_profile / region / role_name の 4 つと、IAM ユーザーのログインでは
+# mfa_required / duration_seconds、そのあとエージェント（claude / codex）とモデル・effort。
+# account_id はいまのログインのアカウント（読めなければ手で入れる）、貸す相手（principal_arn）はいまのログイン（自分だけ）、
+# refresh_command は aws-login に固定し、auth.route・phase_dir・ssh（EC2 の中を調べる任意機能）も聞かずに既定を書く。
+# 非対話（--from / AWS_SURVEY_INIT_*）ではどれも渡せる。対話・非対話のどちらでも、検証（init_validate）と書き出し（init_write）は同じ経路を通る。
+# 書き出したあと、端末で docker があればエージェントのログインまで済ませる（libexec/commands/login.sh）。
+# 画面は、決まった項目を「◆ 項目: 値」の 1 行に畳む（init_begin / init_done。端末のときだけ消す）。
 INIT_FROM=""; INIT_FORCE=0
 I_NAME=""; I_PROFILE=""; I_ARN=""; I_ACCOUNT=""; I_MFA=""; I_REFRESH=""; I_REGION=""; I_DURATION=""; I_ROLE=""
+I_AGENT=""; I_MODEL=""; I_EFFORT=""
 
 init_die() { ui_die "$@"; }
 
@@ -523,11 +536,15 @@ to_bool() {
     y|yes|true|1) echo true ;; n|no|false|0) echo false ;; *) echo "" ;;
   esac
 }
+# ARN のアカウント ID
+arn_account() { printf '%s' "$1" | cut -d: -f5; }
 
 # ローカルの ~/.aws/config を読むだけ。AWS には繋がない
-profile_list()   { aws configure list-profiles 2>/dev/null; }
-profile_exists() { profile_list | grep -qx -- "$1"; }
-profile_region() { aws configure get region --profile "$1" 2>/dev/null; }
+profile_list()    { aws configure list-profiles 2>/dev/null; }
+profile_exists()  { profile_list | grep -qx -- "$1"; }
+profile_region()  { aws configure get region --profile "$1" 2>/dev/null; }
+# Identity Center のプロファイルなら、そのアカウント ID（sso_account_id）。無ければ空
+profile_account() { aws configure get sso_account_id --profile "$1" 2>/dev/null; }
 
 # refresh_command の既定。aws-login は formula の依存なので、在る前提で出す（docs/release.md「依存」）。
 # MFA か SSO かは aws-login が設定から判定するので、ここでは分けない。
@@ -552,43 +569,71 @@ profile_split() {
 profile_candidates() { profile_split candidates; }
 profile_hidden()     { profile_split hidden; }
 
+# ---- 1 行に畳む表示 ----
+# 質問は「◆ 見出し」「補足」「❯ 入力」の形で出し、決まったら全部消して「◆ 項目: 値」の 1 行にする（端末のときだけ消す。
+# 端末でなければ見出し・補足はそのまま残り、最後に 1 行が足される）。INIT_LINES は init_begin から数えた画面の行数。
+INIT_LINES=0
+init_begin() {
+  local t
+  if [ "$UI_TTY" = 1 ]; then INIT_LINES=1; else INIT_LINES=0; fi
+  echo ""
+  ui_head "$1"; INIT_LINES=$((INIT_LINES + 1)); shift
+  for t in "$@"; do ui_text "$t"; INIT_LINES=$((INIT_LINES + 1)); done
+}
+init_note() { ui_text "$1"; INIT_LINES=$((INIT_LINES + 1)); }
+init_warn() { ui_warn "$1"; INIT_LINES=$((INIT_LINES + 1)); }
+# 決まった 1 行。init_done <項目> <値> [<薄く添える補足>]
+init_done() {
+  [ "$INIT_LINES" -eq 0 ] || ui_erase "$INIT_LINES"
+  INIT_LINES=0
+  printf '  %s◆ %s:%s %s%s\n' "$C_BOLD" "$1" "$C_RESET" "$2" "${3:+ ${C_DIM}$3${C_RESET}}"
+}
+# 聞かずに決まった項目（端末でなくても同じ 1 行）
+init_fixed() { INIT_LINES=0; init_done "$@"; }
+
 # 候補から 1 つ選んで I_PROFILE に入れる。端末なら矢印キーのメニュー、端末でなければ番号か名前の入力。
+# Identity Center のプロファイルにはアカウント ID を添える（AWS Organizations で複数のアカウントがあるとき、どれに入るかが見えるように）
 choose_profile() {
-  local profiles="$1" n=0 i sel hidden
-  local -a entries=()
+  local profiles="$1" n=0 i sel hidden acct
+  local -a entries=() labels=()
   while IFS= read -r i; do [ -n "$i" ] && entries+=("$i"); done <<< "$profiles"
   n=${#entries[@]}
+  for i in "${entries[@]}"; do
+    acct=$(profile_account "$i")
+    labels+=("${i}${acct:+  （アカウント ${acct}）}")
+  done
   hidden=$(profile_hidden | tr '\n' ' ' | sed 's/ $//')
   if [ -n "$hidden" ]; then
-    ui_text "（$hidden は <名>-mfa がある長期キー側なので省いています）"
+    init_note "（$hidden は <名>-mfa がある長期キー側なので省いています）"
   fi
   if [ -t 0 ] && [ "$UI_TTY" = 1 ]; then
-    choose_profile_menu "${entries[@]}"
-    return 0
-  fi
-  for i in "${!entries[@]}"; do printf '    %2d) %s\n' "$((i+1))" "${entries[i]}"; done
-  while :; do
-    printf '  source_profile（番号か名前）: '
-    read_line sel || { echo ""; init_die "入力が尽きました。非対話モードは $CMD_NAME init --from <json>。"; }
-    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$n" ]; then
-      sel=${entries[sel-1]}
-    fi
-    for i in "${entries[@]}"; do
-      if [ "$i" = "$sel" ]; then I_PROFILE="$sel"; ui_ok "source_profile: ${C_BOLD}${I_PROFILE}${C_RESET}"; return 0; fi
+    choose_profile_menu "${labels[@]}"
+  else
+    for i in "${!entries[@]}"; do printf '    %2d) %s\n' "$((i+1))" "${labels[i]}"; done
+    while :; do
+      printf '  source_profile（番号か名前）: '
+      read_line sel || { echo ""; init_die "入力が尽きました。非対話モードは $CMD_NAME init --from <json>。"; }
+      if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$n" ]; then
+        sel=${entries[sel-1]}
+      fi
+      I_PROFILE=""
+      for i in "${entries[@]}"; do [ "$i" != "$sel" ] || I_PROFILE="$sel"; done
+      [ -z "$I_PROFILE" ] || break
+      ui_err "一覧にありません。"
     done
-    ui_err "一覧にありません。"
-  done
+  fi
+  init_done "source_profile" "$I_PROFILE"
 }
 
-# 初期カーソルは default があればそこ、なければ先頭
+# 初期カーソルは default があればそこ、なければ先頭。ラベル（アカウント ID 付き）から元のプロファイル名に戻す
 choose_profile_menu() {
-  local -a entries=("$@")
-  local i cursor=0
-  for i in "${!entries[@]}"; do
-    [ "${entries[i]}" != default ] || cursor=$i
+  local -a labels=("$@")
+  local i cursor=0 picked
+  for i in "${!labels[@]}"; do
+    [ "${labels[i]%%  *}" != default ] || cursor=$i
   done
-  choose_menu I_PROFILE "source_profile を選んでください" "$cursor" "${entries[@]}"
-  ui_ok "source_profile: ${C_BOLD}${I_PROFILE}${C_RESET}"
+  choose_menu picked "source_profile を選んでください" "$cursor" "${labels[@]}"
+  I_PROFILE="${picked%%  *}"
 }
 
 # duration_seconds。よく使う長さを番号で選ばせて I_DURATION に入れる。番号の代わりに秒（900〜43200）をそのまま打ってもよい
@@ -618,19 +663,45 @@ choose_duration() {
       [ "${entries[i]}" != "$chosen" ] || I_DURATION=${DURATION_CHOICES[i]}
     done
     if [ -z "$I_DURATION" ]; then
-      ask I_DURATION "duration_seconds（秒）" "$DURATION_DEFAULT" valid_duration
-      ui_erase 1
+      ASK_QUIET=1 ask I_DURATION "duration_seconds（秒）" "$DURATION_DEFAULT" valid_duration
     fi
   else
-    ui_text "次から番号で選んでください。それ以外の長さは秒で入力します（900〜43200）。"
+    init_note "次から番号で選んでください。それ以外の長さは秒で入力します（900〜43200）。"
     for i in "${!DURATION_CHOICES[@]}"; do
-      ui_text "  $((i+1))) ${DURATION_LABELS[i]}（${DURATION_CHOICES[i]} 秒）"
+      init_note "  $((i+1))) ${DURATION_LABELS[i]}（${DURATION_CHOICES[i]} 秒）"
     done
-    ask pick "番号か秒" "2" valid_duration_pick
+    ASK_QUIET=1 ask pick "番号か秒" "2" valid_duration_pick
     if [ "$pick" -le "${#DURATION_CHOICES[@]}" ]; then I_DURATION=${DURATION_CHOICES[pick-1]}; else I_DURATION=$pick; fi
-    ui_erase 1
   fi
-  ui_ok "duration_seconds: ${C_BOLD}${I_DURATION}${C_RESET}（$(duration_label "$I_DURATION")）"
+  init_done "duration_seconds" "${I_DURATION}（$(duration_label "$I_DURATION")）"
+}
+
+# 候補から 1 つ選ぶか、手で入れる。端末なら矢印キーのメニュー（カーソルは既定の候補に置く。最後に「名前を入力する」）、
+# 端末でなければ番号か文字列（Enter で既定）。
+# choose_or_type <変数名> <項目> <検証関数> <既定> <候補>...
+choose_or_type() {
+  local var="$1" label="$2" check="$3" def="$4" i sel n cursor=0; shift 4
+  local -a entries=("$@")
+  n=${#entries[@]}
+  for i in "${!entries[@]}"; do [ "${entries[i]}" != "$def" ] || cursor=$i; done
+  if [ -t 0 ] && [ "$UI_TTY" = 1 ]; then
+    choose_menu sel "$label を選んでください" "$cursor" "${entries[@]}" "名前を入力する"
+    if [ "$sel" = "名前を入力する" ]; then
+      ASK_QUIET=1 ask "$var" "$label" "$def" "$check"
+    else
+      printf -v "$var" '%s' "$sel"
+    fi
+  else
+    for i in "${!entries[@]}"; do init_note "  $((i+1))) ${entries[i]}"; done
+    while :; do
+      ASK_QUIET=1 ask sel "${label}（番号か名前）" "$((cursor+1))" ""
+      if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$n" ]; then sel=${entries[sel-1]}; fi
+      if "$check" "$sel"; then printf -v "$var" '%s' "$sel"; break; fi
+      ui_err "受け付けられない値です。もう一度入力してください。"
+      INIT_LINES=$((INIT_LINES + 1))
+    done
+  fi
+  init_done "$label" "${!var}"
 }
 
 default_name() {
@@ -646,7 +717,7 @@ mfa_default_from_arn() {
 
 # 1 問。ask <変数名> <説明> <既定> <検証関数> [変換関数]。既定を受けるときは Enter。
 # 標準入力が尽きたら既定で埋めずに失敗する（エージェントの実行環境で黙って進めない）。
-# 端末では ❯ の入力行だけを答えた後に ✔ の 1 行へ畳む（見出しと補足は残す）。
+# 端末では ❯ の入力行を消し、init_done で見出しごと「◆ 項目: 値」の 1 行に畳む（ASK_QUIET=1 なら畳まず呼ぶ側に任せる）。
 ask() {
   local var="$1" label="$2" def="$3" check="$4" conv="${5:-}" ans lines=0
   label=${label#"${label%%[![:space:]]*}"}
@@ -667,7 +738,7 @@ ask() {
     if [ -z "$check" ] || { [ -n "$ans" ] && "$check" "$ans"; }; then
       printf -v "$var" '%s' "$ans"
       ui_erase "$lines"
-      ui_ok "$label: ${C_BOLD}${ans:--}${C_RESET}"
+      [ "${ASK_QUIET:-0}" = 1 ] || init_done "${label% (y/n)}" "${ans:--}"
       return 0
     fi
     ui_err "受け付けられない値です。もう一度入力してください。"
@@ -676,73 +747,96 @@ ask() {
 }
 
 init_interactive() {
-  local profiles ident acct_def mfa_def region_def
-  ui_head "name"
-  ui_text "対象を表す短い英数字名。イメージ名・一時キーの置き場（~/.aws-survey/<name>/）に使います。"
+  local profiles ident mfa_def region_def
+  init_begin "name" "対象を表す短い英数字名。イメージ名・一時キーの置き場（~/.aws-survey/<name>/）に使います。"
   ask I_NAME "name" "$(default_name)" valid_name
 
-  echo ""
-  ui_head "source_profile"
-  ui_text "ロールを借りる元になるホスト側のプロファイル（aws configure list-profiles）。"
-  ui_text "いま有効なキーを持つ方を選びます。MFA の一時キーを別プロファイル（<名>-mfa など）に保存する運用なら、その保存先の方です。"
+  init_begin "source_profile" \
+    "ロールを借りる元になるホスト側のプロファイル（aws configure list-profiles）。調べるアカウントは、このプロファイルでログインするアカウントになります。" \
+    "いま有効なキーを持つ方を選びます。MFA の一時キーを別プロファイル（<名>-mfa など）に保存する運用なら、その保存先の方です。"
   profiles=$(profile_candidates)
   if [ -z "$profiles" ]; then
     ui_err "プロファイルが 1 つもありません（~/.aws/config）。先に aws configure か aws configure sso で作ってください。"
     init_die "source_profile を選べません。"
   fi
   choose_profile "$profiles"
-  # 調査用ロールを貸す相手（信頼ポリシー）は、いまのログインの自分だけに固定する。読めなければ手で入れる
-  I_ARN=""; acct_def=""
+  # 調査用ロールを貸す相手（信頼ポリシー）は、いまのログインの自分だけに固定し、調べるアカウントはそのログインのアカウント。
+  # 読めなければ手で入れる
+  I_ARN=""; I_ACCOUNT=""
   if ident=$(aws sts get-caller-identity --profile "$I_PROFILE" --output json 2>/dev/null); then
     I_ARN=$(printf '%s' "$ident" | jq -r '.Arn // empty')
-    acct_def=$(printf '%s' "$ident" | jq -r '.Account // empty')
+    I_ACCOUNT=$(printf '%s' "$ident" | jq -r '.Account // empty')
   fi
   if [ -n "$I_ARN" ] && valid_arn "$I_ARN"; then
-    ui_ok "調査用ロールを貸す相手: 自分だけ（${I_ARN}）"
+    init_fixed "調査用ロールを貸す相手" "自分だけ（${I_ARN}）"
+    valid_account "$I_ACCOUNT" || I_ACCOUNT=$(arn_account "$I_ARN")
+    init_fixed "account_id" "$I_ACCOUNT" "（このログインのアカウント。別のアカウントを調べるには、そこにログインするプロファイルを選びます）"
   else
-    ui_warn "$I_PROFILE でログインできていません（未ログインか期限切れ）。"
-    ui_text "別の端末でログインし直してから、もう一度 $CMD_NAME init を実行するか、調査用ロールを貸す相手の ARN を手で入れます。"
+    init_begin "principal_arn" \
+      "$I_PROFILE でログインできていません（未ログインか期限切れ）。" \
+      "別の端末でログインし直してから、もう一度 $CMD_NAME init を実行するか、調査用ロールを貸す相手の ARN を手で入れます。"
     ask I_ARN "principal_arn（調査用ロールを貸す相手）" "" valid_arn
+    init_begin "account_id" "調べる AWS アカウント ID（12 桁）。source_profile でログインするアカウントです。"
+    ask I_ACCOUNT "account_id" "$(arn_account "$I_ARN")" valid_account
   fi
   I_REFRESH=$(refresh_default "$I_PROFILE")
-
-  echo ""
-  ui_head "account_id"
-  ui_text "調べる AWS アカウント ID（12 桁）。"
-  ask I_ACCOUNT "account_id" "$acct_def" valid_account
 
   # Identity Center のログインでは、ロールの側で MFA を確かめられない（信頼ポリシーに条件を付けると借りられなくなる）ので聞かずに false
   if is_sso_arn "$I_ARN"; then
     I_MFA=false
   else
-    echo ""
-    ui_head "mfa_required"
-    ui_text "ロールを借りるときに MFA 済みであることを求めるか。y にすると、信頼ポリシーに「MFA 済みの人だけ」の条件を付けます。"
+    init_begin "mfa_required" "ロールを借りるときに MFA 済みであることを求めるか。y にすると、信頼ポリシーに「MFA 済みの人だけ」の条件を付けます。"
     mfa_def=$(mfa_default_from_arn "$I_ARN")
     ask I_MFA "mfa_required (y/n)" "$([ "$mfa_def" = true ] && echo y || echo n)" valid_bool to_bool
   fi
 
-  echo ""
-  ui_head "region"
-  ui_text "主に見るリージョン。既定リージョンになります。"
+  init_begin "region" "主に見るリージョン。既定リージョンになります。"
   region_def=$(profile_region "$I_PROFILE")
   ask I_REGION "region" "$region_def" valid_region
 
   # 借りたロールからのログイン（Identity Center も）は、AWS の決まり（ロールチェーン）で 1 時間が上限。聞かずに固定する
   if is_chained_principal "$I_ARN"; then
     I_DURATION=$CHAIN_MAX_SECONDS
+    init_fixed "セッションの上限" "$(duration_label "$I_DURATION")" "（借りたロールからのログインは、AWS の決まりで 1 時間が上限）"
   else
-    echo ""
-    ui_head "duration_seconds"
-    ui_text "1 回の調査セッションに取れる時間。一時キーの長さになります。"
-    ui_text "有効期限ではなく、調査エージェントの働き方を決める値です。短ければ守備範囲を狭く、長ければ通しで進めます。"
+    init_begin "duration_seconds" \
+      "1 回の調査セッションに取れる時間。一時キーの長さになります。" \
+      "有効期限ではなく、調査エージェントの働き方を決める値です。短ければ守備範囲を狭く、長ければ通しで進めます。"
     choose_duration
   fi
 
-  echo ""
-  ui_head "role_name"
-  ui_text "調査に使う読み取り専用ロールの名前。借りる経路では既存ロール名。"
+  init_begin "role_name" "調査に使う読み取り専用ロールの名前。借りる経路では既存ロール名。"
   ask I_ROLE "role_name" "aws-survey-readonly" valid_role
+
+  init_begin "エージェント" "調査コンテナの中で調査を行うコーディングエージェント。あとから $CMD_NAME claude / codex で切り替えられます。"
+  choose_agent
+
+  init_begin "モデル" "$(agent_label "$I_AGENT") に渡すモデル。候補に無ければ名前を入力します。"
+  choose_or_type I_MODEL "モデル" agent_valid_model "$(agent_default_model "$I_AGENT")" $(agent_model_choices "$I_AGENT")
+
+  init_begin "effort" "$(agent_label "$I_AGENT") の推論の深さ。低いほど速く安く、高いほど時間がかかります。"
+  choose_or_type I_EFFORT "effort" valid_effort "$(agent_default_effort "$I_AGENT")" $(agent_effort_choices "$I_AGENT")
+}
+
+valid_effort() { agent_valid_effort "$I_AGENT" "$1"; }
+
+# エージェント。端末なら矢印キー、端末でなければ番号か名前
+choose_agent() {
+  local sel
+  if [ -t 0 ] && [ "$UI_TTY" = 1 ]; then
+    choose_menu sel "エージェントを選んでください" 0 "Claude Code（claude）" "Codex（codex）"
+    case "$sel" in Codex*) I_AGENT=codex ;; *) I_AGENT=claude ;; esac
+  else
+    init_note "  1) Claude Code（claude）"
+    init_note "  2) Codex（codex）"
+    while :; do
+      ASK_QUIET=1 ask sel "エージェント（番号か名前）" "1" ""
+      case "$sel" in 1|claude) I_AGENT=claude; break ;; 2|codex) I_AGENT=codex; break ;; esac
+      ui_err "受け付けられない値です。もう一度入力してください。"
+      INIT_LINES=$((INIT_LINES + 1))
+    done
+  fi
+  init_done "エージェント" "$(agent_label "$I_AGENT")"
 }
 
 # 非対話: --from の JSON → 環境変数 AWS_SURVEY_INIT_* の順で上書き。AWS は叩かない。
@@ -760,6 +854,9 @@ init_noninteractive() {
     I_REFRESH=$(jq -r '.auth.refresh_command // empty' "$f")
     I_ROLE=$(jq -r '.auth.role_name // empty' "$f")
     I_DURATION=$(jq -r '.auth.duration_seconds // empty' "$f")
+    I_AGENT=$(jq -r 'if (.agent | type) == "object" then .agent.name // empty else .agent // empty end' "$f")
+    I_MODEL=$(jq -r 'if (.agent | type) == "object" then .agent.model // empty else empty end' "$f")
+    I_EFFORT=$(jq -r 'if (.agent | type) == "object" then .agent.effort // empty else empty end' "$f")
   fi
   I_NAME="${AWS_SURVEY_INIT_NAME:-$I_NAME}"
   I_ACCOUNT="${AWS_SURVEY_INIT_ACCOUNT_ID:-$I_ACCOUNT}"
@@ -770,6 +867,9 @@ init_noninteractive() {
   I_REFRESH="${AWS_SURVEY_INIT_REFRESH_COMMAND:-$I_REFRESH}"
   I_ROLE="${AWS_SURVEY_INIT_ROLE_NAME:-$I_ROLE}"
   I_DURATION="${AWS_SURVEY_INIT_DURATION_SECONDS:-$I_DURATION}"
+  I_AGENT="${AWS_SURVEY_INIT_AGENT:-$I_AGENT}"
+  I_MODEL="${AWS_SURVEY_INIT_AGENT_MODEL:-$I_MODEL}"
+  I_EFFORT="${AWS_SURVEY_INIT_AGENT_EFFORT:-$I_EFFORT}"
   # 既定が決められる項目だけ埋める
   [ -n "$I_NAME" ]     || I_NAME=$(default_name)
   [ -n "$I_MFA" ]      || I_MFA=$(mfa_default_from_arn "$I_ARN")
@@ -800,6 +900,22 @@ init_validate() {
   fi
   valid_role "$I_ROLE"         || init_die "role_name が不正です: $I_ROLE"
   profile_exists "$I_PROFILE"  || init_die "source_profile がプロファイル一覧にありません: ${I_PROFILE}（aws configure list-profiles）"
+  # エージェントは未定でもよい（scan が聞く）。決めるならモデル・effort は既定で埋め、値を確かめる
+  if [ -n "$I_AGENT" ]; then
+    agent_valid "$I_AGENT"     || init_die "agent が不正です: ${I_AGENT}（claude か codex）"
+    [ -n "$I_MODEL" ]  || I_MODEL=$(agent_default_model "$I_AGENT")
+    [ -n "$I_EFFORT" ] || I_EFFORT=$(agent_default_effort "$I_AGENT")
+    agent_valid_model "$I_MODEL" || init_die "agent.model が不正です: $I_MODEL"
+    agent_valid_effort "$I_AGENT" "$I_EFFORT" \
+      || init_die "agent.effort が不正です: ${I_EFFORT}（$(agent_label "$I_AGENT") は $(agent_effort_choices "$I_AGENT" | tr ' ' '/')）"
+  elif [ -n "$I_MODEL$I_EFFORT" ]; then
+    init_die "agent.model / agent.effort を渡すなら agent（claude か codex）も要ります。"
+  fi
+  # 調べるアカウントと、貸す相手のアカウントが違うときは、ロールを自分で作る経路では作れない（role --create が止まる）。ここでは ⚠ だけ
+  if [ "$(arn_account "$I_ARN")" != "$I_ACCOUNT" ]; then
+    ui_warn "調べるアカウント（${I_ACCOUNT}）と、ログインしているアカウント（$(arn_account "$I_ARN")）が違います"
+    ui_text "ロールはログインしているアカウントに作られます。対象アカウントのロールを管理者に用意してもらって借りる形になります。"
+  fi
 }
 
 # 既存 environment.json の扱い。対話なら確認、非対話なら --force が要る
@@ -819,18 +935,21 @@ init_confirm_replace() {
   ui_ok "退避しました: $ENV_FILE.bak"
 }
 
+# 書き出しと器の用意は黙って行う（出すのは失敗と、置き換えなかったものだけ）
 init_write() {
   local tmp
   tmp=$(mktemp) || init_die "一時ファイルを作れません。"
   jq -n --arg name "$I_NAME" --arg account "$I_ACCOUNT" --arg region "$I_REGION" \
         --arg profile "$I_PROFILE" --arg arn "$I_ARN" --argjson mfa "$I_MFA" \
-        --arg role "$I_ROLE" --arg refresh "$I_REFRESH" --argjson duration "$I_DURATION" '
+        --arg role "$I_ROLE" --arg refresh "$I_REFRESH" --argjson duration "$I_DURATION" \
+        --arg agent "$I_AGENT" --arg model "$I_MODEL" --arg effort "$I_EFFORT" '
+    def opt: if . == "" then null else . end;
     {name: $name, account_id: $account, region: $region,
      auth: {route: null, source_profile: $profile, principal_arn: $arn, mfa_required: $mfa,
-            role_name: $role, refresh_command: (if $refresh == "" then null else $refresh end),
+            role_name: $role, refresh_command: ($refresh | opt),
             duration_seconds: $duration},
      phase_dir: "01_基礎調査",
-     agent: null,
+     agent: {name: ($agent | opt), model: ($model | opt), effort: ($effort | opt)},
      ssh: {user: "diag", hosts: {}},
      setup: {route_decided: null, role_created: null, readonly_verified: null, container_verified: null, scanned: null}}' \
     > "$tmp" || { rm -f "$tmp"; init_die "environment.json を組み立てられませんでした。"; }
@@ -839,13 +958,11 @@ init_write() {
   chmod 600 "$ENV_FILE" 2>/dev/null
   local reason
   reason=$(env_state) || init_die "書き出した environment.json を load-env.sh が受け付けません: $reason"
-  ui_ok "書き出しました: $(ui_path "$ENV_FILE")"
 }
 
 # out/ の器と、対象フォルダ用の AGENTS.md / CLAUDE.md
 init_scaffold() {
   mkdir -p "$AWS_SURVEY_DIR/out/_環境" || init_die "out/ を作れません。"
-  ui_ok "out/ と out/_環境/ を用意しました${C_DIM}（中身は調査コンテナが書きます）${C_RESET}"
   if [ "$AWS_SURVEY_DIR" = "$AWS_SURVEY_HOME" ]; then
     ui_text "対象フォルダが本体そのものなので AGENTS.md / CLAUDE.md は置きません。"
     return 0
@@ -853,7 +970,7 @@ init_scaffold() {
   if [ -f "$AWS_SURVEY_DIR/AGENTS.md" ]; then
     ui_text "AGENTS.md はすでにあるので置き換えません。"
   else
-    cat > "$AWS_SURVEY_DIR/AGENTS.md" <<EOF
+    cat > "$AWS_SURVEY_DIR/AGENTS.md" <<EOF_AGENTS
 # aws-survey の対象フォルダ
 
 ここは \`aws-survey\` の対象フォルダ。対象固有のものは \`environment.json\`（AWS への繋ぎ方と到達点）と
@@ -861,36 +978,48 @@ init_scaffold() {
 
 - 準備と立ち上げに手順書は無い。\`aws-survey\`（引数なし）が段階を判定し、次の 1 手を出し、確認しながら実行する。
 - 詰まったら \`aws-survey doctor\`。ツールの有無と、一時キーを発行できない原因を切り分ける。
-- \`aws-survey scan\`（非対話の棚卸し）か \`aws-survey claude\` / \`aws-survey codex\`（対話）で調査コンテナが立ち上がったら、ホスト側の仕事は終わり。
+- \`aws-survey scan\`（非対話の初期調査）か \`aws-survey claude\` / \`aws-survey codex\`（対話）で調査コンテナが立ち上がったら、ホスト側の仕事は終わり。
   調査も、結果の説明も、報告の検証も、コンテナの中の調査エージェントが持っている。ここから先回りしない。
 - 対象の概要・調査項目・フェーズの目的をここで作らない。それらは調査コンテナの中でユーザーと決め、\`out/\` に記録される。
   ここで扱うのは AWS への繋ぎ方だけ。
-EOF
-    ui_ok "AGENTS.md を置きました${C_DIM}（このフォルダの位置づけだけを書いています）${C_RESET}"
+EOF_AGENTS
   fi
   if [ -f "$AWS_SURVEY_DIR/CLAUDE.md" ]; then
     ui_text "CLAUDE.md はすでにあるので置き換えません。"
   else
     printf '@AGENTS.md\n' > "$AWS_SURVEY_DIR/CLAUDE.md"
-    ui_ok "CLAUDE.md を置きました${C_DIM}（AGENTS.md を読み込むだけ）${C_RESET}"
   fi
   init_gitignore
 }
 
-# environment.json と trust.json にはアカウント ID が入るので、対象フォルダを Git で管理しても載らないように .gitignore に入れておく。
+# environment.json と trust.json にはアカウント IDが入るので、対象フォルダを Git で管理しても載らないように .gitignore に入れておく。
 # 既にあれば足りない行だけ足す。out/（調査の記録）を含めるかは任意なので書かない
 init_gitignore() {
-  local f="$AWS_SURVEY_DIR/.gitignore" line added=0
+  local f="$AWS_SURVEY_DIR/.gitignore" line
   for line in /environment.json /environment.json.bak /trust.json; do
     if [ -f "$f" ]; then
       grep -qx -- "$line" "$f" && continue
       [ -z "$(tail -c 1 "$f")" ] || printf '\n' >> "$f"
     fi
     printf '%s\n' "$line" >> "$f" || init_die "書き込めません: $f"
-    added=1
   done
-  [ "$added" -eq 1 ] || return 0
-  ui_ok ".gitignore に environment.json と trust.json を入れました${C_DIM}（アカウント ID が入るため）${C_RESET}"
+}
+
+# 聞き取りの最後にエージェントのログインまで済ませる（対話で、端末で、docker があるとき。認証はボリュームに残るので初回だけ）。
+# 済ませられないときは、いつ済むかを 1 行で言う（scan と claude / codex が起動時に確かめる）
+init_login() {
+  [ -n "$I_AGENT" ] || return 0
+  if [ "$INIT_MODE" = noninteractive ] || ! { [ -t 0 ] && [ -t 1 ]; }; then
+    ui_text "$(agent_label "$I_AGENT") のログインは、$CMD_NAME login（または最初の $CMD_NAME scan）のときに確かめます。"
+    return 0
+  fi
+  if ! command -v docker >/dev/null 2>&1; then
+    ui_warn "docker が見つからないので、$(agent_label "$I_AGENT") のログインは後回しにします（Docker Desktop を入れてから $CMD_NAME login）"
+    return 0
+  fi
+  echo ""
+  AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/login.sh" "$I_AGENT" \
+    || ui_warn "$(agent_label "$I_AGENT") のログインは済んでいません。あとで $CMD_NAME login で済ませられます（scan も起動時に確かめます）"
 }
 
 cmd_init() {
@@ -914,27 +1043,15 @@ cmd_init() {
   fi
   ui_title "aws-survey init"
   print_places
-  echo ""
   init_confirm_replace
-  if [ "$INIT_MODE" = noninteractive ]; then init_noninteractive; else init_interactive; echo ""; fi
+  if [ "$INIT_MODE" = noninteractive ]; then init_noninteractive; else init_interactive; fi
   init_validate
   init_write
   init_scaffold
-  echo ""
-  ui_head "対象"
-  ui_kv "name" "$I_NAME"
-  ui_kv "account_id" "$I_ACCOUNT"
-  ui_kv "region" "$I_REGION"
-  ui_kv "source_profile" "$I_PROFILE"
-  ui_kv "role_name" "$I_ROLE"
-  ui_kv "ロールを貸す相手" "$I_ARN"
-  if is_chained_principal "$I_ARN"; then
-    ui_kv "セッションの上限" "$(duration_label "$I_DURATION")${C_DIM}（借りたロールからのログインは、AWS の決まりで 1 時間が上限）${C_RESET}"
-  else
-    ui_kv "セッションの上限" "$(duration_label "$I_DURATION")"
-  fi
-  [ "$I_MFA" != true ] || ui_kv "MFA" "ロールを借りるときに MFA 済みであることを求める"
-  ui_kv "再ログイン" "$I_REFRESH"
+  # 聞かずに決まった項目のうち、あとで効くもの
+  [ "$I_MFA" != true ] || init_fixed "MFA" "ロールを借りるときに MFA 済みであることを求める"
+  init_fixed "再ログイン" "$I_REFRESH"
+  init_login
   echo ""
   next_cmd "$CMD_NAME role --create" "調査用ロールを用意します（無ければ作り、あれば environment.json に合わせて整えます）"
 }
@@ -981,7 +1098,7 @@ cmd_status() {
   milestone route_decided     "ロールの用意のしかたを決めた"
   milestone role_created      "ロールを用意した"
   milestone readonly_verified "読み取り専用であることを確かめた"
-  milestone scanned            "白紙の棚卸しを済ませた"
+  milestone scanned            "初期調査を済ませた"
   milestone container_verified "コンテナの中で環境を確かめた"
   echo ""
   ui_head "一時キー"
@@ -994,8 +1111,8 @@ cmd_status() {
   esac
   echo ""
   ui_head "調査"
-  ui_kv "エージェント" "$(agent_label "${SURVEY_AGENT:-}")${SURVEY_AGENT:+（最後に使ったもの）}"
-  if scan_done; then ui_ok "棚卸し済み（$(setup_value scanned)）"; else ui_skip "棚卸し: まだ（$CMD_NAME scan）"; fi
+  ui_kv "エージェント" "$([ -n "${SURVEY_AGENT:-}" ] && agent_summary "$SURVEY_AGENT" "$SURVEY_AGENT_MODEL" "$SURVEY_AGENT_EFFORT" || echo "未定（scan のときに選びます）")"
+  if scan_done; then ui_ok "初期調査済み（$(setup_value scanned)）"; else ui_skip "初期調査: まだ（$CMD_NAME scan）"; fi
   if survey_started; then
     ui_ok "開始済み（out/00_進捗.md あり）"
   else
@@ -1069,7 +1186,7 @@ cmd_doctor() {
   [ "$ok" -eq 1 ]
 }
 
-cmd_help() { sed -n '2,43p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,46p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 case "$CMD" in
   "")          cmd_guide_loop ;;
@@ -1083,6 +1200,7 @@ case "$CMD" in
   run)         exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
   scan)        exec "$LIBEXEC_DIR/commands/scan.sh" "$@" ;;
   claude|codex) exec "$LIBEXEC_DIR/commands/agent.sh" "$CMD" "$@" ;;
+  login)       exec "$LIBEXEC_DIR/commands/login.sh" "$@" ;;
   ls)          exec "$LIBEXEC_DIR/commands/ls.sh" "$@" ;;
   ec2)         exec "$LIBEXEC_DIR/commands/ec2.sh" "$@" ;;
   ssh)         exec "$LIBEXEC_DIR/commands/ssh.sh" "$@" ;;

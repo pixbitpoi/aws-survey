@@ -18,6 +18,7 @@ AWS_SURVEY_HOME="${AWS_SURVEY_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && 
 [ -d "$AWS_SURVEY_HOME/libexec" ] || _die "AWS_SURVEY_HOME に libexec/ がありません: $AWS_SURVEY_HOME"
 LIBEXEC_DIR="$AWS_SURVEY_HOME/libexec"
 . "$LIBEXEC_DIR/ui.sh"
+. "$LIBEXEC_DIR/agents.sh"
 _die() { ui_die "$@"; }
 
 AWS_SURVEY_DIR="${AWS_SURVEY_DIR:-$PWD}"
@@ -54,13 +55,22 @@ DURATION="${DURATION:-$(_get .auth.duration_seconds)}"
 # 実際に何のフェーズにするかは、調査コンテナの中でユーザーと決める。
 SURVEY_PHASE_DIR="${SURVEY_PHASE_DIR:-$(_get .phase_dir)}"
 SURVEY_PHASE_DIR="${SURVEY_PHASE_DIR:-01_基礎調査}"
-# 調査に使うエージェント（claude / codex）。最後に使ったものを scan と claude / codex の入口が記録する。
-# 未定なら空で、scan が矢印キーで聞く。案内文の「次に打つコマンド」もこれで組み立てる。
-SURVEY_AGENT="${SURVEY_AGENT:-$(_get .agent)}"
+# 調査に使うエージェント（claude / codex）とそのモデル・effort（libexec/agents.sh）。init が聞いて書き、最後に使ったものを
+# scan と claude / codex の入口が記録する。未定なら空で、scan が矢印キーで聞く。案内文の「次に打つコマンド」もこれで組み立てる。
+# 古い形（"agent": "claude"）も名前だけの指定として読む
+SURVEY_AGENT="${SURVEY_AGENT:-$(jq -r 'if (.agent | type) == "object" then .agent.name // empty else .agent // empty end' "$ENV_FILE")}"
+SURVEY_AGENT_MODEL="${SURVEY_AGENT_MODEL:-$(jq -r 'if (.agent | type) == "object" then .agent.model // empty else empty end' "$ENV_FILE")}"
+SURVEY_AGENT_EFFORT="${SURVEY_AGENT_EFFORT:-$(jq -r 'if (.agent | type) == "object" then .agent.effort // empty else empty end' "$ENV_FILE")}"
 case "$SURVEY_AGENT" in
   ""|claude|codex) ;;
-  *) _die "environment.json の agent が不正です: ${SURVEY_AGENT}（claude か codex。未定なら null）" ;;
+  *) _die "environment.json の agent.name が不正です: ${SURVEY_AGENT}（claude か codex。未定なら null）" ;;
 esac
+if [ -n "$SURVEY_AGENT" ]; then
+  [ -z "$SURVEY_AGENT_MODEL" ]  || agent_valid_model "$SURVEY_AGENT_MODEL" \
+    || _die "environment.json の agent.model が不正です: ${SURVEY_AGENT_MODEL}"
+  [ -z "$SURVEY_AGENT_EFFORT" ] || agent_valid_effort "$SURVEY_AGENT" "$SURVEY_AGENT_EFFORT" \
+    || _die "environment.json の agent.effort が不正です: ${SURVEY_AGENT_EFFORT}（$(agent_label "$SURVEY_AGENT") は $(agent_effort_choices "$SURVEY_AGENT" | tr ' ' '/')）"
+fi
 
 for _v in SURVEY_NAME ACCOUNT_ID REGION PROFILE_SRC ROLE_NAME DURATION SURVEY_PHASE_DIR; do
   [ -n "${!_v}" ] || _die "environment.json に $_v にあたる項目がありません。templates/environment.json と見比べてください。"
@@ -133,11 +143,14 @@ docker_check_shared() {
   return 1
 }
 
-# 準備が済んだあとの次の 1 手。棚卸し（scan）がまだなら scan、済んでいれば記録してあるエージェントとの対話。
+# scan の説明。初期調査を行うのは誰か（記録してあるエージェント。未定なら両方の名前）と、時間の目安
+scan_desc() { printf '対象アカウントの初期調査を %s が行います（インフラ構成の複雑さによっては数十分かかります）' "$(agent_label "${1:-}")"; }
+
+# 準備が済んだあとの次の 1 手。初期調査（scan）がまだなら scan、済んでいれば記録してあるエージェントとの対話。
 # ls / lambda pull / credentials / verify など、準備が済んだ状態で終わるコマンドの末尾が出す。run（素のシェル）は案内しない
 survey_next_cmd() {
   if [ -z "$(jq -r '.setup.scanned // empty' "$ENV_FILE")" ]; then
-    next_cmd "$AWS_SURVEY_CMD scan" "白紙の棚卸しをエージェントに 1 回で行わせます（非対話。待つだけ）"
+    next_cmd "$AWS_SURVEY_CMD scan" "$(scan_desc "$SURVEY_AGENT")"
   elif [ -n "$SURVEY_AGENT" ]; then
     next_cmd "$AWS_SURVEY_CMD $SURVEY_AGENT" "$(agent_label "$SURVEY_AGENT") と対話で調査を進めます"
   else
@@ -148,7 +161,7 @@ survey_next_cmd() {
 # セットアップの到達点を environment.json に記録する。2 つ目は利用者に見せる言い換え（省略時はキー名）、
 # 3 つ目は記録する値（省略時は今日の日付。分まで要るときは呼ぶ側が渡す）
 #   env_mark_setup role_created "ロールを用意した"
-#   env_mark_setup scanned "白紙の棚卸しを済ませた" "$(date '+%FT%H:%M%z')"
+#   env_mark_setup scanned "初期調査を済ませた" "$(date '+%FT%H:%M%z')"
 env_mark_setup() {
   local key="${1:-}" label="${2:-${1:-}}" value="${3:-$(date +%F)}" tmp
   [ -n "$key" ] || { echo "env_mark_setup: キー名がありません" >&2; return 1; }
@@ -158,12 +171,18 @@ env_mark_setup() {
     && ui_text "environment.json に記録しました: ${label}（${value}）"
 }
 
-# 調査に使うエージェントを記録する（最後に使ったもの）。同じなら何も書かない
-#   env_set_agent claude
+# 調査に使うエージェントを記録する（最後に使ったもの）。env_set_agent <name> [<model> <effort>]
+# 名前だけ渡して別のエージェントに切り替えたときは、model / effort をそのエージェントの既定に戻す（前のものの値は渡せない）。
+# 同じ名前で model / effort の指定も無ければ何も書かない
 env_set_agent() {
-  local agent="${1:-}" tmp
-  case "$agent" in claude|codex) ;; *) echo "env_set_agent: claude か codex を指定してください" >&2; return 1 ;; esac
-  [ "$agent" != "$SURVEY_AGENT" ] || return 0
+  local agent="${1:-}" model="${2:-}" effort="${3:-}" tmp
+  agent_valid "$agent" || { echo "env_set_agent: claude か codex を指定してください" >&2; return 1; }
+  if [ -z "$model" ] && [ -z "$effort" ]; then
+    [ "$agent" != "$SURVEY_AGENT" ] || return 0
+    model=$(agent_default_model "$agent"); effort=$(agent_default_effort "$agent")
+  fi
   tmp=$(mktemp) || return 0
-  jq --arg a "$agent" '.agent = $a' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE" && SURVEY_AGENT="$agent"
+  jq --arg a "$agent" --arg m "$model" --arg e "$effort" \
+     '.agent = {name: $a, model: (if $m == "" then null else $m end), effort: (if $e == "" then null else $e end)}' "$ENV_FILE" > "$tmp" \
+    && mv "$tmp" "$ENV_FILE" && SURVEY_AGENT="$agent" && SURVEY_AGENT_MODEL="$model" && SURVEY_AGENT_EFFORT="$effort"
 }
