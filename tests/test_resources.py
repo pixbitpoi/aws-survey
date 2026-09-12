@@ -44,6 +44,56 @@ sys.exit(subprocess.run(cmd, env=env).returncode)
 '''
 
 
+class PtyMixin:
+    """Drive the CLI on a pseudo-terminal: the menus only appear when stdin and stdout are terminals."""
+
+    def drive(self, args, keys, env_extra=None, timeout=30):
+        import pty, re, select, time
+        env = {'PATH': str(self.bin), 'HOME': str(self.home), 'FAKE_LOG': str(self.log), 'FAKE_STATE': str(self.state_file),
+               'LANG': os.environ.get('LANG', 'C.UTF-8'), 'TZ': 'UTC', 'TERM': 'xterm', 'AWS_SURVEY_SSM_POLL': '0'}
+        env.update(env_extra or {})
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(str(self.target))
+            os.execve(str(test_cli.CLI), [str(test_cli.CLI), *args], env)
+        output = b''
+        plain = lambda: re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', output)
+
+        def read_until(marker, limit=timeout):
+            nonlocal output
+            deadline = time.time() + limit
+            while marker not in plain() and time.time() < deadline:
+                ready, _, _ = select.select([fd], [], [], 0.5)
+                if ready:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    output += chunk
+            if marker != b'\x00never':
+                self.assertIn(marker, plain(), output.decode(errors='replace'))
+
+        for marker, key in keys:
+            # '\x00never' は「画面の更新が落ち着くまで少し待つ」の意味（次のキーを送る前）
+            read_until(marker.encode(), limit=1 if marker == '\x00never' else timeout)
+            if key is None:
+                continue
+            time.sleep(0.3)
+            # 1 キーずつ送る（矢印は 3 バイトで 1 キー）。まとめて送るとメニューの read が取りこぼす
+            for one in re.findall(rb'\x1b\[[A-Z]|.', key, re.S):
+                try:
+                    os.write(fd, one)
+                except OSError:
+                    self.fail('the CLI exited before the key ' + repr(one) + ' could be sent:\n' + plain().decode(errors='replace'))
+                time.sleep(0.2)
+        read_until(b'\x00never', limit=10)
+        _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        return os.waitstatus_to_exitcode(status), plain().decode(errors='replace')
+
+
 class ResourcesCase(test_cli.CliCase):
     def setUp(self):
         super().setUp()
@@ -76,7 +126,7 @@ class ResourcesCase(test_cli.CliCase):
         return [c for c in self.calls() if 'service' in c]
 
 
-class Ls(ResourcesCase):
+class Ls(ResourcesCase, PtyMixin):
     def test_lists_from_inside_the_container_with_only_the_key(self):
         self.ready()
         result = self.run_cli('ls')
@@ -150,6 +200,16 @@ class Ls(ResourcesCase):
         self.assertEqual(self.docker_runs(), [])
         self.assertEqual(self.aws_calls(), [])
 
+    def test_on_a_terminal_a_spinner_runs_while_listing(self):
+        self.ready()
+        code, text = self.drive(['ls'], [])
+        self.assertEqual(code, 0, text)
+        self.assertIn('アカウントのリソースを読んでいます', text)
+        self.assertIn('⠋', text)
+        tail = text.split('\r')[-1]                       # 回転の行が消えたあとの画面
+        self.assertIn('EC2 インスタンス（2）', text)
+        self.assertNotIn('読んでいます', tail)
+
     def test_a_container_that_fails_to_start_is_reported(self):
         self.ready()
         result = self.run_cli('ls', FAKE_DOCKER_FAIL='1')
@@ -159,56 +219,6 @@ class Ls(ResourcesCase):
 
 if __name__ == '__main__':
     unittest.main()
-
-
-class PtyMixin:
-    """Drive the CLI on a pseudo-terminal: the menus only appear when stdin and stdout are terminals."""
-
-    def drive(self, args, keys, env_extra=None, timeout=30):
-        import pty, re, select, time
-        env = {'PATH': str(self.bin), 'HOME': str(self.home), 'FAKE_LOG': str(self.log), 'FAKE_STATE': str(self.state_file),
-               'LANG': os.environ.get('LANG', 'C.UTF-8'), 'TZ': 'UTC', 'TERM': 'xterm', 'AWS_SURVEY_SSM_POLL': '0'}
-        env.update(env_extra or {})
-        pid, fd = pty.fork()
-        if pid == 0:
-            os.chdir(str(self.target))
-            os.execve(str(test_cli.CLI), [str(test_cli.CLI), *args], env)
-        output = b''
-        plain = lambda: re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', output)
-
-        def read_until(marker, limit=timeout):
-            nonlocal output
-            deadline = time.time() + limit
-            while marker not in plain() and time.time() < deadline:
-                ready, _, _ = select.select([fd], [], [], 0.5)
-                if ready:
-                    try:
-                        chunk = os.read(fd, 4096)
-                    except OSError:
-                        return
-                    if not chunk:
-                        return
-                    output += chunk
-            if marker != b'\x00never':
-                self.assertIn(marker, plain(), output.decode(errors='replace'))
-
-        for marker, key in keys:
-            # '\x00never' は「画面の更新が落ち着くまで少し待つ」の意味（次のキーを送る前）
-            read_until(marker.encode(), limit=1 if marker == '\x00never' else timeout)
-            if key is None:
-                continue
-            time.sleep(0.3)
-            # 1 キーずつ送る（矢印は 3 バイトで 1 キー）。まとめて送るとメニューの read が取りこぼす
-            for one in re.findall(rb'\x1b\[[A-Z]|.', key, re.S):
-                try:
-                    os.write(fd, one)
-                except OSError:
-                    self.fail('the CLI exited before the key ' + repr(one) + ' could be sent:\n' + plain().decode(errors='replace'))
-                time.sleep(0.2)
-        read_until(b'\x00never', limit=10)
-        _, status = os.waitpid(pid, 0)
-        os.close(fd)
-        return os.waitstatus_to_exitcode(status), plain().decode(errors='replace')
 
 
 def running_everywhere():

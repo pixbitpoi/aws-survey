@@ -490,7 +490,7 @@ cmd_interactive() {
   container_prepare || exit 1
   ui_text "調査コンテナの中から、読み取り専用の一時キーで読みます（画面に出すだけで、何も書きません）。"
   local inv st
-  inv=$(container_inventory lambda)
+  inv=$(container_inventory_spin lambda)
   [ -n "$inv" ] || { echo ""; ui_err "列挙できませんでした（上の出力を確認してください）"; exit 1; }
   st=$(jq -r 'select(.kind == "service" and .service == "lambda") | .status' <<< "$inv" | head -n 1)
   if [ "$st" != ok ]; then

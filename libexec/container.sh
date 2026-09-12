@@ -70,3 +70,39 @@ container_run() {
 container_inventory() {
   container_run -v "$LIBEXEC_DIR/inventory.sh:/x/inventory.sh:ro" -- bash /x/inventory.sh --region "$REGION" "$@"
 }
+
+# 同じ列挙を、端末なら回転する印を出しながら行う（ui.sh の簡潔表示の部品を借りる）。数秒かかるので、待っているあいだ
+# 「読んでいます 済: EC2 Lambda …」と、返ってきたサービスを順に足していく。端末でなければ container_inventory と同じ。
+#   container_inventory_spin [ec2|lambda|...]
+inventory_label() {
+  case "$1" in
+    ec2) echo EC2 ;; lambda) echo Lambda ;; vpc) echo VPC ;; s3) echo S3 ;; rds) echo RDS ;;
+    ecs) echo ECS ;; elb) echo ELB ;; cloudfront) echo CloudFront ;; *) echo "$1" ;;
+  esac
+}
+container_inventory_spin() {
+  if [ "$UI_TTY" != 1 ]; then container_inventory "$@"; return $?; fi
+  local dir spid cpid rc done s labels
+  dir=$(mktemp -d) || ui_die "一時ディレクトリを作れません。"
+  : > "$dir/keep"; : > "$dir/out"; : > "$dir/err"
+  printf '%s' "アカウントのリソースを読んでいます" > "$dir/msg"
+  # 結果は $(...) で受けられるので、回転の印は標準出力ではなく端末へ直接描く
+  ui_spin_loop "$dir" > /dev/tty &
+  spid=$!
+  container_inventory "$@" > "$dir/out" 2> "$dir/err" &
+  cpid=$!
+  while kill -0 "$cpid" 2>/dev/null; do
+    # 書きかけの行は fromjson? が読み飛ばす
+    done=$(jq -rR 'fromjson? | select(.kind == "service") | .service' "$dir/out" 2>/dev/null | grep -vx ssm)
+    labels=""
+    for s in $done; do labels="$labels $(inventory_label "$s")"; done
+    printf '%s' "アカウントのリソースを読んでいます${labels:+  済:$labels}" > "$dir/msg.tmp" && mv -f "$dir/msg.tmp" "$dir/msg"
+    sleep 0.3
+  done
+  wait "$cpid"; rc=$?
+  ui_spin_end "$dir" "$spid" > /dev/tty
+  cat "$dir/out"
+  cat "$dir/err" >&2
+  rm -rf "$dir"
+  return "$rc"
+}

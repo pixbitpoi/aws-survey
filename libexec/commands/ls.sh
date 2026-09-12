@@ -84,7 +84,7 @@ container_require_key || exit 1
 container_prepare || exit 1
 ui_text "調査コンテナの中から、読み取り専用の一時キーで読みます（画面に出すだけで、何も書きません）。"
 
-inv=$(container_inventory ${PICK[@]+"${PICK[@]}"}); rc=$?
+inv=$(container_inventory_spin ${PICK[@]+"${PICK[@]}"}); rc=$?
 if [ -z "$inv" ]; then
   echo ""
   ui_err "列挙できませんでした（上の出力を確認してください）"
