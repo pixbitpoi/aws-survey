@@ -1048,8 +1048,67 @@ class Role(CliCase):
 
 
 class Chain(CliCase):
-    """No-arg `aws-survey` asks before each step and keeps going: guidance, confirm, run, judge again.
-    Declining, a step that fails, or no terminal all stop the chain with the command still named."""
+    """No-arg `aws-survey` off a terminal asks before each step and keeps going: guidance, confirm, run, judge again.
+    Declining, a step that fails, or no terminal all stop the chain with the command still named.
+    On a terminal (pty) it runs through without asking, except once before `role --create`."""
+
+    def drive(self, keys, stage_env):
+        import pty, select, time
+        env = {'PATH': str(self.bin), 'HOME': str(self.home), 'FAKE_LOG': str(self.log),
+               'LANG': os.environ.get('LANG', 'C.UTF-8'), 'TZ': 'UTC', 'TERM': 'xterm', **stage_env}
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.chdir(str(self.target))
+            os.execve(str(CLI), [str(CLI)], env)
+        output = b''
+        plain = lambda: re.sub(rb'\x1b\[[0-9;?]*[A-Za-z]', b'', output)
+
+        def read_until(marker, limit=30):
+            nonlocal output
+            deadline = time.time() + limit
+            while marker not in plain() and time.time() < deadline:
+                ready, _, _ = select.select([fd], [], [], 0.5)
+                if ready:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    output += chunk
+            if marker != b'\x00never':
+                self.assertIn(marker, plain(), output.decode(errors='replace'))
+
+        for marker, key in keys:
+            read_until(marker.encode())
+            time.sleep(0.3)
+            os.write(fd, key)
+        read_until(b'\x00never', limit=10)
+        _, status = os.waitpid(pid, 0)
+        os.close(fd)
+        return os.waitstatus_to_exitcode(status), plain().decode(errors='replace')
+
+    def test_on_a_terminal_the_chain_runs_through_to_the_container_without_asking(self):
+        self.verified()                                   # 段階 4: 一時キーが無い → credentials → run
+        code, text = self.drive([], {})
+        self.assertEqual(code, 0, text)
+        self.assertNotIn('実行しますか', text)
+        self.assertIn('続けて aws-survey credentials を実行します', text)
+        self.assertIn('◆ aws-survey credentials', text)
+        self.assertIn('続けて aws-survey run を実行します', text)
+        self.assertIn('◆ aws-survey run', text)
+        self.assertTrue(any('assume-role' in c for c in self.calls()))
+        self.assertTrue(any(c[:2] == ['docker', 'run'] for c in self.calls()), text)
+
+    def test_on_a_terminal_only_role_create_is_confirmed(self):
+        self.write_environment()                          # 段階 2: role は聞かずに走り、role --create の前で止まって聞く
+        code, text = self.drive([('role --create を実行しますか', b'n\r')], {})
+        self.assertEqual(code, 0, text)
+        self.assertIn('続けて aws-survey role を実行します', text)
+        self.assertIn('◆ aws-survey role', text)
+        self.assertIn('いま aws-survey role --create を実行しますか？ (Y/n)', text)
+        self.assertIn('ここで止めます', text)
+        self.assertFalse(any('create-role' in c for c in self.calls()))
 
     def verified(self):
         self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08',

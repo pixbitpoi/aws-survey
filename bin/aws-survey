@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # aws-survey — ホスト側の準備・起動を 1 つの入口にまとめる
 #
-#   aws-survey                      いまの段階を判定し（AWS は叩かない）、次の 1 手を案内して、
-#                                   「実行しますか？」と聞きながら起動まで進める。
-#                                   端末でなければ案内だけで終わる（エージェントは 1 本ずつ手渡す）。
+#   aws-survey                      いまの段階を判定し（AWS は叩かない）、次の 1 手を案内して、起動まで止まらずに進める。
+#                                   聞くのはロールとポリシーを作る前（role --create）の 1 回だけ。
+#                                   端末でなければ 1 手ごとに聞き、読めなければ案内だけで終わる（エージェントは 1 本ずつ手渡す）。
 #                                   ssh setup のあとは、ポリシー → 一時キー → 接続の確認も同じ形で進める
 #   aws-survey status               到達点・一時キーの残り時間・本体とデータの場所
 #   aws-survey doctor               aws / jq / docker の有無と、発行失敗の切り分け（libexec/commands/doctor.sh）
@@ -346,6 +346,13 @@ cmd_guide() {
   guide_also "ls" "アカウントで使っているリソースの一覧を出します（読むだけで、out/ には書きません）"
 }
 
+# 端末なら止まらずに進める。聞くのは role --create（アカウントに IAM ロールとポリシーを作る唯一の手。管理者から見える変更）だけ。
+# 端末でなければ 1 手ごとに聞く（黙って AWS を叩かないため。read_line が諦めれば案内だけで終わる）。
+guide_needs_confirm() {
+  { [ -t 0 ] && [ -t 1 ]; } || return 0
+  case "$1" in "role --create") return 0 ;; *) return 1 ;; esac
+}
+
 # いま実行してよいか聞く。Enter は「はい」。端末でなければ read_line が諦めるので、案内だけ出して終わる。
 guide_confirm() {
   local ans
@@ -392,7 +399,11 @@ cmd_guide_loop() {
     fi
     guide_show_next
     echo ""
-    guide_confirm "$GUIDE_NEXT" || return 0
+    if guide_needs_confirm "$GUIDE_NEXT"; then
+      guide_confirm "$GUIDE_NEXT" || return 0
+    else
+      printf '  %s❯%s 続けて %s を実行します\n' "$C_CYAN" "$C_RESET" "$(ui_cmd "$CMD_NAME $GUIDE_NEXT")"
+    fi
     echo ""
     ran="$GUIDE_NEXT"
     # 案内の文字列をそのまま引数に割る（role --create）。中身は上で組み立てた定数だけ
