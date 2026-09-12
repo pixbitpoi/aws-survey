@@ -534,6 +534,44 @@ class Dispatch(CliCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('不明なコマンド', result.stderr)
 
+    def test_help_shows_only_what_a_user_types(self):
+        # git is not on the fake PATH, so the version comes from VERSION alone.
+        version = (ROOT / 'VERSION').read_text().strip()
+        result = self.run_cli('--help')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first = result.stdout.splitlines()[0]
+        self.assertTrue(first.startswith(f'aws-survey {version} '), first)
+        self.assertIn('AWS 構成調査ツール', first)
+        self.assertIn('読み取り専用', result.stdout)
+        for cmd in ['aws-survey scan', 'aws-survey claude', 'aws-survey codex', 'aws-survey ls',
+                    'aws-survey ec2', 'aws-survey lambda', 'aws-survey status', 'aws-survey doctor',
+                    '--dir <', '--version', '--help --all']:
+            self.assertIn(cmd, result.stdout, cmd)
+        for internal in ['aws-survey init', 'aws-survey role', 'aws-survey credentials', 'aws-survey verify',
+                         'aws-survey login', 'aws-survey run', 'aws-survey ssh', 'lambda pull', 'libexec/']:
+            self.assertNotIn(internal, result.stdout, internal)
+        self.assertEqual(self.run_cli('help').stdout, result.stdout)
+        self.assertEqual(self.run_cli('-h').stdout, result.stdout)
+
+    def test_help_all_adds_the_internal_commands(self):
+        result = self.run_cli('--help', '--all')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('内部で使うコマンド', result.stdout)
+        for internal in ['aws-survey init', 'aws-survey role', 'aws-survey credentials', 'aws-survey verify',
+                         'aws-survey login', 'aws-survey run', 'aws-survey ssh setup', 'aws-survey ssh remove',
+                         'aws-survey lambda pull', 'aws-survey lambda remove']:
+            self.assertIn(internal, result.stdout, internal)
+        self.assertNotIn('libexec/', result.stdout)
+        self.assertEqual(self.run_cli('help', 'all').stdout, result.stdout)
+
+    def test_version(self):
+        version = (ROOT / 'VERSION').read_text().strip()
+        self.assertRegex(version, r'^\d+\.\d+\.\d+$')
+        for args in [('--version',), ('-V',), ('version',), ('--dir', str(self.target), '--version')]:
+            result = self.run_cli(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), f'aws-survey {version}', args)
+
 
 class Status(CliCase):
     def test_status_without_environment(self):

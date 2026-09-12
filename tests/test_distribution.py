@@ -53,7 +53,7 @@ INIT_ENV = {'AWS_SURVEY_INIT_NAME': 'dist',
 
 # Runtime references. Scripts and generated files point at these by absolute path.
 REQUIRED = ['libexec/aws-survey', 'bin/aws-survey',
-            'Dockerfile',
+            'Dockerfile', 'VERSION',
             'libexec/load-env.sh', 'libexec/ui.sh', 'libexec/keys.sh', 'libexec/menu.sh',
             'libexec/commands/run.sh', 'libexec/launch.sh',
             'libexec/commands/scan.sh', 'libexec/commands/agent.sh',
@@ -162,10 +162,17 @@ class Distribution(unittest.TestCase):
         self.assertIn(f'対象フォルダ: {self.target}', result.stdout)
 
     def test_help_names_no_file_outside_the_distribution(self):
-        result = self.run_cli('--help')
+        for args in [('--help',), ('--help', '--all')]:
+            result = self.run_cli(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name in EXCLUDED:
+                self.assertNotIn(f'{name}/', result.stdout)
+
+    def test_version_comes_from_the_shipped_file_without_git(self):
+        # The tarball has no .git, so the number must not depend on `git describe`.
+        result = self.run_cli('--version')
         self.assertEqual(result.returncode, 0, result.stderr)
-        for name in EXCLUDED:
-            self.assertNotIn(f'{name}/', result.stdout)
+        self.assertEqual(result.stdout.strip(), 'aws-survey ' + (ROOT / 'VERSION').read_text().strip())
 
     def test_init_from_the_installed_tree_points_at_files_that_exist(self):
         if shutil.which('jq') is None:

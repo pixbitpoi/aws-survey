@@ -42,6 +42,7 @@ formula と `tests/test_distribution.py` の `INCLUDED_HIDDEN` を揃えるこ�
 | `libexec/` | ホスト側の実装。各スクリプトと `session-guard.json`、イメージのビルド（`docker.sh`。`run` と `lambda pull` と `container.sh` が共有）、一時キーだけで調査コンテナに 1 コマンド走らせる部品（`container.sh`）とコンテナに貸す列挙（`inventory.sh`。`ls` / `ec2` / `lambda` が使う）、矢印キーの選択と一時キーの判定（`menu.sh` / `keys.sh`）、エージェントのモデル・effort の既定と CLI のフラグ（`agents.sh`）、EC2 へ導入する診断ゲートウェイと、導入・撤去スクリプトの雛形（`ec2/`。`aws-survey ssh setup` / `ssh remove` が組み立てて SSM で送る。`--print` で書き出しだけもできる）、Lambda のコードの抽出器（`lambda/extract.py`。`aws-survey lambda pull` が使い捨てのコンテナにマウントして走らせる。調査コンテナのイメージには入らない） |
 | `container/`・`Dockerfile` | 調査コンテナへ渡る資材と、そのビルド定義。ビルド文脈は `container/`。EC2 の中を調べる `ec2` ラッパー（`container/ec2`）と、その実体の openssh-client・session-manager-plugin はイメージに入るので、ホストには要らない |
 | `templates/` | `init` が使う `environment.json` の雛形 |
+| `VERSION` | `aws-survey --version` と `--help` が表示する番号。リリース時にタグと揃える（下の手順） |
 
 | 入らないもの | 理由 |
 | --- | --- |
@@ -85,22 +86,26 @@ README を表示するコマンドは無く、`brew home` は formula の `homep
 
 1. `main` を push した状態で、`bash -n` と `python3 -m unittest discover -s tests -v` を通す。
 
-2. タグを打って push する。タグは `vX.Y.Z` の形式。formula の `version` はタグから決まるので書かない。
+2. `VERSION` をこれから打つタグの番号（`v` 無し）に書き換えてコミットする。`aws-survey --version` と `--help` の 1 行目が
+   ここを読む（git の作業ツリーから叩いたときだけ `git describe` の結果も添える。配布物には `.git` が無い）。
+   タグと `VERSION` が食い違うと、利用者の見る番号だけが古いままになる。
+
+3. タグを打って push する。タグは `vX.Y.Z` の形式。formula の `version` はタグから決まるので書かない。
 
    ```bash
    git tag -a v0.1.0 -m "v0.1.0"
    git push origin v0.1.0
    ```
 
-3. GitHub が生成する tarball の sha256 を取る。
+4. GitHub が生成する tarball の sha256 を取る。
 
    ```bash
    curl -sL https://github.com/pixbitpoi/aws-survey/archive/refs/tags/v0.1.0.tar.gz | shasum -a 256
    ```
 
-4. tap の `Formula/aws-survey.rb` で `url` のタグと `sha256` を更新する。`head` は `main` を指すので変更しない。
+5. tap の `Formula/aws-survey.rb` で `url` のタグと `sha256` を更新する。`head` は `main` を指すので変更しない。
 
-5. tap で確認してからコミット・push する。コミット件名は `aws-survey 0.1.0` のように formula 名とバージョンを書く。
+6. tap で確認してからコミット・push する。コミット件名は `aws-survey 0.1.0` のように formula 名とバージョンを書く。
 
    ```bash
    brew style Formula/aws-survey.rb
@@ -111,7 +116,7 @@ README を表示するコマンドは無く、`brew home` は formula の `homep
 
    短い名前で `brew test` するには、事前に `brew trust pixbitpoi/tap` で tap を信頼しておく。
 
-6. 入れた実行ファイルで通しを確認する（実 AWS と Docker が要る）。空のフォルダで
+7. 入れた実行ファイルで通しを確認する（実 AWS と Docker が要る）。空のフォルダで
    `aws-survey` → `init` → `role --create` → `credentials` → `verify` → `run` まで進むこと、
    `aws-survey status` の「本体」が `libexec` を指すことを見る。EC2 の中を調べる機能を出すときは、
    `ssh setup` → `role --create` → `credentials` → `ssh verify <host>` も見て、`run` のコンテナの `survey-status` に

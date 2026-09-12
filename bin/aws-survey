@@ -1,50 +1,10 @@
 #!/usr/bin/env bash
-# aws-survey — ホスト側の準備・起動を 1 つの入口にまとめる
+# aws-survey — AWS アカウントの構成を、コーディングエージェントに読み取り専用で調べさせる CLI のホスト側入口
 #
-#   aws-survey                      いまの段階を判定し（AWS は叩かない）、次の 1 手を案内して、準備完了まで止まらずに進める。
-#                                   端末なら何も聞かない（init の質問は除く）。端末でなければ 1 手ごとに聞き、
-#                                   読めなければ案内だけで終わる（エージェントは 1 本ずつ手渡す）。
-#                                   ssh setup のあとは、ポリシー → 一時キー → 接続の確認も同じ形で進める
-#   aws-survey status               到達点・一時キーの残り時間・本体とデータの場所
-#   aws-survey doctor               aws / jq / docker の有無と、発行失敗の切り分け（libexec/commands/doctor.sh）
-#   aws-survey init [--from <json>] [--force]
-#                                   対象フォルダに environment.json を作る（対話。--from か AWS_SURVEY_INIT_* で非対話）
-#   aws-survey role [--create]      経路の判定・ロール作成（libexec/commands/role.sh）
-#   aws-survey credentials          一時キーの発行・再発行（libexec/commands/credentials.sh）。一時キーを使う各コマンドが
-#                                   入口で残り時間を見て自動で発行し直すので、通常は打たない
-#   aws-survey verify               読み取り専用の検証（libexec/commands/verify.sh）
-#   aws-survey ls [サービス名...]   アカウントで使っているリソースの一覧（libexec/commands/ls.sh。調査コンテナの中で
-#                                   一時キーが読む。画面に出すだけで out/ には書かない）
-#   aws-survey login [claude|codex] エージェントのログインを済ませる（libexec/commands/login.sh。init が最後に呼ぶ。認証は
-#                                   コンテナ内のボリュームに残るので、対象ごとに初回だけ）
-#   aws-survey scan [--agent claude|codex]
-#                                   調査コンテナでエージェントを非対話で 1 回走らせ、対象アカウントの初期調査だけを行わせる
-#                                   （libexec/commands/scan.sh。待つだけ。端末では量の見積もりと推定の進捗を出す。数分〜数十分）
-#   aws-survey claude [引数...]     調査コンテナで Claude Code を対話で起動する（libexec/commands/agent.sh。-c で続き）
-#   aws-survey codex [引数...]      同じく Codex（resume --last で続き）
-#   aws-survey run [cmd]            調査コンテナの素のシェルに入る（libexec/commands/run.sh。通常は使わない）
-#   aws-survey ec2                  EC2 の一覧から 1 台選んで、中を調べる準備へ進む（libexec/commands/ec2.sh。
-#                                   未登録なら ssh setup、登録済みなら ssh verify / ssh remove / 調査へ）
-#   aws-survey lambda               Lambda 関数の一覧から選んで、コードを取り出す・消す（libexec/commands/lambda.sh）
-#
-#   1 台・1 関数ずつ手で進めるなら（ec2 / lambda が内部で呼ぶのと同じ）:
-#   aws-survey ssh setup <instance-id | Name タグ> [...]
-#                                   EC2 の中を調べるための診断ゲートウェイを SSM 経由で導入して登録する（libexec/commands/ssh.sh。任意の追加機能）
-#   aws-survey ssh setup --print [...]   その導入スクリプトを書き出すだけ（手動実行用）
-#   aws-survey ssh list             登録済みホスト・鍵の作成日時・導入日時
-#   aws-survey ssh verify <host>    調査コンテナから実際に接続して、通るもの・塞がっているものを確かめる
-#   aws-survey ssh rotate           鍵を作り直して登録済みホスト全部に再導入する
-#   aws-survey ssh remove <host>    EC2 から撤去し、タグと記録を消す（remove --print <host> は撤去スクリプトを出すだけ）
-#   aws-survey lambda pull <関数名>... | --all [--region <r>] [--with-deps]
-#                                   Lambda 関数のデプロイ済みのコードを取り出し、絞り込んで code/ に置く（libexec/commands/lambda.sh。任意の追加機能）
-#   aws-survey lambda list          取り出してある関数とレイヤー（AWS は叩かない）
-#   aws-survey lambda remove <関数名>... | --all   取り出したコードを消す
-#
-#   共通オプション:  --dir <対象フォルダ>   既定はカレントディレクトリ（AWS_SURVEY_DIR でも指定可）
-#
-#   init が聞くのは AWS への繋ぎ方（name / source_profile / region / role_name。IAM ユーザーのログインでは mfa_required と
-#   duration_seconds も）と、調査に使うエージェント（claude / codex とモデル・effort）。account_id と貸す相手はいまのログインから決め、
-#   refresh_command は aws-login に固定する。対象の概要・調査項目は聞かない。
+# 利用者向けの一覧は `aws-survey help`、内部で使うコマンドも含めた一覧は `aws-survey help --all`（cmd_help）。
+# 利用者が打つのは `aws-survey`（準備）・`scan`・`claude` / `codex`・`ls` / `ec2` / `lambda`・`status` / `doctor` だけで、
+# init / role / credentials / verify / login / run / ssh / lambda pull|list|remove は引数なし実行や ec2 / lambda が内部で呼ぶ。
+# バージョンは本体直下の VERSION（docs/release.md）。
 #
 # 本体（AWS_SURVEY_HOME）はこのファイルの実体パス（シンボリックリンク解決後）の親。環境変数で上書き可。
 # 対象固有の値は対象フォルダの environment.json が持つ。ここには書かない。
@@ -79,13 +39,14 @@ while [ $# -gt 0 ]; do
     --dir)   [ $# -ge 2 ] || die "--dir には対象フォルダを指定してください。"; DIR_OPT="$2"; shift 2 ;;
     --dir=*) DIR_OPT="${1#--dir=}"; shift ;;
     -h|--help|help) CMD=help; shift; break ;;
+    -V|--version|version) CMD=version; shift; break ;;
     --) shift; break ;;
     -*) die "不明なオプション: $1（aws-survey --help）" ;;
     *) break ;;
   esac
 done
-CMD="${CMD:-${1:-}}"
-[ $# -gt 0 ] && shift
+# -h / --version で CMD が決まっていれば、残り（help --all の --all など）はそのままサブコマンドへ渡す
+if [ -z "${CMD:-}" ]; then CMD="${1:-}"; [ $# -gt 0 ] && shift; fi
 # コマンド名の後ろに書かれた --dir も受け付ける（aws-survey status --dir <対象フォルダ>）。それ以外はサブコマンドへ渡す
 REST=()
 while [ $# -gt 0 ]; do
@@ -1171,13 +1132,86 @@ cmd_doctor() {
   [ "$ok" -eq 1 ]
 }
 
-cmd_help() { sed -n '2,46p' "$SELF" | sed 's/^# \{0,1\}//'; }
+version_string() {
+  local v="" desc
+  [ -r "$AWS_SURVEY_HOME/VERSION" ] && v=$(tr -d '[:space:]' < "$AWS_SURVEY_HOME/VERSION")
+  [ -n "$v" ] || v="unknown"
+  # git の作業ツリーから直接叩いているときは、タグからの距離も添える（配布物には .git が無い）
+  if [ -d "$AWS_SURVEY_HOME/.git" ] && command -v git >/dev/null 2>&1; then
+    desc=$(git -C "$AWS_SURVEY_HOME" describe --tags --always --dirty 2>/dev/null || true)
+    [ -z "$desc" ] || [ "$desc" = "v$v" ] || v="$v (git: $desc)"
+  fi
+  printf '%s\n' "$v"
+}
+
+cmd_version() { printf 'aws-survey %s\n' "$(version_string)"; }
+
+cmd_help() {
+  local all=0
+  case "${1:-}" in --all|-a|all) all=1 ;; esac
+  cat <<HELP
+aws-survey $(version_string) — コーディングエージェントによる AWS 構成調査ツール
+
+  Claude Code / Codex によって AWS の構成調査を自動的に行います。
+  エージェントはコンテナに隔離され、厳格に制限された読み取り専用のポリシーで AWS を調査します。
+  EC2やLambdaも調査でき、自動で調査させることも、エージェントと対話して調査を深掘りすることも可能です。
+  調査が完了すると out/ フォルダにレポートが生成されます。
+
+使い方:
+  aws-survey                    準備を進める。初回は接続先とエージェントを聞き、準備が済むまで自動で進む。
+                                済んでいれば、次に打つコマンドを案内する。迷ったらこれを打つ
+  aws-survey scan               エージェントに初期調査（何があるか・どう繋がっているか）を任せる。待つだけ。数分〜数十分
+  aws-survey claude             Claude Code を起動して、対話で調査を進める（-c で直前の会話の続き）
+  aws-survey codex              Codex を起動して、対話で調査を進める（resume --last で直前の会話の続き）
+
+  aws-survey ls [サービス名...] アカウントで使っているリソースの一覧を見る（任意。読むだけで out/ には書かない）
+  aws-survey ec2                EC2 を一覧から選び、その中まで調べられるようにする（任意）
+  aws-survey lambda             Lambda 関数を一覧から選び、コードを取り出して読めるようにする（任意）
+
+  aws-survey status             準備の到達点・一時キーの残り時間・本体とデータの場所
+  aws-survey doctor             必要なツールと設定の確認。うまく動かないときに
+
+共通オプション:
+  --dir <対象フォルダ>          対象フォルダを指定する（既定はカレントディレクトリ。AWS_SURVEY_DIR でも指定可）
+  --version                     バージョンを表示する
+  --help --all                  内部で使うコマンドも含めた一覧を表示する
+HELP
+  [ "$all" -eq 1 ] || return 0
+  cat <<HELP
+
+内部で使うコマンド（引数なしの aws-survey や ec2 / lambda が呼ぶ。通常は打たない）:
+  aws-survey init [--from <json>] [--force]
+                                対象フォルダに environment.json を作る（対話。--from か AWS_SURVEY_INIT_* で非対話）
+  aws-survey role [--create]    AWS への経路の判定と、調査用ロールの作成
+  aws-survey credentials        読み取り専用の一時キーの発行・再発行（各コマンドが入口で自動的に発行し直す）
+  aws-survey verify             一時キーが読み取り専用であることの検証
+  aws-survey login [claude|codex]
+                                エージェントのログイン（対象ごとに初回だけ。init が最後に呼ぶ）
+  aws-survey run [cmd]          調査コンテナの素のシェルに入る
+
+  aws-survey ssh setup <instance-id | Name タグ> [...]
+                                EC2 の中を調べるための診断ゲートウェイを SSM 経由で導入して登録する
+  aws-survey ssh setup --print [...]
+                                その導入スクリプトを書き出すだけ（手動実行用）
+  aws-survey ssh list           登録済みホスト・鍵の作成日時・導入日時
+  aws-survey ssh verify <host>  調査コンテナから実際に接続して、通るもの・塞がっているものを確かめる
+  aws-survey ssh rotate         鍵を作り直して登録済みホスト全部に再導入する
+  aws-survey ssh remove <host>  EC2 から撤去し、タグと記録を消す（remove --print <host> は撤去スクリプトを出すだけ）
+
+  aws-survey lambda pull <関数名>... | --all [--region <r>] [--with-deps]
+                                Lambda 関数のデプロイ済みのコードを取り出し、絞り込んで code/ に置く
+  aws-survey lambda list        取り出してある関数とレイヤー（AWS は叩かない）
+  aws-survey lambda remove <関数名>... | --all
+                                取り出したコードを消す
+HELP
+}
 
 case "$CMD" in
   "")          cmd_guide_loop ;;
   status)      cmd_status ;;
   doctor)      cmd_doctor ;;
-  help)        cmd_help ;;
+  help)        cmd_help "$@" ;;
+  version)     cmd_version ;;
   init)        cmd_init "$@" ;;
   role)        exec "$LIBEXEC_DIR/commands/role.sh" "$@" ;;
   credentials) exec "$LIBEXEC_DIR/commands/credentials.sh" "$@" ;;

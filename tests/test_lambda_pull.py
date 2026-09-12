@@ -487,8 +487,11 @@ class Wiring(LambdaCase):
 
     def test_help_lists_the_lambda_commands(self):
         result = self.run_cli('--help')
-        self.assertIn('aws-survey lambda pull', result.stdout)
+        self.assertIn('aws-survey lambda ', result.stdout)
         self.assertIn('共通オプション', result.stdout)
+        # pull / list / remove are what `aws-survey lambda` runs for the user; they only show in full
+        self.assertNotIn('aws-survey lambda pull', result.stdout)
+        self.assertIn('aws-survey lambda pull', self.run_cli('--help', '--all').stdout)
 
 
 if __name__ == '__main__':
