@@ -101,6 +101,7 @@ scan_percent() {
     p=$(( (7 * pf + 3 * pt) / 10 ))
   else
     k=$((n - B_N)); x=$((el - B_EL))
+    [ "$k" -ge 0 ] || k=0; [ "$x" -ge 0 ] || x=0     # find が一時的に数えられず n が減っても、0 で割らず表示を戻さない
     kf=$((100 * k / (k + B_N))); kt=$((100 * x / (x + B_EL)))
     p=$(( B_BASE + (94 - B_BASE) * (7 * kf + 3 * kt) / 1000 ))
   fi

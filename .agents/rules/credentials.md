@@ -77,7 +77,7 @@ Claude はさらに `-p` の前にワークスペースの信頼を `.claude.jso
 使うエージェントは `environment.json` の `agent`（`{name, model, effort}`。`libexec/agents.sh`）に記録する。`init` が聞いて書き、
 `scan --agent` も `aws-survey claude` / `codex` も `name` を「最後に使ったもの」として上書きする（別のエージェントに切り替えたときは
 `model` / `effort` もそのエージェントの既定に戻る。前のものの値は渡せないため）。古い形（`"agent": "claude"`）も名前だけとして読む。
-`model` / `effort` は起動時に CLI のフラグにして渡す（Claude Code は `--model` / `--effort`、Codex は `-m` / `-c model_reasoning_effort=`。
+`model` / `effort` は起動時に CLI のフラグにして渡す（Claude Code は `--model` / `--effort` に `--strict-mcp-config` を添える。claude.ai のコネクタ（MCP）が調査コンテナに持ち込まれ、未認証の案内が報告に混ざるのを防ぐ。Codex は `-m` / `-c model_reasoning_effort=`。
 対話も非対話も同じ。`launch_agent_flags`）。既定は Claude Code が `opus` / `medium`、Codex が `gpt-5.6-sol` / `low`。モデルの候補は
 `agents.sh` に並べるだけで、候補に無ければ手で入れられる（名前は各 CLI の都合で増減する）。イメージや設定ファイルには焼かない。
 利用者に見せる `scan` の説明は「対象アカウントの初期調査を <エージェント> が行います（…数十分かかります）」（`scan_desc`）、

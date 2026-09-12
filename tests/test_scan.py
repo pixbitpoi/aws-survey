@@ -156,8 +156,8 @@ class Scan(ScanCase):
         self.assertIn('SURVEY_PHASE_DIR=01_基礎調査', launch)
         image = launch.index('smoke:latest')
         # モデルと effort は environment.json の agent から（未定なら既定の opus / medium）
-        self.assertEqual(launch[image + 1:image + 7], ['claude', '--model', 'opus', '--effort', 'medium', '-p'])
-        self.assertEqual(launch[image + 8:], ['--output-format', 'text'])
+        self.assertEqual(launch[image + 1:image + 8], ['claude', '--model', 'opus', '--effort', 'medium', '--strict-mcp-config', '-p'])
+        self.assertEqual(launch[image + 9:], ['--output-format', 'text'])
         self.assertIn('inventory in progress', result.stdout)           # the agent's output is streamed
         self.assertIn('初期調査を終えました（', result.stdout)
         # what the run left in out/, by place: the raw files by count and name, the report and the asks by their headings
@@ -208,7 +208,7 @@ class Scan(ScanCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         launch = self.agent_run()
         image = launch.index('smoke:latest')
-        self.assertEqual(launch[image + 1:image + 7], ['claude', '--model', 'sonnet', '--effort', 'high', '-p'])
+        self.assertEqual(launch[image + 1:image + 8], ['claude', '--model', 'sonnet', '--effort', 'high', '--strict-mcp-config', '-p'])
         self.assertIn('エージェント: Claude Code（sonnet / high）', result.stdout)
         self.assertEqual(self.environment()['agent'], {'name': 'claude', 'model': 'sonnet', 'effort': 'high'})
         # 別のエージェントに切り替えると、そのエージェントの既定に戻る（前の値は渡せない）
@@ -584,7 +584,7 @@ class InteractiveAgent(ScanCase):
         launch = self.docker_runs()[-1]
         self.assertIn('-it', launch)
         self.assertEqual(launch[launch.index('--name') + 1], 'smoke')
-        self.assertEqual(launch[-7:], ['smoke:latest', 'claude', '--model', 'opus', '--effort', 'medium', '-c'])
+        self.assertEqual(launch[-8:], ['smoke:latest', 'claude', '--model', 'opus', '--effort', 'medium', '--strict-mcp-config', '-c'])
         self.assertIn(f'{self.target}/out:/home/node/aws-survey/out', launch)
         self.assertEqual(self.environment()['agent'], {'name': 'claude', 'model': 'opus', 'effort': 'medium'})
         self.assertIn('◆ aws-survey claude', text)

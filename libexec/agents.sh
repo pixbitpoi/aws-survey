@@ -36,7 +36,7 @@ agent_flags() {
   [ -n "$model" ]  || model=$(agent_default_model "$agent")
   [ -n "$effort" ] || effort=$(agent_default_effort "$agent")
   case "$agent" in
-    claude) AGENT_FLAGS=(--model "$model" --effort "$effort") ;;
+    claude) AGENT_FLAGS=(--model "$model" --effort "$effort" --strict-mcp-config) ;;   # claude.ai のコネクタ（MCP）を調査コンテナに持ち込まない
     codex)  AGENT_FLAGS=(-m "$model" -c "model_reasoning_effort=$effort") ;;
     *)      AGENT_FLAGS=() ;;
   esac
