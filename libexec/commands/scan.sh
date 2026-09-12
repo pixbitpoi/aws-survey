@@ -310,7 +310,10 @@ scan_codex_text() {
 agent_cmd() {
   case "$AGENT" in
     claude) launch_run --name "${SURVEY_NAME}-scan" -- claude "${AGENT_FLAGS[@]}" -p "$SCAN_PROMPT" --output-format text ;;
-    codex)  launch_run --name "${SURVEY_NAME}-scan" -- codex "${AGENT_FLAGS[@]}" exec --skip-git-repo-check --color never --json "$SCAN_PROMPT" | scan_codex_text ;;
+    # ガードが拒否するたびに Codex 本体が stderr に ERROR（codex_core::tools::router）を出す。拒否の理由はエージェントに返っていて、
+    # 環境確認ではわざと拒否させるので、そのログだけ消す（他の ERROR、たとえば 401 は残す）
+    codex)  launch_run --name "${SURVEY_NAME}-scan" -e 'RUST_LOG=codex_core::tools::router=off,error' \
+              -- codex "${AGENT_FLAGS[@]}" exec --skip-git-repo-check --color never --json "$SCAN_PROMPT" | scan_codex_text ;;
   esac
 }
 status=0

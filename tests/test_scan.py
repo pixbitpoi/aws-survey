@@ -253,6 +253,7 @@ class Scan(ScanCase):
         launch = self.agent_run()
         self.assertEqual(launch[launch.index('codex'):launch.index('codex') + 10],
                          ['codex', '-m', 'gpt-5.6-sol', '-c', 'model_reasoning_effort=low', 'exec', '--skip-git-repo-check', '--color', 'never', '--json'])
+        self.assertIn('RUST_LOG=codex_core::tools::router=off,error', launch)   # hook denials are the agent's business, not the screen's
         self.assertEqual(self.environment()['agent'], {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
         self.assertIn('aws-survey codex', result.stdout)
         self.log.unlink()
