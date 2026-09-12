@@ -376,13 +376,48 @@ guide_run() {
   esac
 }
 
+# 端末で続けて実行するときの 1 手。画面には回転する印付きの 1 行だけを持ち（説明 → コマンドの見出しと ✔ の文言に入れ替わる）、
+# 終わったら ✔ の 1 行に畳む。失敗したら ✗ と、記録しておいた出力の全部を見せて止まる（libexec/ui.sh の簡潔表示）。
+# run は端末を渡すので畳まず、静かな表示（✔ ⚠ ✗ だけ）で exec する。
+guide_run_compact() {
+  local desc="$1" cmd="$2" rc dir spid; shift 2
+  case "$cmd" in
+    init) guide_run init "$@"; return $? ;;
+    run)  AWS_SURVEY_COMPACT=1 exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
+  esac
+  dir=$(mktemp -d) || ui_die "一時ディレクトリを作れません。"
+  printf '%s' "$desc" > "$dir/msg"; : > "$dir/log"; : > "$dir/keep"
+  ui_spin_loop "$dir" &
+  spid=$!
+  AWS_SURVEY_CHAIN=1 AWS_SURVEY_COMPACT=1 AWS_SURVEY_SPIN_DIR="$dir" bash "$LIBEXEC_DIR/commands/$cmd.sh" "$@" >> "$dir/log" 2>&1
+  rc=$?
+  ui_spin_end "$dir" "$spid"
+  if [ "$rc" -eq 0 ]; then
+    ui_ok "$(cat "$dir/msg")"
+  else
+    ui_err "$CMD_NAME $cmd${*:+ $*} が失敗しました"
+    echo ""
+    ui_text "そのときの出力:"
+    ui_raw "$(cat "$dir/log")"
+  fi
+  rm -rf "$dir"
+  return "$rc"
+}
+
 # 引数なしの入口。判定 → 案内 → （答えが「はい」なら）実行 → もう一度判定、を最後まで繰り返す。
 # 判定そのものは AWS を叩かない。AWS に触るのは、利用者が実行に同意したあとの各コマンドだけ。
+# 端末なら簡潔表示: 段階の一覧は最初の 1 回だけ出し、あとは 1 手につき 1 行（guide_run_compact）。
 cmd_guide_loop() {
-  local ran="" rc
+  local ran="" rc compact=0 first=1
+  ! { [ -t 0 ] && [ -t 1 ]; } || compact=1
   while :; do
     guide_reset
-    cmd_guide || return $?
+    if [ "$compact" -eq 1 ] && [ "$first" -eq 0 ]; then
+      cmd_guide >/dev/null || { cmd_guide; return $?; }
+    else
+      cmd_guide || return $?
+    fi
+    first=0
     [ -n "$GUIDE_NEXT" ] || return 0
     # 直前に実行した 1 手で段階が変わらなかったときは、その続き（role --create など）を出す。
     # 続きが無ければ、同じコマンドを勧め続けずにここで止める。
@@ -397,25 +432,33 @@ cmd_guide_loop() {
         return 0
       fi
     fi
-    guide_show_next
-    echo ""
     if guide_needs_confirm "$GUIDE_NEXT"; then
+      [ "$compact" -eq 0 ] || echo ""
+      guide_show_next
+      echo ""
       guide_confirm "$GUIDE_NEXT" || return 0
-    else
+      echo ""
+    elif [ "$compact" -eq 0 ]; then
+      guide_show_next
+      echo ""
       printf '  %s❯%s 続けて %s を実行します\n' "$C_CYAN" "$C_RESET" "$(ui_cmd "$CMD_NAME $GUIDE_NEXT")"
+      echo ""
     fi
-    echo ""
     ran="$GUIDE_NEXT"
     # 案内の文字列をそのまま引数に割る（role --create）。中身は上で組み立てた定数だけ
-    guide_run $GUIDE_NEXT
+    if [ "$compact" -eq 1 ]; then
+      guide_run_compact "$GUIDE_NEXT_DESC" $GUIDE_NEXT
+    else
+      guide_run $GUIDE_NEXT
+    fi
     rc=$?
     if [ "$rc" -ne 0 ]; then
       echo ""
-      ui_err "$CMD_NAME $ran が失敗しました。上の出力を確認してください。"
+      [ "$compact" -eq 1 ] || ui_err "$CMD_NAME $ran が失敗しました。上の出力を確認してください。"
       ui_text "直したら、もう一度 $CMD_NAME を実行すれば続きから再開できます。"
       return "$rc"
     fi
-    echo ""
+    [ "$compact" -eq 1 ] || echo ""
   done
 }
 

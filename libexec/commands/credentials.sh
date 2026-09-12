@@ -42,10 +42,12 @@ if ! check_source; then
   if [ -n "${REFRESH_CMD:-}" ] && [ "$REFRESH_CMD" != "null" ]; then
     echo ""
     ui_text "environment.json に書いてあるログインのコマンドを実行します。MFA コードの入力やブラウザでの認証を求められることがあります。"
-    printf '    %s\n' "$(ui_cmd "$REFRESH_CMD")"
-    echo ""
-    # 利用者自身が environment.json に書いたコマンド。対話的でよい。
-    eval "$REFRESH_CMD"
+    ui_pause
+    ui_tty "    $(ui_cmd "$REFRESH_CMD")
+"
+    # 利用者自身が environment.json に書いたコマンド。対話的でよい（簡潔表示では端末に直接つなぐ）
+    if ui_compact; then eval "$REFRESH_CMD" > /dev/tty 2>&1; else eval "$REFRESH_CMD"; fi
+    ui_resume
     echo ""
     ui_text "もう一度確かめます。"
     check_source || { ui_raw "$who"; die "ログインのコマンドを実行しても $PROFILE_SRC が使えるようになりませんでした。
@@ -68,9 +70,11 @@ ui_ok "$who"
 # environment.json の auth.duration_seconds をその場で直して続けられるようにする（聞いて「はい」のときだけ。読めなければ案内だけで止まる）
 fix_duration_or_die() {
   local ans tmp
-  printf '  %s❯%s environment.json の auth.duration_seconds を %s → %s に直して、そのまま発行しますか？ %s(Y/n)%s: ' \
-    "$C_CYAN" "$C_RESET" "$DURATION" "$CHAIN_MAX_SECONDS" "$C_DIM" "$C_RESET"
+  ui_pause
+  ui_tty "$(printf '  %s❯%s environment.json の auth.duration_seconds を %s → %s に直して、そのまま発行しますか？ %s(Y/n)%s: ' \
+    "$C_CYAN" "$C_RESET" "$DURATION" "$CHAIN_MAX_SECONDS" "$C_DIM" "$C_RESET")"
   if read_line ans; then
+    ui_resume
     [ -t 0 ] || echo ""
     case "$ans" in
       ""|y|Y|yes|YES)
@@ -81,6 +85,7 @@ fix_duration_or_die() {
         return 0 ;;
     esac
   fi
+  ui_resume
   echo ""
   ui_text "environment.json の auth.duration_seconds を ${CHAIN_MAX_SECONDS} にしてから、もう一度実行してください: $ENV_FILE"
   die "一時キーを発行できませんでした。$OUT は変更していません。"
@@ -164,7 +169,7 @@ if ! json=$(
 fi
 
 packed=$(echo "$json" | jq -r '.PackedPolicySize // "n/a"')
-ui_ok "発行しました"
+ui_ok "一時キーを発行しました（$((DURATION / 60)) 分）"
 ui_kv "セッションポリシー" "上限の ${packed}%（100% を超えると発行できません）"
 
 # ---- ここまで来て初めて書き込む ----

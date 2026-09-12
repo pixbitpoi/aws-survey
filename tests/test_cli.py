@@ -21,7 +21,7 @@ CLI = ROOT / 'bin/aws-survey'
 BASE_TOOLS = ['bash', 'sh', 'env', 'jq', 'date', 'stat', 'mktemp', 'uname', 'tr', 'sed', 'grep',
               'dirname', 'basename', 'readlink', 'cat', 'rm', 'mkdir', 'chmod', 'cp', 'mv',
               'python3', 'head', 'tail', 'tee', 'cut', 'sort', 'wc', 'ls', 'awk', 'printf', 'echo',
-              'test', 'touch']
+              'test', 'touch', 'sleep']
 
 FAKE_AWS = '''#!/usr/bin/env python3
 import json, os, sys
@@ -1050,7 +1050,8 @@ class Role(CliCase):
 class Chain(CliCase):
     """No-arg `aws-survey` off a terminal asks before each step and keeps going: guidance, confirm, run, judge again.
     Declining, a step that fails, or no terminal all stop the chain with the command still named.
-    On a terminal (pty) it runs through without asking, except once before `role --create`."""
+    On a terminal (pty) it runs through without asking, except once before `role --create`, and each
+    step is folded into one line (a spinner while it runs, then ✔ with the command's last ✔ text)."""
 
     def drive(self, keys, stage_env):
         import pty, select, time
@@ -1093,10 +1094,16 @@ class Chain(CliCase):
         code, text = self.drive([], {})
         self.assertEqual(code, 0, text)
         self.assertNotIn('実行しますか', text)
-        self.assertIn('続けて aws-survey credentials を実行します', text)
-        self.assertIn('◆ aws-survey credentials', text)
-        self.assertIn('続けて aws-survey run を実行します', text)
-        self.assertIn('◆ aws-survey run', text)
+        lines = [l for l in text.replace('\r', '\n').splitlines() if l.strip()]
+        # 段階の一覧は最初の 1 回だけ。credentials は 1 行に畳まれ、その中身（見出し・表）は画面に出ない
+        self.assertEqual(sum('● 4 一時キー' in l for l in lines), 1)
+        self.assertIn('✔ 一時キーを発行しました（60 分）', text)
+        self.assertNotIn('◆ aws-survey credentials', text)
+        self.assertNotIn('1/3 ホストのプロファイル', text)
+        self.assertIn('⠋', text)                          # 回転する印
+        # run は端末を渡すので畳まず、静かな表示（✔ だけ）
+        self.assertNotIn('◆ aws-survey run', text)
+        self.assertNotIn('1/3 コンテナのイメージを用意する', text)
         self.assertTrue(any('assume-role' in c for c in self.calls()))
         self.assertTrue(any(c[:2] == ['docker', 'run'] for c in self.calls()), text)
 
@@ -1104,11 +1111,21 @@ class Chain(CliCase):
         self.write_environment()                          # 段階 2: role は聞かずに走り、role --create の前で止まって聞く
         code, text = self.drive([('role --create を実行しますか', b'n\r')], {})
         self.assertEqual(code, 0, text)
-        self.assertIn('続けて aws-survey role を実行します', text)
-        self.assertIn('◆ aws-survey role', text)
+        self.assertIn('✔ ロールは用意できています', text)
+        self.assertNotIn('1/3 ホストのプロファイル', text)
         self.assertIn('いま aws-survey role --create を実行しますか？ (Y/n)', text)
         self.assertIn('ここで止めます', text)
         self.assertFalse(any('create-role' in c for c in self.calls()))
+
+    def test_on_a_terminal_a_failing_step_shows_its_output_and_stops(self):
+        self.verified()
+        # 偽 aws が assume-role を断る → credentials が復旧を聞く（回転を止めて端末に直接）→ n で止まる
+        code, text = self.drive([('そのまま発行しますか', b'n\r')], {'FAKE_ASSUME_CHAINING': '1'})
+        self.assertNotEqual(code, 0, text)
+        self.assertIn('✗ aws-survey credentials が失敗しました', text)
+        self.assertIn('そのときの出力', text)
+        self.assertIn('role chaining', text)
+        self.assertIn('もう一度 aws-survey を実行すれば', text)
 
     def verified(self):
         self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08',
