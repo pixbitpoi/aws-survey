@@ -297,10 +297,20 @@ echo ""
 SCAN_LOG=$(mktemp) || ui_die "一時ファイルを作れません。"
 START_MARK=$(mktemp) || ui_die "一時ファイルを作れません。"     # この回に書かれたファイルを見分ける目印（進捗とまとめが -newer で見る）
 trap 'rm -f "$SCAN_LOG" "$START_MARK"' EXIT
+# Codex の `exec` は既定で、フックの起動（hook: PreToolUse）・実行した各コマンド・out/ への差分を逐一流す。
+# 読めるのはエージェントの文章だけなので、`--json`（1 行 1 イベント）で受けて agent_message とエラーだけを文章に戻す
+# （Claude Code の `--output-format text` に相当）。stderr（ログイン切れなどの CLI 自身の報せ）は素通しにして、失敗の原因の grep に残す。
+scan_codex_text() {
+  jq --unbuffered -Rr '(fromjson? // empty)
+    | if .type == "item.completed" and .item.type == "agent_message" then .item.text + "\n"
+      elif .type == "error" then "error: " + (.message // tostring)
+      elif .type == "turn.failed" then "error: " + (.error.message // tostring)
+      else empty end'
+}
 agent_cmd() {
   case "$AGENT" in
     claude) launch_run --name "${SURVEY_NAME}-scan" -- claude "${AGENT_FLAGS[@]}" -p "$SCAN_PROMPT" --output-format text ;;
-    codex)  launch_run --name "${SURVEY_NAME}-scan" -- codex "${AGENT_FLAGS[@]}" exec --skip-git-repo-check --color never "$SCAN_PROMPT" ;;
+    codex)  launch_run --name "${SURVEY_NAME}-scan" -- codex "${AGENT_FLAGS[@]}" exec --skip-git-repo-check --color never --json "$SCAN_PROMPT" | scan_codex_text ;;
   esac
 }
 status=0

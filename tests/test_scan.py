@@ -67,7 +67,7 @@ if (cmd[0] == "claude" and "-p" in cmd) or (cmd[0] == "codex" and "exec" in cmd)
     if cmd[0] == "claude":
         assert state.get("trusted"), "claude -p needs the workspace trusted first, or the allow list is ignored"
     if os.environ.get("FAKE_SCAN_NOT_LOGGED_IN"):
-        print("Not logged in. Please run /login"); sys.exit(1)
+        print("Not logged in. Please run /login", file=sys.stderr); sys.exit(1)
     out = mounts["/home/node/aws-survey/out"]
     phase = next(a.split("=", 1)[1] for a in argv if a.startswith("SURVEY_PHASE_DIR="))
     if os.environ.get("FAKE_SCAN_WRITES"):
@@ -83,7 +83,13 @@ if (cmd[0] == "claude" and "-p" in cmd) or (cmd[0] == "codex" and "exec" in cmd)
         open(os.path.join(out, phase, "report", "ユーザー確認事項.md"), "w").write("# 確認事項\n\n## 中を見れば分かること\n\n## ユーザーにしか分からないこと\n")
     if os.environ.get("FAKE_SCAN_SLOW"):
         import time; time.sleep(float(os.environ["FAKE_SCAN_SLOW"]))
-    print("inventory in progress"); sys.exit(int(os.environ.get("FAKE_SCAN_EXIT", "0")))
+    if cmd[0] == "codex":
+        assert "--json" in cmd, "codex exec must stream JSONL so scan can keep only the agent's messages"
+        print(json.dumps({"type": "item.completed", "item": {"id": "item_0", "type": "command_execution", "command": "aws sts get-caller-identity"}}))
+        print(json.dumps({"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "inventory in progress"}}))
+    else:
+        print("inventory in progress")
+    sys.exit(int(os.environ.get("FAKE_SCAN_EXIT", "0")))
 sys.exit(0)
 '''
 
@@ -245,8 +251,8 @@ class Scan(ScanCase):
         result = self.run_cli('scan', '--agent', 'codex', FAKE_SCAN_WRITES='1')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         launch = self.agent_run()
-        self.assertEqual(launch[launch.index('codex'):launch.index('codex') + 9],
-                         ['codex', '-m', 'gpt-5.6-sol', '-c', 'model_reasoning_effort=low', 'exec', '--skip-git-repo-check', '--color', 'never'])
+        self.assertEqual(launch[launch.index('codex'):launch.index('codex') + 10],
+                         ['codex', '-m', 'gpt-5.6-sol', '-c', 'model_reasoning_effort=low', 'exec', '--skip-git-repo-check', '--color', 'never', '--json'])
         self.assertEqual(self.environment()['agent'], {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
         self.assertIn('aws-survey codex', result.stdout)
         self.log.unlink()
