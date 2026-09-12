@@ -52,8 +52,9 @@ choose_menu() {
     draw_menu
   done
   printf -v "$var" '%s' "${entries[cursor]}"
-  # 問い + 候補 + ヒント + Enter で bash が出す改行 1 行を消して、呼ぶ側の結果 1 行に畳む
-  printf '\033[%dA' "$((count+3))"
+  # 問い + 候補 + ヒントを消して、呼ぶ側の結果 1 行に畳む（read -s は Enter で改行を出さないので、カーソルはヒントの次の行にある。
+  # 1 行多く消すと、問いの上の行（呼ぶ側の補足や、前の項目の結果）まで消える）
+  printf '\033[%dA' "$((count+2))"
   printf '\033[J'
   show_cursor
   trap - EXIT
@@ -107,7 +108,7 @@ choose_multi() {
   for i in "${!entries[@]}"; do [ "${marks[i]}" = 1 ] && picked="${picked:+$picked }$i"; done
   [ -n "$picked" ] || picked="$cursor"
   printf -v "$var" '%s' "$picked"
-  printf '\033[%dA' "$((count+3))"
+  printf '\033[%dA' "$((count+2))"
   printf '\033[J'
   show_cursor
   trap - EXIT
