@@ -157,22 +157,23 @@ ec2_pending() {
   return 0
 }
 
-# 任意の追加の現状。段階 5 の案内と status が出す。無いものは、足すためのコマンドを添える
+# 任意の追加の現状。段階 5・6 の案内と status が出す。無いものは、足すためのコマンドを添える。
+# 「brief」を渡すとコマンドを添えない（準備完了の「次はこの順で進めます」が同じコマンドを並べるので、二度書かない）
 show_extras() {
-  local n
+  local n brief="${1:-}"
   ui_head "任意の追加（要らなければ飛ばせます。scan の前でも後でも足せて、次にコンテナを起動したときから中で使えます）"
   if [ -n "$SSH_HOSTS" ]; then
     ui_ok "EC2 の中を調べる: 登録済みホスト ${SSH_HOSTS}"
   else
     ui_skip "EC2 の中を調べる: なし"
-    ui_text "$(ui_cmd "$CMD_NAME ec2") で一覧から選んで登録します（SSM 管理下のインスタンスに限る）"
+    [ "$brief" = brief ] || ui_text "$(ui_cmd "$CMD_NAME ec2") で一覧から選んで登録します（SSM 管理下のインスタンスに限る）"
   fi
   n=$(lambda_pulled_count)
   if [ "$n" -gt 0 ]; then
     ui_ok "Lambda のコードを読む: 取り出してある関数 ${n} 件"
   else
     ui_skip "Lambda のコードを読む: なし"
-    ui_text "$(ui_cmd "$CMD_NAME lambda") で一覧から選んで取り出します"
+    [ "$brief" = brief ] || ui_text "$(ui_cmd "$CMD_NAME lambda") で一覧から選んで取り出します"
   fi
   echo ""
 }
@@ -319,12 +320,14 @@ cmd_guide() {
   else
     show_track 6 "調査: 初期調査済み（報告は out/ の report/ に）。続きはコンテナ内でユーザーと対話で進めます"
   fi
-  show_extras
+  show_extras brief
   guide_ready
 }
 
 # 準備が終わったあとの案内。ここから先は自動では実行しない（scan は時間がかかり、claude / codex は端末を渡す）
-# 順は scan（初期調査）→ claude / codex（対話）→ ls。run（素のシェル）は出さない。対象のまとめ（init のあと）もここに出す
+# 順は scan（初期調査。済んでいれば出さない）→ まだ足していない任意の追加（ec2 / lambda。scan のあとの案内と同じ順）
+# → claude / codex（対話）→ ls（scan の前だけ。済んでからは一覧は報告にある）。run（素のシェル）は出さない。
+# scan のやり直しは並べない（scan 自身が前回の日時を出して確かめるので、打てば足りる）。対象のまとめ（init のあと）もここに出す
 guide_ready() {
   local agent="${SURVEY_AGENT:-}"
   ui_head "準備完了"
@@ -336,6 +339,8 @@ guide_ready() {
   if ! scan_done; then
     also_cmd "$CMD_NAME scan" "$(scan_desc "$agent")"
   fi
+  [ -n "$SSH_HOSTS" ] || also_cmd "$CMD_NAME ec2" "任意。EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
+  [ "$(lambda_pulled_count)" -gt 0 ] || also_cmd "$CMD_NAME lambda" "任意。Lambda のコードを取り出して読めるようにします。一覧から選びます"
   if [ -n "$agent" ]; then
     also_cmd "$CMD_NAME $agent" "$(agent_label "$agent") と対話で調査を進めます"
     case "$agent" in
@@ -346,10 +351,9 @@ guide_ready() {
     also_cmd "$CMD_NAME claude" "Claude Code と対話で調査を進めます"
     also_cmd "$CMD_NAME codex" "Codex と対話で調査を進めます"
   fi
-  if scan_done; then
-    also_cmd "$CMD_NAME scan" "初期調査をやり直します（$(agent_label "$agent") が非対話で。待つだけ。前回の日時を出して確かめてから始めます）"
+  if ! scan_done; then
+    also_cmd "$CMD_NAME ls" "任意。アカウントで使っているリソースの一覧を眺めます（読むだけで、out/ には書きません）"
   fi
-  also_cmd "$CMD_NAME ls" "任意。アカウントで使っているリソースの一覧を眺めます（読むだけで、out/ には書きません）"
 }
 
 # 端末なら何も聞かずに進める（どの 1 手も準備に必ず要るもので、role --create もその 1 つ）。

@@ -308,8 +308,13 @@ class StateTable(CliCase):
         self.write_keys(iso(datetime.now(timezone.utc) + timedelta(minutes=45)))
         result = self.run_cli()
         self.assert_stage(result, 6, '済（2026-09-12T10:32+0900）', '初期調査済み', 'aws-survey codex',
-                          'aws-survey codex resume --last', 'aws-survey scan')
+                          'aws-survey codex resume --last', 'aws-survey ec2', 'aws-survey lambda')
         self.assertNotIn('aws-survey claude', result.stdout)
+        # 済んだ scan のやり直しと ls は並べない。まだ足していない任意の追加（ec2 / lambda）は対話の前に並ぶ
+        self.assertNotIn('aws-survey scan', result.stdout)
+        self.assertNotIn('aws-survey ls', result.stdout)
+        order = [result.stdout.index(c) for c in ('aws-survey ec2', 'aws-survey lambda', 'aws-survey codex')]
+        self.assertEqual(order, sorted(order))
         self.assertIn('エージェント      Codex（gpt-5.6-sol / low）', result.stdout)     # 古い形（文字列）も既定で読む
 
     def test_stage_5_lists_the_optional_additions(self):
@@ -324,8 +329,8 @@ class StateTable(CliCase):
             (path / '_manifest.json').write_text('{}')
         (self.target / 'code/lambda-layers/r1/l1/1').mkdir(parents=True)
         result = self.run_cli()
-        self.assert_stage(result, 5, '取り出してある関数 3 件', 'aws-survey scan')
-        self.assertNotIn('で一覧から選んで取り出します', result.stdout)
+        self.assert_stage(result, 5, '取り出してある関数 3 件', 'aws-survey scan', 'aws-survey ec2')
+        self.assertNotIn('aws-survey lambda', result.stdout)
         self.assertIn('取り出してある関数 3 件', self.run_cli('status').stdout)
 
     def ec2_environment(self, setup=None, hosts=None, session_hosts=None, expiration=None):
