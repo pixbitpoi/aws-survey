@@ -3,7 +3,7 @@
 # 調査コンテナと同じイメージの中で、読み取り専用の一時キーで走る（ホストが /x/ に貸して bash で叩く）。
 # 読むだけで、ファイルには何も書かない。
 #
-#   inventory.sh --region <r> [サービス名...]      無指定なら SERVICES の全部を固定順で
+#   inventory.sh --region <r> [サービス名...]      無指定なら SERVICES の全部を固定順で。cost（Cost Explorer）は名指ししたときだけ
 #
 # 出力（順序は決定的。サービスは固定順、項目は id 順）:
 #   {"kind":"service","service":"ec2","region":"ap-northeast-1","status":"ok","count":3}
@@ -12,10 +12,13 @@
 # service 行は ok / denied / error のどれでも必ず 1 行出す（権限が無いサービスも行を落とさない）。
 # 項目の共通キーは id / name / state、サービス固有の値は extra に入れる（読む側が知らないキーが増えても壊れない）。
 # ec2 の extra.ssm は SSM の管理下か（Online / なし / ?）。SSM が読めないときは ssm の denied 行を別に出し、? にする。
+# cost は先月に課金のあったサービス（Cost Explorer。us-east-1 だけ）。id はサービス名、extra.amount は金額。
+# 無指定の一覧には入れない（ls はリソースの一覧で、scan が調査の量を見積もるときに名指しで読む）。
 # 終了コードは 0 = 全部 ok、1 = 読めないサービスがあった。
 set -u
 
 SERVICES=(ec2 lambda vpc s3 rds ecs elb cloudfront)
+EXTRA_SERVICES=(cost)
 INV_REGION="${AWS_DEFAULT_REGION:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -121,11 +124,24 @@ inv_cloudfront() {
   publish cloudfront "$items" global
 }
 
+# 先月の 1 日から今月の 1 日まで（Cost Explorer の End は含まない）。date -d に頼らず月を数える
+inv_cost() {
+  local y m ly lm items
+  y=$(date -u +%Y); m=$((10#$(date -u +%m)))
+  if [ "$m" -eq 1 ]; then ly=$((y - 1)); lm=12; else ly=$y; lm=$((m - 1)); fi
+  items=$(call cost ce get-cost-and-usage --region us-east-1 \
+    --time-period "Start=$(printf '%04d-%02d-01' "$ly" "$lm"),End=$(printf '%04d-%02d-01' "$y" "$m")" \
+    --granularity MONTHLY --metrics UnblendedCost --group-by Type=DIMENSION,Key=SERVICE \
+    --query 'ResultsByTime[0].Groups[].{id:Keys[0],name:Keys[0],extra:{amount:Metrics.UnblendedCost.Amount,unit:Metrics.UnblendedCost.Unit}}') || return 1
+  # 金額が 0 のサービスは落とす（無料枠・過去の名残で行だけ残る）
+  publish cost "$(jq -c '(. // []) | map(select((.extra.amount | tonumber? // 0) > 0))' <<< "$items")" global
+}
+
 [ $# -gt 0 ] || set -- "${SERVICES[@]}"
 for s in "$@"; do
-  case " ${SERVICES[*]} " in
+  case " ${SERVICES[*]} ${EXTRA_SERVICES[*]} " in
     *" $s "*) ;;
-    *) echo "知らないサービスです: ${s}（${SERVICES[*]}）" >&2; exit 2 ;;
+    *) echo "知らないサービスです: ${s}（${SERVICES[*]} ${EXTRA_SERVICES[*]}）" >&2; exit 2 ;;
   esac
 done
 failed=0

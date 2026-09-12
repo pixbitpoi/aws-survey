@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -43,6 +44,13 @@ mounts = {}
 for i, a in enumerate(argv):
     if a == "-v":
         src, dst = argv[i + 1].split(":")[:2]; mounts[dst] = src
+if cmd[:2] == ["bash", "/x/inventory.sh"]:
+    # the lent listing that scan uses to size the survey (Cost Explorer plus the resource services); canned answers
+    assert "-it" not in argv and not any("aws-survey/out" in a for a in argv), "the estimate must not see out/"
+    if os.environ.get("FAKE_INVENTORY"):
+        for line in json.loads(os.environ["FAKE_INVENTORY"]):
+            print(json.dumps(line))
+    sys.exit(0)
 if cmd[:3] == ["claude", "auth", "status"] or cmd[:3] == ["codex", "login", "status"]:
     assert "-it" not in argv
     assert not any(":ro" in a and ".aws-claude" in a for a in argv), "the status check must not carry the key"
@@ -63,9 +71,13 @@ if (cmd[0] == "claude" and "-p" in cmd) or (cmd[0] == "codex" and "exec" in cmd)
     if os.environ.get("FAKE_SCAN_WRITES"):
         os.makedirs(os.path.join(out, "_環境"), exist_ok=True)
         os.makedirs(os.path.join(out, phase, "raw"), exist_ok=True)
+        os.makedirs(os.path.join(out, phase, "log"), exist_ok=True)
         open(os.path.join(out, "_環境", "00_動作確認.md"), "w").write("確認した\n")
         for n in ("raw-a.json", "raw-b.json"):
             open(os.path.join(out, phase, "raw", n), "w").write("{}\n")
+        open(os.path.join(out, phase, "log", "01_棚卸し.md"), "w").write("# 棚卸し\n\n## 見つけたもの\n\n- 2 件\n\n## 聞きたいこと\n\n- 用途\n")
+    if os.environ.get("FAKE_SCAN_SLOW"):
+        import time; time.sleep(float(os.environ["FAKE_SCAN_SLOW"]))
     print("inventory in progress"); sys.exit(int(os.environ.get("FAKE_SCAN_EXIT", "0")))
 sys.exit(0)
 '''
@@ -81,6 +93,10 @@ class ScanCase(test_cli.CliCase, PtyMixin):
         self.add_tool('docker', FAKE_DOCKER)
         self.state_file = self.base / 'state.json'
         self.state_file.write_text('{}')
+        for tool in ('find',):                    # the progress line and the closing summary look at out/ with find
+            found = shutil.which(tool)
+            if found and not (self.bin / tool).exists():
+                (self.bin / tool).symlink_to(found)
 
     def ready(self, minutes=45, setup=None, agent=None):
         # agent は古い形（文字列。名前だけ）でも {name, model, effort} でも渡せる
@@ -138,8 +154,35 @@ class Scan(ScanCase):
         self.assertEqual(launch[image + 1:image + 7], ['claude', '--model', 'opus', '--effort', 'medium', '-p'])
         self.assertEqual(launch[image + 8:], ['--output-format', 'text'])
         self.assertIn('inventory in progress', result.stdout)           # the agent's output is streamed
-        self.assertIn('初期調査を終えました（生データ 2 件', result.stdout)
+        self.assertIn('初期調査を終えました（', result.stdout)
+        # what the run left in out/, by place: the raw files by count and name, the inventory note by its headings
+        self.assertIn('生データ 2 件  01_基礎調査/raw/', result.stdout)
+        self.assertIn('raw-a.json raw-b.json', result.stdout)
+        self.assertIn('01_基礎調査/log/01_棚卸し.md', result.stdout)
+        self.assertIn('・見つけたもの', result.stdout)
+        self.assertIn('・聞きたいこと', result.stdout)
+        self.assertIn('環境の確認の記録  _環境/00_動作確認.md', result.stdout)
+        self.assertNotIn('白紙', result.stdout)
+        self.assertNotIn('棚卸し中', result.stdout)
         self.assertIn('aws-survey claude', result.stdout)               # the next step is the conversation
+        # off a terminal there is no progress line and no sizing run: the only container runs are the login checks and the agent
+        self.assertFalse(any('/x/inventory.sh' in c for c in self.docker_runs()))
+
+    def test_the_opening_line_says_what_is_surveyed_in_one_breath(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        result = self.run_cli('scan')
+        self.assertIn('◆ 初期調査（Claude Code）', result.stdout)
+        self.assertIn('対象アカウントに何があるかを洗い出し、リソースの一覧と気づいたことを out/ に書きます。質問はしないので、待つだけです。', result.stdout)
+        self.assertNotIn('見つけたものと聞きたいことを out/ に残して終わります', result.stdout)
+
+    def test_when_nothing_was_written_the_summary_says_so(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        result = self.run_cli('scan')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('生データ（01_基礎調査/raw/）は書かれていません', result.stdout)
+        self.assertIn('01_棚卸し.md）は書かれていません', result.stdout)
 
     def test_the_recorded_model_and_effort_are_passed_as_flags(self):
         self.ready(agent={'name': 'claude', 'model': 'sonnet', 'effort': 'high'})
@@ -221,6 +264,48 @@ class Scan(ScanCase):
         self.assertIn('エージェント: Codex（gpt-5.6-sol / low）', text)
         self.assertEqual(self.environment()['agent']['name'], 'codex')
         self.assertIn('exec', self.agent_run())
+
+    INVENTORY = [
+        {'kind': 'service', 'service': 'cost', 'region': 'global', 'status': 'ok', 'count': 4},
+        {'kind': 'item', 'service': 'cost', 'region': 'global', 'id': 'Amazon Elastic Compute Cloud - Compute', 'name': '', 'state': '', 'extra': {'amount': '12.3'}},
+        {'kind': 'item', 'service': 'cost', 'region': 'global', 'id': 'Amazon Relational Database Service', 'name': '', 'state': '', 'extra': {'amount': '30'}},
+        {'kind': 'item', 'service': 'cost', 'region': 'global', 'id': 'AWS Lambda', 'name': '', 'state': '', 'extra': {'amount': '0.5'}},
+        {'kind': 'item', 'service': 'cost', 'region': 'global', 'id': 'Tax', 'name': '', 'state': '', 'extra': {'amount': '4'}},
+        {'kind': 'service', 'service': 'ec2', 'region': 'test-region', 'status': 'ok', 'count': 2},
+        {'kind': 'service', 'service': 'lambda', 'region': 'test-region', 'status': 'ok', 'count': 7},
+        {'kind': 'service', 'service': 'vpc', 'region': 'test-region', 'status': 'ok', 'count': 1},
+        {'kind': 'service', 'service': 's3', 'region': 'global', 'status': 'denied', 'error': 'AccessDenied'},
+        {'kind': 'service', 'service': 'rds', 'region': 'test-region', 'status': 'ok', 'count': 0},
+    ]
+
+    def test_on_a_terminal_the_survey_is_sized_first_and_progress_is_a_bar(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        code, text = self.drive(['scan'], [], env_extra={'FAKE_INVENTORY': json.dumps(self.INVENTORY),
+                                                         'FAKE_SCAN_WRITES': '1', 'FAKE_SCAN_SLOW': '2.5'})
+        self.assertEqual(code, 0, text)
+        runs = self.docker_runs()
+        sizing = next(c for c in runs if '/x/inventory.sh' in c)
+        self.assertEqual(sizing[-10:], ['bash', '/x/inventory.sh', '--region', 'test-region', 'cost', 'ec2', 'lambda', 'vpc', 's3', 'rds', 'ecs', 'elb', 'cloudfront'][-10:])
+        self.assertLess(runs.index(sizing), runs.index(self.agent_run()))
+        self.assertFalse(any('aws-survey/out' in a for a in sizing))   # the sizing run reads with the key only
+        # 3 billed services (Tax is not one), 3 services with resources + 1 unreadable = 4, 10 resources → 4 + 8 + 2 = 14 files;
+        # 150 s + 50 s a file, plus 120 s for the first-time environment check = 16 min 10 s
+        self.assertIn('見積もり: 課金のあるサービス 3、リソース 10 件、読めないサービス 1。目安は 16 分 10 秒ほど', text)
+        self.assertIn('初期調査中', text)
+        self.assertRegex(text, r'[█░]{20} +\d+%  経過 \d+ 秒')
+        self.assertNotIn('棚卸し中', text)
+        self.assertIn('初期調査を終えました（', text)
+        self.assertIn('生データ 2 件', text)
+
+    def test_on_a_terminal_an_unreadable_account_falls_back_to_a_generic_estimate(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        code, text = self.drive(['scan'], [], env_extra={'FAKE_SCAN_SLOW': '1.5'})
+        self.assertEqual(code, 0, text)
+        self.assertIn('調査の量を見積もれなかったので、一般的な目安（12 分 30 秒ほど）で進捗を出します', text)
+        self.assertIn('初期調査中', text)
+        self.assertIn('%', text)
 
     def test_unauthenticated_off_a_terminal_stops_before_the_agent(self):
         self.ready(agent='claude')

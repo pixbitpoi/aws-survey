@@ -16,7 +16,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'libexec/inventory.sh'
-TOOLS = ['bash', 'sh', 'env', 'jq', 'sed', 'grep', 'head', 'tail', 'cat', 'tr', 'printf', 'echo', 'test', 'python3']
+TOOLS = ['bash', 'sh', 'env', 'jq', 'sed', 'grep', 'head', 'tail', 'cat', 'tr', 'printf', 'echo', 'test', 'python3', 'date']
 
 # Answers already shaped the way the real --query would shape them. FAKE_DENY / FAKE_ERROR name the
 # services (the word after the global options) that fail with AccessDenied / a connection error.
@@ -57,6 +57,7 @@ answers = {
     ("ecs", "describe-clusters"): state.get("clusters", []),
     ("elbv2", "describe-load-balancers"): state.get("load_balancers", []),
     ("cloudfront", "list-distributions"): state.get("distributions"),
+    ("ce", "get-cost-and-usage"): state.get("costs", []),
 }
 if (service, op) not in answers:
     sys.stderr.write("unexpected call " + " ".join(argv) + "\n"); sys.exit(2)
@@ -83,6 +84,11 @@ def default_state():
         'clusters': [{'id': 'app', 'name': 'app', 'state': 'ACTIVE', 'extra': {'services': 2, 'tasks': 3, 'instances': 0}}],
         'load_balancers': [],
         'distributions': None,       # what list-distributions gives with no distribution: the key is absent
+        'costs': [
+            {'id': 'Amazon Elastic Compute Cloud - Compute', 'name': 'Amazon Elastic Compute Cloud - Compute', 'extra': {'amount': '12.3456', 'unit': 'USD'}},
+            {'id': 'AWS Lambda', 'name': 'AWS Lambda', 'extra': {'amount': '0', 'unit': 'USD'}},
+            {'id': 'Amazon Relational Database Service', 'name': 'Amazon Relational Database Service', 'extra': {'amount': '30.1', 'unit': 'USD'}},
+        ],
     }
 
 
@@ -209,6 +215,25 @@ class Output(InventoryCase):
             self.assertEqual(call['argv'][call['argv'].index('--output') + 1], 'json')
             if call['service'] not in ('s3api', 'cloudfront'):
                 self.assertEqual(call['argv'][call['argv'].index('--region') + 1], 'test-region', call)
+
+    def test_cost_is_only_listed_by_name_and_drops_services_billed_nothing(self):
+        lines = self.lines(self.run_inventory())
+        self.assertNotIn('cost', [l['service'] for l in lines])          # ls never asks Cost Explorer
+        self.assertFalse(any(c['service'] == 'ce' for c in self.calls()))
+        lines = self.lines(self.run_inventory('cost'))
+        self.assertEqual(lines[0], {'kind': 'service', 'service': 'cost', 'region': 'global', 'status': 'ok', 'count': 2})
+        self.assertEqual([l['id'] for l in lines[1:]], ['Amazon Elastic Compute Cloud - Compute', 'Amazon Relational Database Service'])
+        self.assertEqual(lines[1]['extra'], {'amount': '12.3456', 'unit': 'USD'})
+        call = next(c for c in self.calls() if c['service'] == 'ce')
+        self.assertIn('us-east-1', call['argv'])                          # Cost Explorer lives in us-east-1 only
+        period = next(a for a in call['argv'] if a.startswith('Start='))
+        self.assertRegex(period, r'^Start=\d{4}-\d{2}-01,End=\d{4}-\d{2}-01$')
+        self.assertIn('Key=SERVICE', ' '.join(call['argv']))
+
+    def test_cost_unavailable_is_an_error_line_not_a_crash(self):
+        lines = self.lines(self.run_inventory('cost', FAKE_ERROR='ce'))
+        self.assertEqual(lines[0]['status'], 'error')
+        self.assertEqual(len(lines), 1)
 
     def test_unknown_service_and_missing_region_are_usage_errors(self):
         self.assertEqual(self.run_inventory('iam').returncode, 2)

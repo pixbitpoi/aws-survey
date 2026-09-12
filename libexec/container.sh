@@ -77,7 +77,7 @@ container_inventory() {
 inventory_label() {
   case "$1" in
     ec2) echo EC2 ;; lambda) echo Lambda ;; vpc) echo VPC ;; s3) echo S3 ;; rds) echo RDS ;;
-    ecs) echo ECS ;; elb) echo ELB ;; cloudfront) echo CloudFront ;; *) echo "$1" ;;
+    ecs) echo ECS ;; elb) echo ELB ;; cloudfront) echo CloudFront ;; cost) echo "Cost Explorer" ;; *) echo "$1" ;;
   esac
 }
 container_inventory_spin() {

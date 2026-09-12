@@ -17,8 +17,8 @@
 #   aws-survey login [claude|codex] エージェントのログインを済ませる（libexec/commands/login.sh。init が最後に呼ぶ。認証は
 #                                   コンテナ内のボリュームに残るので、対象ごとに初回だけ）
 #   aws-survey scan [--agent claude|codex]
-#                                   調査コンテナでエージェントを非対話で 1 回走らせ、対象アカウントの初期調査（白紙の棚卸し）だけを
-#                                   行わせる（libexec/commands/scan.sh。待つだけ。構成の複雑さによっては数十分かかる）
+#                                   調査コンテナでエージェントを非対話で 1 回走らせ、対象アカウントの初期調査だけを行わせる
+#                                   （libexec/commands/scan.sh。待つだけ。端末では量の見積もりと推定の進捗を出す。数分〜数十分）
 #   aws-survey claude [引数...]     調査コンテナで Claude Code を対話で起動する（libexec/commands/agent.sh。-c で続き）
 #   aws-survey codex [引数...]      同じく Codex（resume --last で続き）
 #   aws-survey run [cmd]            調査コンテナの素のシェルに入る（libexec/commands/run.sh。通常は使わない）
