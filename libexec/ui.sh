@@ -190,6 +190,31 @@ ui_spin_end() {
   done
 }
 
+# 1 コマンドを回転する 1 行に畳んで走らせる（親側の入口）。説明 → 子の見出しと ✔ の文言に入れ替わり、終わったら ✔ の 1 行になる。
+# 失敗したら ✗ と、記録しておいた出力の全部を見せる。引数なしの aws-survey が各 1 手に、key_ensure（libexec/keys.sh）が
+# 一時キーの発行し直しに使う。標準出力が端末のときに呼ぶ（$(...) の中では呼ばない。回転の印が結果に混ざる）。
+#   ui_fold <説明> <失敗したときに出す名前> <コマンド>...
+ui_fold() {
+  local desc="$1" name="$2" rc dir spid; shift 2
+  dir=$(mktemp -d) || ui_die "一時ディレクトリを作れません。"
+  printf '%s' "$desc" > "$dir/msg"; : > "$dir/log"; : > "$dir/keep"
+  ui_spin_loop "$dir" &
+  spid=$!
+  AWS_SURVEY_CHAIN=1 AWS_SURVEY_COMPACT=1 AWS_SURVEY_SPIN_DIR="$dir" "$@" >> "$dir/log" 2>&1
+  rc=$?
+  ui_spin_end "$dir" "$spid"
+  if [ "$rc" -eq 0 ]; then
+    ui_ok "$(cat "$dir/msg")"
+  else
+    ui_err "$name が失敗しました"
+    echo ""
+    ui_text "そのときの出力:"
+    ui_raw "$(cat "$dir/log")"
+  fi
+  rm -rf "$dir"
+  return "$rc"
+}
+
 # 1 行読む。端末なら待ち続け、端末でなければ数秒で諦める（エージェントの実行環境では標準入力が閉じず、待つと止まる）。
 # 読めなければ 1 を返す。
 read_line() {

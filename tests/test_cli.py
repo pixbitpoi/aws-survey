@@ -453,11 +453,17 @@ class Dispatch(CliCase):
         self.assertEqual(launch[-2:], ['smoke:latest', 'codex'])
         self.assertFalse((elsewhere / 'out').exists())
 
-    def test_run_without_keys_names_the_cli(self):
+    def test_run_without_keys_issues_them_first(self):
+        # 利用者に credentials を打たせない。一時キーが無ければ発行してから起動する（assume-role が docker より先）
         self.write_environment()
         result = self.run_cli('run')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('aws-survey credentials', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('一時キーがありません', result.stdout)
+        self.assertIn('一時キーを発行しました', result.stdout)
+        calls = self.calls()
+        self.assertLess(next(i for i, c in enumerate(calls) if 'assume-role' in c),
+                        next(i for i, c in enumerate(calls) if c[0] == 'docker'))
+        self.assertTrue((self.home / '.aws-survey/smoke/session.json').exists())
 
     def test_credentials_writes_renew_hint_with_cli(self):
         self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08'})

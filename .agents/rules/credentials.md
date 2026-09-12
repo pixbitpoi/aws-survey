@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | アカウント ID・ロール名・プロファイル名 | `environment.json` | どこにもない |
 | リージョン | `environment.json`（`claude-ro` プロファイルにも入る） | なし |
-| セッションの長さ | `environment.json` の `auth.duration_seconds` | なし。調査エージェント向けの文書にも書かない |
+| セッションの長さ | `environment.json` の `auth.duration_seconds` | なし。調査エージェント向けの文書にも書かない。発行し直す閾値（5 分・総時間の半分で上限 30 分）は `libexec/keys.sh` にだけ置く |
 | 元プロファイルの更新方法 | `environment.json` の `auth.refresh_command`（既定は aws-login） | なし。環境ごとに変わる唯一の操作 |
 | 現在のフェーズ | `environment.json` の `phase_dir` | なし |
 
@@ -84,7 +84,7 @@ Claude はさらに `-p` の前にワークスペースの信頼を `.claude.jso
 ファイルにも `SCAN_PROMPT` にも入れない（対象の棚卸しを先渡ししない）。終わったら `scan_summary` が、この回に書かれたファイルだけを
 置き場所ごとに言い換えて示す（生データの件数と名前、`log/01_棚卸し.md` の見出し。中身の要約はしない）。
 起動前に `docker ps` で `<name>`（対話コンテナ）と `<name>-scan` を見て、動いていれば止まる（同じ `out/` に 2 つのエージェントを走らせない）。
-一時キーの残りが短ければ（総時間の半分、上限 30 分。この絶対値はホスト側だけに置く）発行し直してから始める。
+一時キーの残りが短ければ（総時間の半分、上限 30 分。`keys.sh` の `key_session_min`。この絶対値はホスト側だけに置く）聞かずに発行し直してから始める（`key_ensure`）。
 
 利用者に見せる入口はリソース名（`ls` / `ec2` / `lambda`）で、ホストで動くかコンテナで動くかは必要な資格情報で内部的に決め、
 利用者には見せない。元プロファイル（強い権限）が要るもの（`ssh setup` / `rotate` / `remove`、`lambda pull`）はホストで動き、
@@ -100,6 +100,25 @@ Claude はさらに `-p` の前にワークスペースの信頼を `.claude.jso
 準備が済んだ状態で終わるコマンド（`ls` / `lambda pull` / `credentials` / `verify`）の末尾は `load-env.sh` の `survey_next_cmd` で
 「棚卸しがまだなら `scan`、済んでいれば記録してあるエージェント」を案内する。`run`（素のシェル）は案内しない。
 一時キーの状態の判定（`key_state`）は `libexec/keys.sh` にあり、`bin/aws-survey` と `container.sh` が共有する。
+
+### 一時キーは各コマンドの入口で自動的に発行し直す
+
+利用者に `credentials` を打たせない。一時キーを使うコマンドは入口で `libexec/keys.sh` の `key_ensure <要る分数>` を通り、
+無い・期限切れ・期限を読めない・残りが要る分数に足りない・登録済みホスト（`ssh.hosts`）と発行時の記録（`session.json` の
+`ssh_hosts`）が食い違う（接続を許すポリシーの記録 `setup.ssh_policy_attached` があるときだけ。無ければ発行しても借りられない）の
+どれかなら、聞かずに `credentials.sh` を `AWS_SURVEY_CHAIN=1` で走らせてから続ける。要る分数は呼ぶ側が渡す。一覧のような短い処理
+（`ls` / `ec2` / `lambda` の一覧、`verify`、`ssh verify`）は `KEY_MIN_QUICK`（5 分）、調査コンテナを起動する長い処理（`scan` / `claude` /
+`codex` / `run`）は `key_session_min`（総時間の半分、上限 30 分）。この絶対値はホスト側だけに置き、調査エージェント向けの文書には書かない。
+端末なら `ui_fold`（`ui.sh`。引数なしの `aws-survey` が各 1 手を畳むのと同じ部品）で回転する 1 行に畳み、最後の `ui_ok`
+「一時キーを発行しました（N 分）」の 1 行になる。端末でなければそのまま走らせる。既に畳まれている中（引数なしの `aws-survey` の
+`ssh verify`）では `credentials` の見出しがその行の文言になる。発行できなければ `doctor` を案内して止まる。
+読み取り専用の検証（`setup.readonly_verified`）は `container_require_key` が `key_ensure` の前に AWS を叩かずに見て、未検証なら
+引数なしの `aws-survey` を案内して止まる（`run` は素のシェルなので見ない。利用者の入口は `claude` / `codex`）。
+引数なしの `aws-survey` の段階 3・4 は今までどおり `credentials` を 1 手として走らせる（準備の流れの一部で、利用者は打たない）。
+`credentials` コマンド自体は残す（調査コンテナの `survey-status` の `renew_hint` と、`ssh remove` のあとに待たずに発行し直すとき）。
+テストは `tests/test_resources.py`（`ls` の無い・切れた・短い一時キー。ホスト側の偽 `aws` が `get-role` / `assume-role` に答える）、
+`tests/test_scan.py`（`scan` と `claude` の短い・切れた一時キー。端末では畳まれること）、`tests/test_ssh_install.py`（`ssh verify`。`aws` が
+無いので発行できずに docker の前で止まる）、`tests/test_launcher.py`（`run`。最小構成に `credentials.sh` が無いので docker の前で止まる）。
 `ssh` と `lambda` は任意の追加機能。段階 0〜4 の判定には組み込まず、段階 5（調査）に着いてから `show_extras` で現状と足し方を出す。
 EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `ssh verify <host>`）が要るので、`ec2_pending` が
 ファイルだけで途中かどうかを判定し、案内ループに乗せる。判定に使う記録は 3 つ: `setup.ssh_policy_attached`（`role --create` が書く。

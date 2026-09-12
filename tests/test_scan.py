@@ -352,25 +352,42 @@ class Scan(ScanCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(any(any('hasTrustDialogAccepted' in a for a in c) for c in self.docker_runs()))
 
-    def test_a_short_key_names_credentials_off_a_terminal(self):
+    def test_a_short_key_is_reissued_off_a_terminal(self):
+        # 残りが総時間の半分（上限 30 分）を切っていれば、聞かずに発行し直してから始める
         self.ready(minutes=10, agent='claude')
         self.authed('claude')
         result = self.run_cli('scan')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertRegex(result.stdout, r'残りが約 (9|10) 分')
-        self.assertIn('aws-survey credentials', result.stdout)
-        self.assertFalse(any(c[0] == 'docker' for c in self.calls()))
-
-    def test_a_short_key_is_reissued_on_a_yes(self):
-        self.ready(minutes=10, agent='claude')
-        self.authed('claude')
-        code, text = self.drive(['scan'], [('発行し直しますか', b'y\r')])
-        self.assertEqual(code, 0, text)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r'残りが約 (9|10) 分です（30 分は要ります）')
+        self.assertIn('一時キーを発行しました', result.stdout)
+        self.assertNotIn('発行し直しますか', result.stdout)
         calls = self.calls()
         assume = next(i for i, c in enumerate(calls) if c[0] == 'aws' and 'assume-role' in c)
         first_docker = next(i for i, c in enumerate(calls) if c[0] == 'docker')
         self.assertLess(assume, first_docker)
         self.assertIsNotNone(self.agent_run())
+
+    def test_a_short_key_is_reissued_on_a_terminal_without_asking(self):
+        self.ready(minutes=10, agent='claude')
+        self.authed('claude')
+        code, text = self.drive(['scan'], [])
+        self.assertEqual(code, 0, text)
+        self.assertNotIn('発行し直しますか', text)
+        self.assertIn('✔ 一時キーを発行しました（60 分）', text)     # 回転する 1 行に畳まれ、✔ の 1 行になる
+        self.assertNotIn('◆ aws-survey credentials', text)
+        calls = self.calls()
+        assume = next(i for i, c in enumerate(calls) if c[0] == 'aws' and 'assume-role' in c)
+        first_docker = next(i for i, c in enumerate(calls) if c[0] == 'docker')
+        self.assertLess(assume, first_docker)
+        self.assertIsNotNone(self.agent_run())
+
+    def test_a_long_enough_key_is_kept(self):
+        self.ready(minutes=45, agent='claude')
+        self.authed('claude')
+        result = self.run_cli('scan')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('発行し直します', result.stdout)
+        self.assertFalse(any(c[0] == 'aws' for c in self.calls()))
 
     def test_refuses_while_the_survey_container_runs(self):
         self.ready(agent='claude')
@@ -496,12 +513,17 @@ class InteractiveAgent(ScanCase):
         self.assertIn('端末で実行してください', result.stderr)
         self.assertFalse(any(c[0] == 'docker' for c in self.calls()))
 
-    def test_an_expired_key_names_credentials(self):
+    def test_an_expired_key_is_reissued_before_the_container(self):
         self.ready(minutes=-5)
         code, text = self.drive(['claude'], [])
-        self.assertNotEqual(code, 0)
-        self.assertIn('aws-survey credentials', text)
-        self.assertFalse(any(c[0] == 'docker' for c in self.calls()))
+        self.assertEqual(code, 0, text)
+        self.assertIn('期限切れ', text)
+        self.assertIn('✔ 一時キーを発行しました（60 分）', text)
+        calls = self.calls()
+        assume = next(i for i, c in enumerate(calls) if c[0] == 'aws' and 'assume-role' in c)
+        first_docker = next(i for i, c in enumerate(calls) if c[0] == 'docker')
+        self.assertLess(assume, first_docker)
+        self.assertIn('-it', self.docker_runs()[-1])
 
 
 if __name__ == '__main__':

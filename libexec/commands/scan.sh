@@ -157,30 +157,9 @@ ui_kv "フェーズ" "$SURVEY_PHASE_DIR"
 echo ""
 
 # ---- 1. 一時キー ----
-# あり・期限内・読み取り専用と確かめ済みか。棚卸しは時間がかかるので、残りが短ければ発行し直してから始める。
-# 閾値（総時間の半分、上限 30 分）はホスト側だけの値。調査エージェント向けの文書には書かない（survey-status が計算する）
-container_require_key || exit 1
-SCAN_MIN_LEFT=$(( KEY_TOTAL_MIN / 2 )); [ "$SCAN_MIN_LEFT" -le 30 ] || SCAN_MIN_LEFT=30
-if [ "$KEY_LEFT_MIN" -lt "$SCAN_MIN_LEFT" ]; then
-  ui_warn "一時キーの残りが約 ${KEY_LEFT_MIN} 分です。棚卸しの途中で切れるおそれがあります"
-  ans=""
-  if on_terminal; then
-    printf '  %s❯%s いま %s を実行して発行し直しますか？ %s(Y/n)%s: ' "$C_CYAN" "$C_RESET" "$(ui_cmd "$AWS_SURVEY_CMD credentials")" "$C_DIM" "$C_RESET"
-    read_line ans || ans=n
-    echo ""
-  else
-    ans=n
-  fi
-  case "$ans" in
-    ""|y|Y|yes|YES)
-      AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/credentials.sh" || ui_die "一時キーを発行し直せませんでした。"
-      echo ""
-      container_require_key || exit 1 ;;
-    *)
-      next_cmd "$AWS_SURVEY_CMD credentials" "一時キーを発行し直してから、もう一度 $AWS_SURVEY_CMD scan を実行します"
-      exit 1 ;;
-  esac
-fi
+# あり・期限内・読み取り専用と確かめ済みか。初期調査は時間がかかるので、残りが短ければ（総時間の半分、上限 30 分。
+# libexec/keys.sh の key_session_min）聞かずに発行し直してから始める。閾値はホスト側だけの値で、調査エージェント向けの文書には書かない
+container_require_key "$(key_session_min)" || exit 1
 
 # ---- 2. エージェント ----
 AGENT="${AGENT_OPT:-$SURVEY_AGENT}"

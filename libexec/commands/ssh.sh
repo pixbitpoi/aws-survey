@@ -580,21 +580,10 @@ cmd_verify() {
   echo ""
 
   ui_head "1/3 一時キーと鍵"
-  [ -f "$AWS_DIR/credentials" ] || { ui_err "一時キーがありません"; next_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めて一時キーを発行します"; exit 1; }
   [ -f "$SSH_CONFIG" ] && [ -f "$KEY" ] || die "接続設定か鍵がありません（${SSH_DIR}）。$AWS_SURVEY_CMD ssh setup で作られます。"
-  local exp now
-  exp=$(jq -r '.expiration // empty' "$AWS_DIR/session.json" 2>/dev/null)
-  if [ -n "$exp" ]; then
-    now=$(date -u +%Y-%m-%dT%H:%M:%S)
-    if [[ "${exp:0:19}" < "$now" ]]; then
-      ui_err "一時キーは期限切れです（${exp}）"
-      next_cmd "$AWS_SURVEY_CMD credentials" "一時キーを発行し直します"
-      exit 1
-    fi
-    ui_ok "一時キー ${C_DIM}（$exp まで）${C_RESET}"
-  else
-    ui_ok "一時キー ${C_DIM}（期限は不明）${C_RESET}"
-  fi
+  # 無い・切れている・登録済みホストへの接続の権限を含んでいなければ発行し直す（libexec/keys.sh）
+  key_ensure "$KEY_MIN_QUICK" || exit 1
+  ui_ok "一時キー ${C_DIM}（$KEY_EXP まで）${C_RESET}"
   ui_ok "鍵と接続設定 ${C_DIM}$SSH_DIR${C_RESET}"
   # 一時キーと鍵の置き場を Docker Desktop がマウントできるか（load-env.sh）
   docker_check_shared "$AWS_DIR" || exit 1
@@ -941,10 +930,11 @@ cmd_remove() {
   fi
   echo ""
   if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
-    ui_text "いまの一時キーは、発行時に渡した ${DIAG_POLICY_NAME} が無くなったので使えません（読み取りも通りません）。発行し直してください。"
+    ui_text "いまの一時キーは、発行時に渡した ${DIAG_POLICY_NAME} が無くなったので使えません（読み取りも通りません）。"
+    ui_text "次に一時キーを使うコマンド（ls / scan / claude / codex など）が、入口で自動的に発行し直します。"
   fi
   next_cmd "$AWS_SURVEY_CMD" "一時キーの発行し直しを案内します（登録が無いときは ${DIAG_POLICY_NAME} を渡しません）"
-  also_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めない一時キーを、いますぐ発行し直します"
+  also_cmd "$AWS_SURVEY_CMD credentials" "SSH 接続の権限を含めない一時キーを、いますぐ発行し直します（待たずに手で）"
   also_cmd "$AWS_SURVEY_CMD role --create" "ロールの状態を確かめます（登録が無いときは ${DIAG_POLICY_NAME} を付けません）"
   if [ "$policy_rc" -ne 0 ]; then
     ui_err "ポリシーの片付けが途中で止まりました。EC2 側・タグ・記録は済んでいるので、残りは上のコマンドを手で打つか、原因を直してから同じ手順で片付けてください。"

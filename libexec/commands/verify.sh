@@ -15,13 +15,16 @@
 set -uo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/keys.sh"
+
+# 一時キーが無い・切れている・残りが短ければ発行し直してから確かめる（利用者に credentials を打たせない）。
+# 元プロファイルで発行するので、一時キーを指す環境変数を出す前に行う
+key_ensure "$KEY_MIN_QUICK" || exit 1
 
 export AWS_CONFIG_FILE="$AWS_DIR/config"
 export AWS_SHARED_CREDENTIALS_FILE="$AWS_DIR/credentials"
 export AWS_PROFILE=claude-ro
 export AWS_PAGER=""
-
-[ -f "$AWS_SHARED_CREDENTIALS_FILE" ] || ui_die "一時キーがありません。先に $AWS_SURVEY_CMD credentials を実行してください。"
 
 pass=0; fail=0; skip=0
 ok()   { ui_ok "$1"; pass=$((pass+1)); }

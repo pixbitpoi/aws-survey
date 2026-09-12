@@ -8,15 +8,19 @@
 # 本体は AWS_SURVEY_HOME、対象フォルダ（out/・environment.json）は AWS_SURVEY_DIR から解決する
 # （libexec/load-env.sh）。カレントディレクトリに依存するのは AWS_SURVEY_DIR の既定だけ。
 # イメージのビルドは libexec/docker.sh（lambda pull と共有）、マウント列は libexec/launch.sh（scan と共有）。
+# 一時キーの判定と発行し直しは libexec/keys.sh の key_ensure（ls / scan / claude / codex / verify と共有）。
 set -euo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
 . "$LIBEXEC_DIR/docker.sh"
+. "$LIBEXEC_DIR/keys.sh"
 . "$LIBEXEC_DIR/launch.sh"
 
 docker_awsarch
 
-[ -f "$AWS_DIR/credentials" ] || ui_die "読み取り専用の一時キーがありません。先に $AWS_SURVEY_CMD credentials を実行してください。"
+# 一時キーが無い・切れている・残りが短ければ（総時間の半分、上限 30 分）発行し直す（libexec/keys.sh の key_ensure）。
+# 読み取り専用と確かめ済みかは、利用者の入口である aws-survey claude / codex（agent.sh）が見る
+key_ensure "$(key_session_min)" || exit 1
 
 launch_prepare_dirs
 

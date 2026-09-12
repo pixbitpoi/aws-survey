@@ -10,31 +10,18 @@
 . "$LIBEXEC_DIR/docker.sh"
 . "$LIBEXEC_DIR/keys.sh"
 
-# 一時キーでコンテナに 1 コマンド走らせられる状態か。ファイルだけで判定し AWS は叩かない。
-# 一時キーがあり、期限内で、読み取り専用であることを確かめ済み（段階 4 まで済んでいる）なら 0。
-# 満たさなければ理由と次の 1 手を出して 1 を返す。
+# 一時キーでコンテナに 1 コマンド走らせられる状態にする。読み取り専用であることを確かめ済み（段階 3）でなければ、
+# AWS を叩かずに理由と次の 1 手を出して 1。確かめ済みなら、一時キーが無い・切れている・残りが足りなければ発行し直す
+# （libexec/keys.sh の key_ensure。利用者に credentials を打たせない）。要る分数は呼ぶ側が渡す（省略時は KEY_MIN_QUICK）。
+#   container_require_key [<要る分数>]
 container_require_key() {
-  key_state
-  case "$KEY_STATE" in
-    missing)
-      ui_err "読み取り専用の一時キーがありません（$AWS_DIR/credentials）"
-      next_cmd "$AWS_SURVEY_CMD" "準備の続きを順に進めます（一時キーの発行まで）"
-      return 1 ;;
-    expired)
-      ui_err "一時キーが期限切れです（${KEY_EXP}${KEY_NOTE}）"
-      next_cmd "$AWS_SURVEY_CMD credentials" "一時キーを発行し直します"
-      return 1 ;;
-    unknown)
-      ui_err "一時キーの期限が読めません（${KEY_EXP:-記録なし}）"
-      next_cmd "$AWS_SURVEY_CMD credentials" "一時キーを発行し直します"
-      return 1 ;;
-  esac
   if [ -z "$(jq -r '.setup.readonly_verified // empty' "$ENV_FILE")" ]; then
+    key_state
     ui_err "一時キーが読み取り専用であることを、まだ確かめていません"
     next_cmd "$AWS_SURVEY_CMD" "準備の続きを順に進めます（読み取り専用の検証まで）"
     return 1
   fi
-  return 0
+  key_ensure "${1:-$KEY_MIN_QUICK}"
 }
 
 # イメージを用意する。docker の有無、Docker Desktop がマウントできる場所か（本体と一時キー）、アーキテクチャ、ビルド（毎回。全段キャッシュなら 1 秒未満）

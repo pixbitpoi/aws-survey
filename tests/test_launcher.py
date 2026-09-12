@@ -29,7 +29,7 @@ class Launcher(unittest.TestCase):
         for name in ['bin', 'libexec', 'libexec/commands', 'container']:
             (self.root / name).mkdir()
         for name in ['bin/aws-survey', 'libexec/commands/run.sh', 'libexec/load-env.sh', 'libexec/ui.sh', 'libexec/agents.sh', 'libexec/docker.sh',
-                     'libexec/launch.sh']:
+                     'libexec/keys.sh', 'libexec/launch.sh']:
             shutil.copy(ROOT / name, self.root / name)
         docker = self.root / 'bin/docker'
         docker.write_text('#!/usr/bin/env python3\nimport json, os, sys\nwith open(os.environ["SMOKE_DOCKER_LOG"], "a") as f:\n f.write(json.dumps(sys.argv[1:])+"\\n")\n')
@@ -161,11 +161,13 @@ class Launcher(unittest.TestCase):
         self.assertIn(f'{self.root}/code:/home/node/aws-survey/code:ro', launch)
         self.assertEqual(launch[-2:], ['smoke:latest', 'codex'])
 
-    def test_missing_keys_name_the_per_target_location(self):
+    def test_missing_keys_are_reissued_before_docker(self):
+        # 一時キーが無ければ credentials を走らせにいく（この最小構成には無いので、そこで止まる）。docker には触らない
         write_environment(self.root)
         result = self.run_launcher(self.root / 'libexec/commands/run.sh', cwd=self.root)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('一時キーがありません', result.stderr)
+        self.assertIn('一時キーがありません', result.stdout)
+        self.assertIn('発行し直します', result.stdout)
         self.assertFalse(self.log.exists())
 
 

@@ -343,7 +343,7 @@ class Verify(SshPrintCase):
     Checked with a fake docker: the image is built from the same Dockerfile and context as
     `run`, the container gets only the read-only key mount and the region, the command is
     `ec2 --selftest <host>`, and its exit code is the result. Without aws on PATH the SSM-side
-    check is skipped, not failed. An expired temporary key stops before docker is touched.
+    check is skipped, not failed. An expired temporary key is reissued first; when that cannot happen, nothing reaches docker.
     """
 
     def setUp(self):
@@ -407,12 +407,14 @@ class Verify(SshPrintCase):
         host = json.loads((self.target / 'environment.json').read_text())['ssh']['hosts']['web1']
         self.assertNotIn('verified_at', host)
 
-    def test_expired_key_stops_before_docker(self):
+    def test_expired_key_is_reissued_first_and_stops_before_docker_when_that_fails(self):
+        # 切れていれば credentials を走らせにいく（aws の無いこの環境では発行できない）。docker には触らない
         self.session(expiration='2020-01-01T00:00:00+00:00')
         result = self.run_verify('web1')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('期限切れ', result.stdout)
-        self.assertIn('credentials', result.stdout)
+        self.assertIn('発行し直します', result.stdout)
+        self.assertIn('発行し直せませんでした', result.stdout)
         self.assertEqual(self.calls(), [])
 
     def test_missing_key_stops_before_docker(self):

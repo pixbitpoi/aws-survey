@@ -37,6 +37,12 @@ if not os.environ.get("FAKE_IN_CONTAINER"):
     # the host side (ssh setup / lambda pull) may check who it is; anything past that is out of scope here
     if op == "get-caller-identity":
         print("arn:aws:iam::000000000000:user/fake"); sys.exit(0)
+    # credentials (the automatic reissue) asks for the role and assumes it
+    if op == "get-role":
+        print("arn:aws:iam::000000000000:role/fake-role"); sys.exit(0)
+    if op == "assume-role":
+        print(json.dumps({"Credentials": {"AccessKeyId": "AKIAFAKE", "SecretAccessKey": "fake", "SessionToken": "fake",
+                                          "Expiration": "2099-01-01T00:00:00+00:00"}, "PackedPolicySize": 42})); sys.exit(0)
     sys.stderr.write("unexpected host-side call " + " ".join(argv) + "\n"); sys.exit(2)
 if service in os.environ.get("FAKE_DENY", "").split(","):
     sys.stderr.write("\nAn error occurred (AccessDeniedException) when calling the %s operation: User is not authorized\n" % op)

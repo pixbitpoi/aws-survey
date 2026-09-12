@@ -10,7 +10,8 @@
 #   aws-survey init [--from <json>] [--force]
 #                                   対象フォルダに environment.json を作る（対話。--from か AWS_SURVEY_INIT_* で非対話）
 #   aws-survey role [--create]      経路の判定・ロール作成（libexec/commands/role.sh）
-#   aws-survey credentials          一時キーの発行・再発行（libexec/commands/credentials.sh）
+#   aws-survey credentials          一時キーの発行・再発行（libexec/commands/credentials.sh）。一時キーを使う各コマンドが
+#                                   入口で残り時間を見て自動で発行し直すので、通常は打たない
 #   aws-survey verify               読み取り専用の検証（libexec/commands/verify.sh）
 #   aws-survey ls [サービス名...]   アカウントで使っているリソースの一覧（libexec/commands/ls.sh。調査コンテナの中で
 #                                   一時キーが読む。画面に出すだけで out/ には書かない）
@@ -420,31 +421,15 @@ guide_run() {
 }
 
 # 端末で続けて実行するときの 1 手。画面には回転する印付きの 1 行だけを持ち（説明 → コマンドの見出しと ✔ の文言に入れ替わる）、
-# 終わったら ✔ の 1 行に畳む。失敗したら ✗ と、記録しておいた出力の全部を見せて止まる（libexec/ui.sh の簡潔表示）。
+# 終わったら ✔ の 1 行に畳む。失敗したら ✗ と、記録しておいた出力の全部を見せて止まる（libexec/ui.sh の ui_fold）。
 # run は端末を渡すので畳まず、静かな表示（✔ ⚠ ✗ だけ）で exec する。
 guide_run_compact() {
-  local desc="$1" cmd="$2" rc dir spid; shift 2
+  local desc="$1" cmd="$2"; shift 2
   case "$cmd" in
     init) guide_run init "$@"; return $? ;;
     run)  AWS_SURVEY_COMPACT=1 exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
   esac
-  dir=$(mktemp -d) || ui_die "一時ディレクトリを作れません。"
-  printf '%s' "$desc" > "$dir/msg"; : > "$dir/log"; : > "$dir/keep"
-  ui_spin_loop "$dir" &
-  spid=$!
-  AWS_SURVEY_CHAIN=1 AWS_SURVEY_COMPACT=1 AWS_SURVEY_SPIN_DIR="$dir" bash "$LIBEXEC_DIR/commands/$cmd.sh" "$@" >> "$dir/log" 2>&1
-  rc=$?
-  ui_spin_end "$dir" "$spid"
-  if [ "$rc" -eq 0 ]; then
-    ui_ok "$(cat "$dir/msg")"
-  else
-    ui_err "$CMD_NAME $cmd${*:+ $*} が失敗しました"
-    echo ""
-    ui_text "そのときの出力:"
-    ui_raw "$(cat "$dir/log")"
-  fi
-  rm -rf "$dir"
-  return "$rc"
+  ui_fold "$desc" "$CMD_NAME $cmd${*:+ $*}" bash "$LIBEXEC_DIR/commands/$cmd.sh" "$@"
 }
 
 # 引数なしの入口。判定 → 案内 → （答えが「はい」なら）実行 → もう一度判定、を最後まで繰り返す。

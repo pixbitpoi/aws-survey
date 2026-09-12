@@ -190,23 +190,48 @@ class Ls(ResourcesCase, PtyMixin):
         self.assertEqual([line['service'] for line in lines if line['kind'] == 'service'], ['ec2'])
         self.assertEqual([line['id'] for line in lines if line['kind'] == 'item'], ['i-0aaaaaaaaaaaaaaaa', 'i-0bbbbbbbbbbbbbbbb'])
 
-    def test_stops_before_docker_without_a_usable_key(self):
+    def test_a_missing_or_expired_key_is_reissued_before_docker(self):
+        # 利用者に credentials を打たせない。無ければ発行し、切れていれば発行し直してから、コンテナで読む
         self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08',
                                       'readonly_verified': '2026-09-08'})
         result = self.run_cli('ls')
-        self.assertEqual(result.returncode, 1)
-        self.assertIn('一時キーがありません', result.stdout)
-        self.assertIn('次に打つコマンド', result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('一時キーがありません。一時キーを発行し直します', result.stdout)
+        self.assertIn('一時キーを発行しました', result.stdout)
+        self.assertNotIn('次に打つコマンド: aws-survey credentials', result.stdout)
+        host = [c for c in self.aws_calls() if not c['in_container']]
+        self.assertEqual([c['op'] for c in host], ['get-caller-identity', 'get-role', 'assume-role'])
+        self.assertTrue((self.key_dir() / 'session.json').exists())
+        self.assertEqual(len(self.docker_runs()), 1)
         self.write_keys(expiration='2020-01-01T00:00:00+00:00')
         result = self.run_cli('ls')
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('期限切れ', result.stdout)
-        self.assertIn('aws-survey credentials', result.stdout)
+        self.assertIn('一時キーを発行しました', result.stdout)
+        self.assertEqual(len(self.docker_runs()), 2)
+
+    def test_a_short_key_is_reissued_but_a_long_one_is_kept(self):
+        from datetime import datetime, timedelta, timezone
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=3)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        self.ready(expiration=soon)
+        result = self.run_cli('ls')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(result.stdout, r'残りが約 [23] 分です（5 分は要ります）')
+        self.assertTrue(any(c['op'] == 'assume-role' for c in self.aws_calls()))
+        self.log.unlink()
+        self.ready(expiration=(datetime.now(timezone.utc) + timedelta(minutes=7)).strftime('%Y-%m-%dT%H:%M:%S+00:00'))
+        result = self.run_cli('ls')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('発行し直します', result.stdout)
+        self.assertFalse(any(c['op'] == 'assume-role' for c in self.aws_calls()))
+
+    def test_unverified_stops_before_aws_and_docker(self):
         self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08'})
         self.write_keys(expiration='2099-01-01T00:00:00+00:00')
         result = self.run_cli('ls')
         self.assertEqual(result.returncode, 1)
         self.assertIn('まだ確かめていません', result.stdout)
+        self.assertIn('次に打つコマンド', result.stdout)
         self.assertEqual(self.docker_runs(), [])
         self.assertEqual(self.aws_calls(), [])
 
@@ -276,7 +301,7 @@ class Ec2(ResourcesCase, PtyMixin):
         result = self.run_cli('ec2', 'i-0aaaaaaaaaaaaaaaa')
         self.assertEqual(result.returncode, 1)
         self.assertIn('ssh setup', result.stderr)
-        self.write_keys(expiration='2020-01-01T00:00:00+00:00')
+        self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08'})
         result = self.run_cli('ec2')
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.docker_runs(), [])
