@@ -294,7 +294,7 @@ cmd_guide() {
   esac
   STAGE_DONE[4]="残り約 ${KEY_LEFT_MIN} 分 / ${KEY_TOTAL_MIN} 分${KEY_NOTE}（期限 ${KEY_EXP}）"
 
-  # 段階 5（初期調査）は scan で初期調査（白紙の棚卸し）を済ませたか。対話で始めていれば（out/00_進捗.md あり）済んだ扱いで 6 へ
+  # 段階 5（初期調査）は scan で初期調査（生データと報告）を済ませたか。対話で始めていれば（out/00_進捗.md あり）済んだ扱いで 6 へ
   local cur=5
   if scan_done; then
     cur=6; STAGE_DONE[5]="済（$(setup_value scanned)）"
@@ -317,7 +317,7 @@ cmd_guide() {
   elif survey_started; then
     show_track 6 "調査: 開始済み（out/00_進捗.md あり）。続きはコンテナ内の台帳に従います"
   else
-    show_track 6 "調査: 初期調査済み。何を明らかにしたいかは、コンテナ内でユーザーと決めます"
+    show_track 6 "調査: 初期調査済み（報告は out/ の report/ に）。続きはコンテナ内でユーザーと対話で進めます"
   fi
   show_extras
   guide_ready

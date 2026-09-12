@@ -3,7 +3,7 @@
 #   aws-survey claude [claude の引数...]   Claude Code を起動する（-c で直前の会話の続き、-r で選んで再開）
 #   aws-survey codex  [codex の引数...]    Codex を起動する（resume --last で直前の会話の続き）
 # 実体は libexec/commands/agent.sh <claude|codex> [...]。run.sh に exec する薄い皮で、持つのは一時キーの判定（足りなければ発行し直す）・
-# 使うエージェントの記録・モデルと effort のフラグ・見出しだけ。棚卸しが out/ にあれば、中のエージェントはそれを手にユーザーに聞くところから始める。
+# 使うエージェントの記録・モデルと effort のフラグ・見出しだけ。初期調査の報告が out/ にあれば、中のエージェントはそれを手にユーザーと続きから進める。
 set -euo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"

@@ -5,10 +5,10 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 ## ホストと調査コンテナ
 
 - **ホスト**（このリポジトリ）: 調査環境の開発。`aws-survey` が AWS 接続の準備と起動を持つ。
-  `aws-survey scan`（非対話の棚卸し）か `aws-survey claude` / `codex`（対話）でコンテナが立ち上がったら、ホスト側の仕事は無い。
+  `aws-survey scan`（非対話の初期調査）か `aws-survey claude` / `codex`（対話）でコンテナが立ち上がったら、ホスト側の仕事は無い。
 - **調査コンテナ**: AWS を読み取り専用で調べる実行環境。中で動く **調査エージェント** が
-  ユーザーと目的を決め、`out/` に記録する。
-- 対象の概要・調査項目・フェーズの目的をホストから先渡ししない。調査エージェントが白紙の棚卸しから作る。
+  白紙で基礎調査の報告を書き、以後はユーザーと対話で進め、`out/` に記録する。
+- 対象の概要・調査項目・調査の目的をホストから先渡ししない。調査エージェントが白紙で調べて報告を作る。
 - 調査エージェントに渡す文書に、ホスト手順・隔離設計・ホスト側の判断を書かない。
   制約は環境から見える事実として書く。
 - 接続設定と到達点は `environment.json`、調査の記憶は `out/` に分ける。
@@ -22,8 +22,8 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 | 依頼・対象 | 読むもの |
 | --- | --- |
 | 準備・立ち上げ・起動・一時キー | 手順書は置かない。`aws-survey`（引数なし）の出力に従う。段階の判定・次の 1 手・実行までコマンドが持つ。一時キーは各コマンドが入口で自動的に発行し直す（`.agents/rules/credentials.md`「一時キーは各コマンドの入口で自動的に発行し直す」） |
-| `libexec/commands/scan.sh`（非対話の初期調査）・`agent.sh`（`claude` / `codex` の対話起動）・`login.sh`（エージェントのログイン）・`libexec/launch.sh`（`run` と `scan` が共有する調査コンテナ一式のマウント列。ログインと CLI のフラグも）・`libexec/agents.sh`（エージェント名・モデル・effort の既定と候補）・段階「初期調査」と `guide_ready` | `.agents/rules/credentials.md` の「非対話の棚卸し（`scan`）」の段落。偽の `docker` での検証は `tests/test_scan.py`（`scan` の docker 引数と指示文・認証の判定とログイン・エージェントの記憶とフラグ・量の見積もりと進捗の表示・終わったあとの `out/` の案内、`claude` / `codex` の pty 起動）、段階と案内は `tests/test_cli.py` |
-| フェーズ運用・調査中の進め方 | ホストでは持たない。調査エージェント（`container/instructions/`・`container/method/`）が自分で持つ |
+| `libexec/commands/scan.sh`（非対話の初期調査。報告まで・一時キーの見張り）・`agent.sh`（`claude` / `codex` の対話起動）・`login.sh`（エージェントのログイン）・`libexec/launch.sh`（`run` と `scan` が共有する調査コンテナ一式のマウント列。ログインと CLI のフラグも）・`libexec/agents.sh`（エージェント名・モデル・effort の既定と候補）・段階「初期調査」と `guide_ready` | `.agents/rules/credentials.md` の「非対話の棚卸し（`scan`）」の段落。偽の `docker` での検証は `tests/test_scan.py`（`scan` の docker 引数と指示文・認証の判定とログイン・エージェントの記憶とフラグ・量の見積もりと進捗の表示・終わったあとの `out/` の案内、`claude` / `codex` の pty 起動）、段階と案内は `tests/test_cli.py` |
+| 調査中の進め方・報告のあとのユーザーとの進め方 | ホストでは持たない。調査エージェント（`container/instructions/`・`container/method/`）が自分で持つ |
 | エラー | 手順書は置かない。`aws-survey doctor`（ツールの有無と発行の切り分け）と各コマンドの出力から読む |
 | リリース・Homebrew の formula 更新 | `docs/release.md`（配布物の範囲もここ） |
 | `container/**`・`Dockerfile` | `.agents/rules/container.md` |
@@ -64,7 +64,7 @@ Claude Code / Codex 共通の指示。これは AWS を調査するための一�
 - EC2 に残すもの（`libexec/ec2/`）の名前に「ai」「agent」「survey」を含めない。root 読み取り段は 5 動詞固定で、任意パスの読み取りを足さない。シェルを経由せず argv を list で渡す。
 - ガードはイメージへ焼き込み、root 所有を保つ。プロンプトだけを安全性の根拠にしない。
 - 調査の共通指示は `container/instructions/survey-agents.md`、詳細は `method/`。
-- 対象固有の知識は `out/`、フェーズ固有の規則はその `00_目的と規則.md` に置く。
+- 対象固有の知識は `out/` に置く。調査エージェントに事前の計画・承認のゲートを課さない（理由は `.agents/rules/container.md`「承認や計画のゲートを置かない」）。
 - `out/` を削除・整理しない。ノウハウの昇格では対象固有の例を落とし、元の記録は残す。
 - 共通ルールはこのファイルと `.agents/rules/` が正本。`CLAUDE.md` に複製しない。
 - **このリポジトリの追跡対象はすべて公開される。**実対象の構成・調査結果・そこから得た数字に触れる記述は、

@@ -5,14 +5,18 @@
 #   aws-survey scan --force            初期調査が済んでいても、聞かずにやり直す（端末でないときはこれが要る）
 # 実体は libexec/commands/scan.sh。通常は aws-survey 経由で呼ぶ。
 #
-# ユーザーは待つだけ。中のエージェントは環境の確認（初回）と白紙の棚卸しをして、見つけたものと聞きたいことを out/ に
-# 残して終わる。目的の聞き取りと深掘りはしない（それは aws-survey claude / codex で対話して進める）。
+# ユーザーは待つだけ。中のエージェントは環境の確認（初回）と基礎調査（method/04）を行い、生データを out/…/raw/ に集め、
+# 報告（report/構成報告.md と report/ユーザー確認事項.md）まで書き切って終わる。ユーザーには聞かない（聞きたいことは確認事項に書く）。
+# 深掘りと確認事項への回答は aws-survey claude / codex で対話して進める。
 # 「白紙の棚卸し」は開発側の言葉で、利用者に見せる文と表示では「初期調査」で通す（.agents/rules/credentials.md）。
 # 端末では、始める前に ls と同じ列挙（Cost Explorer 込み）で調査の量を見積もり、待っているあいだは推定の進捗をプログレスバーで出す。
-# 見積もりは画面に出すだけで、ファイルにもエージェントにも渡さない。終わったら out/ に残したものを言い換えて示す。
-# ホストから渡す指示は「棚卸しだけ・ユーザーに聞かずに終える」に限る。対象の概要・調査項目・サービス名は渡さない
-# （AGENTS.md「ホストと調査コンテナ」。白紙で棚卸しさせる設計は、先に教えると発見ではなく確認になるため）。
+# 見積もりは画面に出すだけで、ファイルにもエージェントにも渡さない。終わったら out/ に残したものを言い換え、次の 1 手を示す。
+# ホストから渡す指示は「基礎調査を報告まで・ユーザーに聞かずに終える」に限る。対象の概要・調査項目・サービス名は渡さない
+# （AGENTS.md「ホストと調査コンテナ」。白紙で調べさせる設計は、先に教えると発見ではなく確認になるため）。
+# 報告まで書くと一時キーの 1 時間を超えうるので、エージェントが動いているあいだ、ホストが一時キーを見張って入れ替える（scan_keys_loop）。
+# 一時キーは ro のディレクトリマウントなので、書き換えればコンテナの次の aws 呼び出しから効く（survey-status もそう案内している）。
 # 初期調査が済んでいれば（setup.scanned）、前回の日時を出して、やり直すかを先に聞く（Enter は「やり直さない」。--force で聞かない）。
+# 報告が書かれないまま終わった回は setup.scanned を付けず、もう一度 scan を案内する（次の回は raw/ を使って続きから。method/00）。
 # Claude / Codex の認証はコンテナ内のボリュームに残る。無ければ先に対話でログインだけ済ませ（launch.sh の launch_agent_login。
 # 通常は init が済ませている）、そのあと非対話で続ける。モデルと effort は environment.json の agent から渡す（libexec/agents.sh）。
 set -euo pipefail
@@ -34,11 +38,12 @@ while [ $# -gt 0 ]; do
 done
 case "$AGENT_OPT" in ""|claude|codex) ;; *) ui_die "--agent は claude か codex です: $AGENT_OPT" ;; esac
 
-# ホストから渡す指示。棚卸しだけ・聞かずに終える、以外を書かない（対象・調査項目・サービス名を含めない）
-SCAN_PROMPT='この回はユーザーが応答できません。質問・目的の聞き取り・承認が要ることは行わないでください。
-AGENTS.md と method/00 の順で、環境の確認（初回なら method/03）と、method/04 の工程 1「白紙で棚卸しする」だけを行って終えてください。
-工程 2 以降（ユーザーに聞く・領域ごとの深掘り）には入らないでください。
-ユーザーに聞きたいことは out/ に書き残し、次の回にユーザーと話せるようにしておいてください。'
+# ホストから渡す指示。基礎調査を報告まで・聞かずに終える、以外を書かない（対象・調査項目・サービス名を含めない）
+SCAN_PROMPT='この回はユーザーが応答できません。質問や、答えを待つことは行わないでください。
+AGENTS.md と method/00「ユーザーが応答できない回」の順で、環境の確認（初回なら method/03）と、method/04 の基礎調査を行ってください。
+生データを集めて（白紙の棚卸し）終わりではなく、報告（report/構成報告.md と report/ユーザー確認事項.md）まで書き切ってください。
+この回のあいだ一時キーは自動で入れ替わるので、残り時間で切り上げないでください。
+ユーザーに聞きたいことと、中を見れば分かることは report/ユーザー確認事項.md に書き、次の回にユーザーと話せるようにしておいてください。'
 
 on_terminal() { [ -t 0 ] && [ -t 1 ]; }
 
@@ -46,8 +51,9 @@ on_terminal() { [ -t 0 ] && [ -t 1 ]; }
 # 端末で進捗を出すときだけ。ls と同じ列挙（libexec/inventory.sh）を Cost Explorer 込みで一時キーに読ませ、課金のあるサービスと
 # リソースの数から、生データ（raw/raw-*）の見込み数 EST_FILES と所要時間の目安 EST_SECONDS を決める。読めなければ一般的な目安。
 # 係数は実測に合わせて直す値で、ここにだけ置く: 生データは「4 + サービスごとに 2 + リソース 5 件ごとに 1」（6〜60 件）、
-# 時間は「150 秒 + 生データ 1 件あたり 50 秒」、環境の確認（初回）があれば 120 秒足す。
-EST_FILES=12; EST_SECONDS=$((150 + 50 * 12))
+# 時間は「150 秒 + 生データ 1 件あたり 50 秒 + 報告を書く 600 秒」、環境の確認（初回）があれば 120 秒足す。
+EST_REPORT_SECONDS=600
+EST_FILES=12; EST_SECONDS=$((150 + 50 * 12 + EST_REPORT_SECONDS))
 scan_estimate() {
   local inv billed cost_ok active denied items s note
   inv=$(container_inventory_spin cost ec2 lambda vpc s3 rds ecs elb cloudfront 2>/dev/null) || true
@@ -63,7 +69,7 @@ scan_estimate() {
     EST_FILES=$((4 + 2 * s + items / 5)); [ "$EST_FILES" -ge 6 ] || EST_FILES=6; [ "$EST_FILES" -le 60 ] || EST_FILES=60
     if [ "$cost_ok" -gt 0 ]; then note="課金のあるサービス ${billed}、リソース ${items} 件"; else note="リソース ${items} 件（Cost Explorer は読めず）"; fi
     [ "$denied" -eq 0 ] || note="${note}、読めないサービス ${denied}"
-    EST_SECONDS=$((150 + 50 * EST_FILES))
+    EST_SECONDS=$((150 + 50 * EST_FILES + EST_REPORT_SECONDS))
     [ -f "$OUT_DIR/_環境/00_動作確認.md" ] || EST_SECONDS=$((EST_SECONDS + 120))
     ui_ok "見積もり: ${note}。目安は $(ui_duration "$EST_SECONDS")ほど（進捗は推定です）"
   fi
@@ -76,7 +82,7 @@ scan_estimate() {
 # 見込み数に届いたら「思ったより量が多い」局面で、そのときの値から 94% に向けて、届いてからの生データの数と時間に比例して
 # 半分ずつ詰めていく（同じ量をもう一度こなすと残りの半分。止まらず、100% にも届かない）。表示は戻さず、上限は 95%。
 # 生データは raw/ の下の新しいファイルを名前を問わず数える（method は raw- で始めるよう求めるが、進捗はそれに依らない）。
-# まとめ（log/01_棚卸し.md）が書かれたら 90% 以上。100% は終わったときの ✔ が担う。
+# 報告（report/構成報告.md）が書かれたら 90% 以上。100% は終わったときの ✔ が担う。
 #   scan_progress <受け渡しの場所>   （& で起動し、終わったら kill する。keep が開始の目印）
 scan_bar() {  # <percent> → ████████░░░░░░░░░░░░  40%
   local p="$1" i bar=''
@@ -103,7 +109,7 @@ scan_percent() {
   PREV=$p; PCT=$p
 }
 scan_progress() {
-  local dir="$1" raw="$OUT_DIR/$SURVEY_PHASE_DIR/raw" log="$OUT_DIR/$SURVEY_PHASE_DIR/log/01_棚卸し.md"
+  local dir="$1" raw="$OUT_DIR/$SURVEY_PHASE_DIR/raw" log="$OUT_DIR/$SURVEY_PHASE_DIR/report/構成報告.md"
   local start now el n m last msg PCT=0 PREV=0 B_N=0 B_EL=-1 B_BASE=0
   set +e; set +o pipefail          # 背景の 1 ループ。find が無い・読めないときも黙って回り続ける
   start=$(date +%s)
@@ -120,13 +126,55 @@ scan_progress() {
   done
 }
 
+# ---- 一時キーの見張り ----
+# エージェントが動いているあいだ、一時キーの残りを見て、survey-status が「着手中の領域を仕上げてください」を出す境目
+# （総時間の 2/3、上限 40 分。container/survey-status と同じ式）を切る前に発行し直す。エージェントが時間で切り上げないため。
+# 発行し直しは credentials.sh（非対話。stdin は /dev/null）。元プロファイルが切れていれば、credentials.sh はログインのコマンドを
+# 対話で走らせようとするので、先に元プロファイルを確かめ、切れていれば利用者に別の端末で発行し直すよう伝えて待つ（中の調査は続く）。
+# 間隔は AWS_SURVEY_SCAN_KEY_INTERVAL 秒（既定 60。テストが縮める）。報せは <受け渡しの場所>/keep（端末。回転する行の上に出る）か標準出力へ。
+#   scan_keys_loop <報せの出力先>   （& で起動し、終わったら kill する）
+SCAN_KEY_INTERVAL="${AWS_SURVEY_SCAN_KEY_INTERVAL:-60}"
+scan_refresh_min() {
+  local total="${KEY_TOTAL_MIN:-$(( DURATION / 60 ))}" m
+  m=$(( total * 2 / 3 )); [ "$m" -le 40 ] || m=40; [ "$m" -ge 1 ] || m=1
+  echo "$m"
+}
+scan_keys_loop() {
+  local sink="$1" warned=0 rc sp=""
+  set +e; set +o pipefail
+  trap 'kill "$sp" 2>/dev/null; exit 0' TERM     # 待ち（sleep）の途中でも止まる。sleep を残すと標準出力を握ったままになる
+  while :; do
+    sleep "$SCAN_KEY_INTERVAL" & sp=$!; wait "$sp"
+    key_state
+    if [ "$KEY_STATE" = valid ] && [ "$KEY_LEFT_MIN" -ge "$(scan_refresh_min)" ]; then warned=0; continue; fi
+    if ! aws sts get-caller-identity --profile "$PROFILE_SRC" >/dev/null 2>&1; then
+      if [ "$warned" -eq 0 ]; then
+        printf '%s\n' "⚠ 一時キーの残りが約 ${KEY_LEFT_MIN:-0} 分ですが、ホストのプロファイル ${PROFILE_SRC} のログインが切れていて発行し直せません。別の端末で $AWS_SURVEY_CMD credentials を実行してください（この初期調査はそのまま続きます）" >> "$sink"
+        warned=1
+      fi
+      continue
+    fi
+    AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/credentials.sh" < /dev/null > /dev/null 2>&1; rc=$?
+    key_state
+    if [ "$rc" -eq 0 ] && [ "$KEY_STATE" = valid ]; then
+      printf '%s\n' "✔ 一時キーを入れ替えました（残り約 ${KEY_LEFT_MIN} 分。初期調査は続いています）" >> "$sink"
+      warned=0
+    elif [ "$warned" -eq 0 ]; then
+      printf '%s\n' "⚠ 一時キーを発行し直せませんでした。別の端末で $AWS_SURVEY_CMD credentials を実行してください（この初期調査はそのまま続きます）" >> "$sink"
+      warned=1
+    fi
+  done
+}
+
 # ---- 終わったあとの案内 ----
 # out/ に何が残ったかを、この回に書かれた（開始の目印より新しい）ファイルだけ、置き場所ごとに言い換えて示す。
-# 生データは件数と名前、まとめ（log/01_棚卸し.md）は見出しを抜き出す。中身の要約はしない（読むのは対話の回のエージェント）。
+# 生データは件数と名前、報告（report/構成報告.md）と確認事項（report/ユーザー確認事項.md）は見出しを抜き出す。中身の要約はしない
+# （読むのは利用者と、対話の回のエージェント）。
 #   scan_summary <開始の目印>
 scan_summary() (   # サブシェル。無いフォルダや空の grep で止まらないよう、set -e と pipefail を外す
   set +e; set +o pipefail
-  local mark="$1" phase="$OUT_DIR/$SURVEY_PHASE_DIR" log="$OUT_DIR/$SURVEY_PHASE_DIR/log/01_棚卸し.md" raw_n names line
+  local mark="$1" phase="$OUT_DIR/$SURVEY_PHASE_DIR" report="$OUT_DIR/$SURVEY_PHASE_DIR/report/構成報告.md" \
+        asks="$OUT_DIR/$SURVEY_PHASE_DIR/report/ユーザー確認事項.md" raw_n names line
   raw_n=$(find "$phase/raw" -type f -newer "$mark" 2>/dev/null | wc -l | tr -d ' ')
   names=$(find "$phase/raw" -type f -newer "$mark" 2>/dev/null | sed 's|.*/||' | sort | head -n 5 | tr '\n' ' ')
   ui_head "out/ に残したもの"
@@ -136,21 +184,39 @@ scan_summary() (   # サブシェル。無いフォルダや空の grep で止�
   else
     ui_skip "生データ（$SURVEY_PHASE_DIR/raw/）は書かれていません"
   fi
-  if [ -f "$log" ] && [ "$log" -nt "$mark" ]; then
-    ui_ok "見つけたものの一覧と、次に聞きたいこと  $SURVEY_PHASE_DIR/log/01_棚卸し.md"
-    grep -E '^#{1,3} ' "$log" | head -n 12 | sed 's/^#* *//' | while IFS= read -r line; do ui_text "  ・$line"; done
+  if [ -f "$report" ] && [ "$report" -nt "$mark" ]; then
+    ui_ok "報告  $SURVEY_PHASE_DIR/report/構成報告.md"
+    grep -E '^## ' "$report" | head -n 14 | sed 's/^#* *//' | while IFS= read -r line; do ui_text "  ・$line"; done
   else
-    ui_skip "まとめ（$SURVEY_PHASE_DIR/log/01_棚卸し.md）は書かれていません。他のファイルに書いたか、途中で終わった可能性があります"
+    ui_skip "報告（$SURVEY_PHASE_DIR/report/構成報告.md）は書かれていません。生データだけで終わったか、途中で終わった可能性があります"
   fi
-  find "$OUT_DIR" -type f -newer "$mark" 2>/dev/null | grep -v "^$phase/raw/" | grep -vx "$log" | sed "s|^$OUT_DIR/||" | sort \
+  if [ -f "$asks" ] && [ "$asks" -nt "$mark" ]; then
+    ui_ok "確認事項  $SURVEY_PHASE_DIR/report/ユーザー確認事項.md"
+    grep -E '^#{1,3} ' "$asks" | head -n 12 | sed 's/^#* *//' | while IFS= read -r line; do ui_text "  ・$line"; done
+  else
+    ui_skip "確認事項（$SURVEY_PHASE_DIR/report/ユーザー確認事項.md）は書かれていません"
+  fi
+  find "$OUT_DIR" -type f -newer "$mark" 2>/dev/null | grep -v "^$phase/raw/" | grep -vx "$report" | grep -vx "$asks" | sed "s|^$OUT_DIR/||" | sort \
     | while IFS= read -r line; do
         case "$line" in
           _環境/00_動作確認.md) ui_ok "環境の確認の記録  $line" ;;
           *) ui_ok "$line" ;;
         esac
       done
-  ui_text "報告書（report/）はまだありません。次の対話の回で、何を明らかにしたいかを決めてから書きます。"
 )
+
+# 次の 1 手。報告を読む → 中を見る経路を足す（任意）→ 対話で続ける。EC2 と Lambda の一覧は各コマンドが出すので、ここでは並べない
+#   scan_next <エージェント>
+scan_next() {
+  local agent="$1"
+  ui_head "次にやること"
+  ui_text "報告（$(ui_path "$OUT_DIR/$SURVEY_PHASE_DIR/report/構成報告.md")）を読みます。確認事項には、中を見れば分かることと、ユーザーにしか分からないことが分けて書いてあります。"
+  ui_text "AWS の API で見えるのはリソースの外側までです。中まで調べるなら、先に経路を足します（要らなければ飛ばせます）。"
+  also_cmd "$AWS_SURVEY_CMD ec2" "EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
+  also_cmd "$AWS_SURVEY_CMD lambda" "Lambda のコードを取り出して読めるようにします。一覧から選びます"
+  echo ""
+  next_cmd "$AWS_SURVEY_CMD $agent" "報告を手に対話で続けます。質問への回答・中を読む・確認事項の答えを伝える、のどれからでも"
+}
 
 ui_title "aws-survey scan"
 ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
@@ -223,8 +289,8 @@ echo ""
 
 # ---- 5. 実行 ----
 ui_head "初期調査（$(agent_label "$AGENT")）"
-ui_text "対象アカウントに何があるかを洗い出し、リソースの一覧と気づいたことを out/ に書きます。質問はしないので、待つだけです。"
-ui_text "止めるときは Ctrl-C（もう一度 $AWS_SURVEY_CMD scan で最初からになります）。"
+ui_text "対象アカウントに何があるかを洗い出し、構成の報告と確認事項を out/ に書きます。質問はしないので、待つだけです。"
+ui_text "止めるときは Ctrl-C（もう一度 $AWS_SURVEY_CMD scan を実行すると、それまでに残した生データを使って続きから書きます）。"
 echo ""
 # 出力は画面に流しつつ、失敗の原因（ログイン切れなど）を読むために一時ファイルにも残す。out/ には書かない（out/ は調査エージェントの領分）
 SCAN_LOG=$(mktemp) || ui_die "一時ファイルを作れません。"
@@ -247,15 +313,20 @@ if on_terminal; then
   spid=$!
   scan_progress "$SPIN_DIR" &
   ppid=$!
+  scan_keys_loop "$SPIN_DIR/keep" &
+  kpid=$!
   agent_cmd < /dev/null >> "$SPIN_DIR/keep" 2>&1 || status=$?
-  kill "$ppid" 2>/dev/null || true; wait "$ppid" 2>/dev/null || true
+  kill "$ppid" "$kpid" 2>/dev/null || true; wait "$ppid" "$kpid" 2>/dev/null || true
   ui_spin_end "$SPIN_DIR" "$spid"
   cp "$SPIN_DIR/keep" "$SCAN_LOG"
   rm -rf "$SPIN_DIR"
 else
   scan_start=$(date +%s)
   touch "$START_MARK"
+  scan_keys_loop /dev/stdout &
+  kpid=$!
   agent_cmd < /dev/null 2>&1 | tee "$SCAN_LOG" || status=${PIPESTATUS[0]}
+  kill "$kpid" 2>/dev/null || true; wait "$kpid" 2>/dev/null || true
 fi
 scan_elapsed=$(( $(date +%s) - scan_start ))
 echo ""
@@ -275,6 +346,12 @@ ui_ok "初期調査を終えました（$(ui_duration "$scan_elapsed")）"
 echo ""
 scan_summary "$START_MARK"
 echo ""
-env_mark_setup scanned "初期調査を済ませた" "$(date '+%FT%H:%M%z')"
-echo ""
-next_cmd "$AWS_SURVEY_CMD $AGENT" "初期調査の結果を手に、何を明らかにしたいかを中で決めて調査を進めます"
+# 報告があって初めて「済み」。無ければ次も scan を案内する（前回の生データを使って続きから始める。やり直しではない）
+if [ -f "$OUT_DIR/$SURVEY_PHASE_DIR/report/構成報告.md" ]; then
+  env_mark_setup scanned "初期調査を済ませた" "$(date '+%FT%H:%M%z')"
+  echo ""
+  scan_next "$AGENT"
+else
+  ui_warn "報告が書かれていないので、初期調査は済んでいない扱いにします"
+  next_cmd "$AWS_SURVEY_CMD scan" "もう一度実行すると、残した生データを使って続きから書きます"
+fi

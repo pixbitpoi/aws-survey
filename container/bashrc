@@ -29,7 +29,7 @@ complete -C aws_completer aws
 survey-status
 
 sui_head "調査を始める・続ける"
-sui_cmd "claude"              "新しく始める（棚卸しが out/ にあれば、それを手にユーザーに聞くところから）"
+sui_cmd "claude"              "新しく始める（報告が out/ にあれば、それを手にユーザーと続きから）"
 sui_cmd "claude -c"           "直前の会話の続きから（quit しても残ります）"
 sui_cmd "claude -r"           "過去のセッションを選んで再開"
 sui_cmd "codex"               "Codex で始める（初回は codex login --device-auth）"

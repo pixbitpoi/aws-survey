@@ -22,25 +22,25 @@
 対象のことを書いた時点で、この一式は 1 つの環境専用になる。
 
 対象システムの知識は調査エージェントが `out/01_システム概要.md` に書く。ホストは用意しない。
-前提を先渡ししないこと。最初のフェーズは白紙で棚卸ししてからユーザーに聞く設計で、
+前提を先渡ししないこと。基礎調査は白紙で調べて報告を書き、それを手にユーザーと話す設計で、
 先に教えると発見ではなく確認をするようになる。
 
-## フェーズ固有の規則を書かない
+## 承認や計画のゲートを置かない
 
-`method/` と `container/instructions/survey-agents.md` に書くのは、どのフェーズでも変わらないことだけ。
-「監査ではない」「評価を書かない」は基礎調査の規則であって、常時の禁止事項ではない。
-フェーズ固有の「やる / やらない」は `out/<フェーズ>/00_目的と規則.md` に書く。
+調査エージェントが「目的と規則」をユーザーに承認させてから動く運用は、うまく働かなかった（計画に無い質問に答えず、
+1 つ聞くにも計画と承認が要った）。`method/` と `survey-agents.md` に、事前の草案・承認・規則ファイルを前提にする手順を戻さない。
+仕事の性質で決まる「書く / 書かない」（基礎調査では評価しない、監査なら評価する）は `method/04` と `method/02` に直接書く。
 
 | 書きたいこと | 置き場 |
 | --- | --- |
 | 対象システムの知識 | ホストでは作らない（調査エージェントが `out/01_システム概要.md` に書く） |
-| 調査項目・フェーズの目的と規則 | ホストでは作らない（調査エージェントが `out/<フェーズ>/` に書き、ユーザーが承認） |
-| どのフェーズでも変わらない調査の作法 | `method/01_進め方.md` |
+| 基礎調査で集めるもの・報告の形・書かないもの | `method/04_基礎調査の型.md` |
+| 報告のあと、ユーザーとどう進めるか（中を読む・外は聞く・別の仕事を頼まれたら） | `method/02_基礎調査のあと.md` |
+| どの仕事でも変わらない調査の作法 | `method/01_進め方.md` |
 | 現場で見つかった、どの対象でも効くノウハウ | `method/01_進め方.md`（`out/02_調査ノウハウ.md` から昇格させる） |
-| フェーズ運用そのものの決まり | `method/02_フェーズとは.md` |
 | 常に意識させたいこと（読み取りのみ・出力先・マスク） | `container/instructions/survey-agents.md`。薄く保つ |
 
-`container/instructions/survey-agents.md` は毎回すべて読まれる。厚くすると、そのフェーズに関係ない指示が
+`container/instructions/survey-agents.md` は毎回すべて読まれる。厚くすると、その回に関係ない指示が
 常に文脈を占める。詳細は `method/` に置く。
 
 ## 反映のされ方が 3 通りある
@@ -52,14 +52,15 @@
 | `container/settings.json` / `codex/` / `hooks/` / `bashrc` / `survey-status` / `survey-ui.sh` / `ec2` | イメージに焼き込み | 再ビルドが要る（`aws-survey scan` / `claude` / `codex` / `run` が毎回ビルドする） |
 
 コンテナへ渡るものは `container/` だけではない。対象フォルダの `out/` はディレクトリのマウントなので
-双方向にその場で効き（目的と規則・システム概要を直せば調査エージェントがすぐ読む）、`environment.json` の
+双方向にその場で効き（報告・システム概要を直せば調査エージェントがすぐ読む）、`environment.json` の
 `phase_dir` / `region` / `name` は起動時に読むので次回の起動（`aws-survey scan` / `claude` / `codex` / `run`）から効く。
 同じ `out/` に対して 2 つのエージェントを同時に走らせない。台帳と監査ログの書き手が競合する。
 `aws-survey scan` は起動前に `docker ps` で対話コンテナと自分の名前を見て、動いていれば止まる。
 
 `aws-survey scan` は調査エージェントを非対話（`claude -p` / `codex exec`）で 1 回動かす。ホストが渡す指示は「ユーザーが応答できない回」と
-「棚卸しだけ」であり、その回に何をするかは `method/00` の「ユーザーが応答できない回」が持つ。環境の確認と白紙の棚卸しを
-承認前の前段とする位置づけは `survey-agents.md` と `method/00` / `04` にある。ホストのコマンド名はそこにも書かない。
+「基礎調査を報告まで」であり、その回に何をするかは `method/00` の「ユーザーが応答できない回」が持つ。その回に一時キーが入れ替わることは
+「コンテナから見える事実」として `method/00` と `survey-agents.md` に書く（入れ替える仕組みは `.agents/rules/credentials.md`）。
+ホストのコマンド名はそこにも書かない。
 
 ホストが同じイメージを `docker run --rm` で 1 コマンドだけ動かす経路がある（`aws-survey ls` / `ec2` / `lambda` の一覧と
 `ssh verify` の `ec2 --selftest`。`libexec/container.sh`）。渡すのは一時キーの ro マウントだけで、`out/` も指示書も
@@ -114,12 +115,12 @@ Claude 側の 2 経路が揃っていることは `tests/test_guards.py` の `Au
 ## `_環境/` を成果物と別区画に置く理由
 
 `out/_環境/` に入るのは `00_動作確認.md`（初回に調査エージェントが書く）と `aws-audit.log`（フックが書く）。
-どちらもこの環境が期待どおり動いているかの記録で、調査の成果物ではない。だからフェーズのフォルダと分ける。
+どちらもこの環境が期待どおり動いているかの記録で、調査の成果物ではない。だから仕事のフォルダと分ける。
 
 この 2 つは対で読む。離して置かないこと。監査ログはフックが `out/` 配下にしか書けないので、
 動作確認だけ別の場所へ移すと証跡が対で読めなくなる。
 
-環境の自己点検をフェーズにしないこと。フェーズはミッションの単位であり、
+環境の自己点検を調査の仕事にしないこと。仕事のフォルダは調査の単位であり、
 「自分を縛る仕組みを検証せよ」という指示は、調査エージェントに知らせない前提を持ち込む。
 
 `Dockerfile` のビルド文脈は `container/`（`libexec/docker.sh` が `docker build -f <本体>/Dockerfile <本体>/container`）。
@@ -140,7 +141,7 @@ echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs"}}' | b
 echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 terminate-instances --instance-ids i-0"}}' | bash $H; echo "exit=$?"
 #   → exit=2
 
-echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs > out/<フェーズ>/raw/raw-x.json"}}' | bash $H; echo "exit=$?"
+echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs > out/<作業>/raw/raw-x.json"}}' | bash $H; echo "exit=$?"
 #   → exit=0
 
 echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs > out/../.claude/hooks/x.json"}}' | bash $H; echo "exit=$?"

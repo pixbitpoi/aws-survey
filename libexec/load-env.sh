@@ -51,8 +51,7 @@ ROLE_NAME="${ROLE_NAME:-$(_get .auth.role_name)}"
 # 未設定なら空。
 REFRESH_CMD="${REFRESH_CMD:-$(_get .auth.refresh_command)}"
 DURATION="${DURATION:-$(_get .auth.duration_seconds)}"
-# 最初は基礎調査、というのは決定ではなく通例。既定を持たせ、聞かない。
-# 実際に何のフェーズにするかは、調査コンテナの中でユーザーと決める。
+# 最初の仕事は基礎調査（scan が報告まで書く）。その器の名前。別の種類の仕事のフォルダは調査エージェントが out/ に自分で作る。
 SURVEY_PHASE_DIR="${SURVEY_PHASE_DIR:-$(_get .phase_dir)}"
 SURVEY_PHASE_DIR="${SURVEY_PHASE_DIR:-01_基礎調査}"
 # 調査に使うエージェント（claude / codex）とそのモデル・effort（libexec/agents.sh）。init が聞いて書き、最後に使ったものを

@@ -92,7 +92,7 @@ aws lambda get-function-configuration --function-name <関数名> --query CodeSh
 丸ごと保存すると、パスワードのような値が `out/` に落ちます。
 
 ```
-aws lambda get-function-configuration --function-name <関数名> --query '{Runtime:Runtime,Handler:Handler,Role:Role,CodeSha256:CodeSha256,Layers:Layers,VpcConfig:VpcConfig,DeadLetterConfig:DeadLetterConfig,EnvNames:keys(Environment.Variables),EnvValues:{TABLE_NAME:Environment.Variables.TABLE_NAME}}' > out/<フェーズ>/raw/raw-lambda-cfg-<関数名>.json
+aws lambda get-function-configuration --function-name <関数名> --query '{Runtime:Runtime,Handler:Handler,Role:Role,CodeSha256:CodeSha256,Layers:Layers,VpcConfig:VpcConfig,DeadLetterConfig:DeadLetterConfig,EnvNames:keys(Environment.Variables),EnvValues:{TABLE_NAME:Environment.Variables.TABLE_NAME}}' > out/<作業>/raw/raw-lambda-cfg-<関数名>.json
 ```
 
 `EnvValues` には、名前を見てから秘密でないものだけを並べます。環境変数の無い関数では `keys()` がエラーになるので、`EnvNames` を外します
@@ -137,5 +137,6 @@ aws lambda get-function-configuration --function-name <関数名> --query '{Runt
 
 ## いつ使うか
 
-そのフェーズの `00_目的と規則.md` が、関数の中身を読むことを範囲に含めているときです。
-基礎調査（`04_基礎調査の型.md`）では設定とトリガーから役割を推し、コードで確かめたいことは「次のフェーズに送るもの」に残すのが通例です。
+`code/` にその関数があって、コードを読めば決まる問いがあるときです。ユーザーに聞く前に使います。
+基礎調査の非対話の回では設定とトリガーから役割を推し、コードで確かめたいことを `report/ユーザー確認事項.md` の「中を見れば分かること」に
+取り出しの依頼文つきで挙げます（`method/04`）。取り出されたら、その回で読んで報告の本文に書き直します（`method/02`）。

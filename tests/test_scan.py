@@ -1,7 +1,9 @@
 """`aws-survey scan` (the non-interactive inventory) and `aws-survey claude` / `codex`, with a fake `docker`.
 
 scan launches the survey image with the same mounts as `run` but no terminal, hands the agent one
-instruction - do the blank inventory, ask the user nothing - and records the result in environment.json.
+instruction - do the base survey through to the report, ask the user nothing - and records the result in
+environment.json once the report exists. While the agent runs, scan watches the temporary key and reissues it
+before the agent would be told to wind down.
 The fake docker plays the parts scan relies on: `ps` for a running survey container, a read-only peek
 into the agent's volume for its login, the interactive login itself, and the agent run that leaves files
 in out/. Nothing here reaches AWS; the host side never calls `aws` except through `credentials`.
@@ -72,10 +74,13 @@ if (cmd[0] == "claude" and "-p" in cmd) or (cmd[0] == "codex" and "exec" in cmd)
         os.makedirs(os.path.join(out, "_環境"), exist_ok=True)
         os.makedirs(os.path.join(out, phase, "raw"), exist_ok=True)
         os.makedirs(os.path.join(out, phase, "log"), exist_ok=True)
+        os.makedirs(os.path.join(out, phase, "report"), exist_ok=True)
         open(os.path.join(out, "_環境", "00_動作確認.md"), "w").write("確認した\n")
         for n in ("raw-a.json", "raw-b.json"):
             open(os.path.join(out, phase, "raw", n), "w").write("{}\n")
-        open(os.path.join(out, phase, "log", "01_棚卸し.md"), "w").write("# 棚卸し\n\n## 見つけたもの\n\n- 2 件\n\n## 聞きたいこと\n\n- 用途\n")
+        open(os.path.join(out, phase, "log", "01_基礎調査.md"), "w").write("# 第 1 回\n")
+        open(os.path.join(out, phase, "report", "構成報告.md"), "w").write("# 構成報告\n\n## 概要\n\n- 2 件\n\n## A. 全体像\n\n## 外からは分からないこと\n")
+        open(os.path.join(out, phase, "report", "ユーザー確認事項.md"), "w").write("# 確認事項\n\n## 中を見れば分かること\n\n## ユーザーにしか分からないこと\n")
     if os.environ.get("FAKE_SCAN_SLOW"):
         import time; time.sleep(float(os.environ["FAKE_SCAN_SLOW"]))
     print("inventory in progress"); sys.exit(int(os.environ.get("FAKE_SCAN_EXIT", "0")))
@@ -155,16 +160,23 @@ class Scan(ScanCase):
         self.assertEqual(launch[image + 8:], ['--output-format', 'text'])
         self.assertIn('inventory in progress', result.stdout)           # the agent's output is streamed
         self.assertIn('初期調査を終えました（', result.stdout)
-        # what the run left in out/, by place: the raw files by count and name, the inventory note by its headings
+        # what the run left in out/, by place: the raw files by count and name, the report and the asks by their headings
         self.assertIn('生データ 2 件  01_基礎調査/raw/', result.stdout)
         self.assertIn('raw-a.json raw-b.json', result.stdout)
-        self.assertIn('01_基礎調査/log/01_棚卸し.md', result.stdout)
-        self.assertIn('・見つけたもの', result.stdout)
-        self.assertIn('・聞きたいこと', result.stdout)
+        self.assertIn('報告  01_基礎調査/report/構成報告.md', result.stdout)
+        self.assertIn('・概要', result.stdout)
+        self.assertIn('・外からは分からないこと', result.stdout)
+        self.assertIn('確認事項  01_基礎調査/report/ユーザー確認事項.md', result.stdout)
+        self.assertIn('・中を見れば分かること', result.stdout)
+        self.assertIn('01_基礎調査/log/01_基礎調査.md', result.stdout)
         self.assertIn('環境の確認の記録  _環境/00_動作確認.md', result.stdout)
         self.assertNotIn('白紙', result.stdout)
-        self.assertNotIn('棚卸し中', result.stdout)
-        self.assertIn('aws-survey claude', result.stdout)               # the next step is the conversation
+        self.assertNotIn('棚卸し', result.stdout)
+        # the next step: read the report, optionally add the inside routes, then the conversation
+        self.assertIn('次にやること', result.stdout)
+        self.assertIn('aws-survey ec2', result.stdout)
+        self.assertIn('aws-survey lambda', result.stdout)
+        self.assertIn('aws-survey claude', result.stdout)
         # off a terminal there is no progress line and no sizing run: the only container runs are the login checks and the agent
         self.assertFalse(any('/x/inventory.sh' in c for c in self.docker_runs()))
 
@@ -173,7 +185,7 @@ class Scan(ScanCase):
         self.authed('claude')
         result = self.run_cli('scan')
         self.assertIn('◆ 初期調査（Claude Code）', result.stdout)
-        self.assertIn('対象アカウントに何があるかを洗い出し、リソースの一覧と気づいたことを out/ に書きます。質問はしないので、待つだけです。', result.stdout)
+        self.assertIn('対象アカウントに何があるかを洗い出し、構成の報告と確認事項を out/ に書きます。質問はしないので、待つだけです。', result.stdout)
         self.assertNotIn('見つけたものと聞きたいことを out/ に残して終わります', result.stdout)
 
     def test_when_nothing_was_written_the_summary_says_so(self):
@@ -182,7 +194,12 @@ class Scan(ScanCase):
         result = self.run_cli('scan')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('生データ（01_基礎調査/raw/）は書かれていません', result.stdout)
-        self.assertIn('01_棚卸し.md）は書かれていません', result.stdout)
+        self.assertIn('構成報告.md）は書かれていません', result.stdout)
+        self.assertIn('ユーザー確認事項.md）は書かれていません', result.stdout)
+        # without a report the survey is not done: scan is offered again (it continues from the raw data), not the conversation
+        self.assertIn('初期調査は済んでいない扱い', result.stdout)
+        self.assertIn('aws-survey scan', result.stdout)
+        self.assertIsNone(self.environment()['setup']['scanned'])
 
     def test_the_recorded_model_and_effort_are_passed_as_flags(self):
         self.ready(agent={'name': 'claude', 'model': 'sonnet', 'effort': 'high'})
@@ -215,16 +232,17 @@ class Scan(ScanCase):
         self.run_cli('scan', '--agent', 'claude')
         launch = self.agent_run()
         prompt = launch[launch.index('-p') + 1]
-        self.assertIn('棚卸し', prompt)
         self.assertIn('応答できません', prompt)
         self.assertIn('method/04', prompt)
+        self.assertIn('報告', prompt)                                    # through to the report, not just the raw data
+        self.assertIn('一時キーは自動で入れ替わる', prompt)               # so the agent does not wind down on the clock
         for word in ['EC2', 'Lambda', 'VPC', 'S3', 'RDS', 'Cost', 'CloudFront', 'aws-survey', 'libexec']:
             self.assertNotIn(word, prompt, f'{word} must not be handed to the agent from the host')
 
     def test_agent_codex_uses_exec_and_is_remembered(self):
         self.ready()
         self.authed('codex')
-        result = self.run_cli('scan', '--agent', 'codex')
+        result = self.run_cli('scan', '--agent', 'codex', FAKE_SCAN_WRITES='1')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         launch = self.agent_run()
         self.assertEqual(launch[launch.index('codex'):launch.index('codex') + 9],
@@ -290,8 +308,8 @@ class Scan(ScanCase):
         self.assertLess(runs.index(sizing), runs.index(self.agent_run()))
         self.assertFalse(any('aws-survey/out' in a for a in sizing))   # the sizing run reads with the key only
         # 3 billed services (Tax is not one), 3 services with resources + 1 unreadable = 4, 10 resources → 4 + 8 + 2 = 14 files;
-        # 150 s + 50 s a file, plus 120 s for the first-time environment check = 16 min 10 s
-        self.assertIn('見積もり: 課金のあるサービス 3、リソース 10 件、読めないサービス 1。目安は 16 分 10 秒ほど', text)
+        # 150 s + 50 s a file + 600 s for the report, plus 120 s for the first-time environment check = 26 min 10 s
+        self.assertIn('見積もり: 課金のあるサービス 3、リソース 10 件、読めないサービス 1。目安は 26 分 10 秒ほど', text)
         self.assertIn('初期調査中', text)
         self.assertRegex(text, r'[█░]{20} +\d+%  経過 \d+ 秒')
         self.assertNotIn('棚卸し中', text)
@@ -303,7 +321,7 @@ class Scan(ScanCase):
         self.authed('claude')
         code, text = self.drive(['scan'], [], env_extra={'FAKE_SCAN_SLOW': '1.5'})
         self.assertEqual(code, 0, text)
-        self.assertIn('調査の量を見積もれなかったので、一般的な目安（12 分 30 秒ほど）で進捗を出します', text)
+        self.assertIn('調査の量を見積もれなかったので、一般的な目安（22 分 30 秒ほど）で進捗を出します', text)
         self.assertIn('初期調査中', text)
         self.assertIn('%', text)
 
@@ -391,6 +409,34 @@ class Scan(ScanCase):
         self.assertNotIn('発行し直します', result.stdout)
         self.assertFalse(any(c[0] == 'aws' for c in self.calls()))
 
+    def test_while_the_agent_runs_a_shortening_key_is_replaced(self):
+        # 35 分あれば始められる（30 分が要る）が、survey-status が「仕上げてください」を出す境目（40 分）は切っているので、
+        # エージェントが動いているあいだに見張りが発行し直す。エージェントの起動より後に assume-role が来る
+        self.ready(minutes=35, agent='claude')
+        self.authed('claude')
+        result = self.run_cli('scan', FAKE_SCAN_SLOW='2.5', AWS_SURVEY_SCAN_KEY_INTERVAL='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('発行し直します', result.stdout)                 # not at the door: the key was long enough to start
+        self.assertIn('一時キーを入れ替えました', result.stdout)
+        calls = self.calls()
+        agent = next(i for i, c in enumerate(calls) if c[0] == 'docker' and '-p' in c)
+        assume = [i for i, c in enumerate(calls) if c[0] == 'aws' and 'assume-role' in c]
+        self.assertTrue(assume and assume[0] > agent, (agent, assume))
+        # the new key is written where the container reads it, and the loop is stopped with the agent
+        self.assertIn('aws_session_token', (self.key_dir() / 'credentials').read_text())
+        self.assertLessEqual(len(assume), 2)
+
+    def test_while_the_agent_runs_an_expired_source_login_is_reported_not_run(self):
+        # 元プロファイルが切れていると credentials.sh はログインのコマンドを対話で走らせようとするので、見張りは走らせずに利用者へ伝える
+        self.ready(minutes=35, agent='claude')
+        self.authed('claude')
+        result = self.run_cli('scan', FAKE_SCAN_SLOW='2.5', AWS_SURVEY_SCAN_KEY_INTERVAL='1', FAKE_CALLER_FAIL='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('ログインが切れていて発行し直せません', result.stdout)
+        self.assertEqual(result.stdout.count('ログインが切れていて発行し直せません'), 1)   # said once, not every tick
+        self.assertIn('aws-survey credentials', result.stdout)
+        self.assertFalse(any(c[0] == 'aws' and 'assume-role' in c for c in self.calls()))
+
     def test_refuses_while_the_survey_container_runs(self):
         self.ready(agent='claude')
         self.authed('claude')
@@ -402,6 +448,7 @@ class Scan(ScanCase):
             self.assertIsNone(self.agent_run())
 
     def test_success_records_scanned_and_container_verified(self):
+        # 「済み」は報告（report/構成報告.md）があるときだけ（FAKE_SCAN_WRITES が書く）
         self.ready(agent='claude')
         self.authed('claude')
         result = self.run_cli('scan', FAKE_SCAN_WRITES='1')
