@@ -196,7 +196,7 @@ class Scan(ScanCase):
         self.assertEqual(self.environment()['agent'], {'name': 'claude', 'model': 'sonnet', 'effort': 'high'})
         # 別のエージェントに切り替えると、そのエージェントの既定に戻る（前の値は渡せない）
         self.authed('claude', 'codex')
-        result = self.run_cli('scan', '--agent', 'codex')
+        result = self.run_cli('scan', '--agent', 'codex', '--force')   # a second scan asks first; --force skips that
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.environment()['agent'], {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
         self.assertIn('model_reasoning_effort=low', self.agent_run())
@@ -232,7 +232,7 @@ class Scan(ScanCase):
         self.assertEqual(self.environment()['agent'], {'name': 'codex', 'model': 'gpt-5.6-sol', 'effort': 'low'})
         self.assertIn('aws-survey codex', result.stdout)
         self.log.unlink()
-        result = self.run_cli('scan')                                   # no --agent: the remembered one
+        result = self.run_cli('scan', '--force')                        # no --agent: the remembered one (--force: it already ran once)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('exec', self.agent_run())
         check = self.status_checks()[0]                                 # the CLI itself is asked, with its volumes only
@@ -412,6 +412,47 @@ class Scan(ScanCase):
         guide = self.run_cli()
         self.assertIn('● 6 ', guide.stdout)
         self.assertIn('✔ 5 初期調査', guide.stdout)
+
+    def test_a_second_scan_shows_the_last_time_and_asks_before_starting_over(self):
+        self.ready(agent='claude', setup={'scanned': '2026-09-10T14:05+0900'})
+        self.authed('claude')
+        code, text = self.drive(['scan'], [('やり直しますか？', b'n\r')])
+        self.assertEqual(code, 0, text)
+        self.assertIn('初期調査はすでに済んでいます（前回: 2026-09-10 14:05）', text)
+        self.assertIn('やり直しません', text)
+        self.assertIn('aws-survey claude', text)
+        self.assertFalse(any(c[0] == 'docker' for c in self.calls()))   # no key check, no sizing, no agent
+        self.assertEqual(self.environment()['setup']['scanned'], '2026-09-10T14:05+0900')
+
+    def test_enter_alone_keeps_the_last_survey(self):
+        self.ready(agent='claude', setup={'scanned': '2026-09-10T14:05+0900'})
+        self.authed('claude')
+        result = self.run_cli('scan', input='\n')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('やり直しません', result.stdout)
+        self.assertIsNone(self.agent_run())
+
+    def test_answering_yes_starts_the_survey_over_and_keeps_out(self):
+        self.ready(agent='claude', setup={'scanned': '2026-09-10T14:05+0900'})
+        self.authed('claude')
+        code, text = self.drive(['scan'], [('やり直しますか？', b'y\r')], env_extra={'FAKE_SCAN_WRITES': '1'})
+        self.assertEqual(code, 0, text)
+        self.assertIn('前回: 2026-09-10 14:05', text)
+        self.assertIsNotNone(self.agent_run())
+        self.assertIn('初期調査を終えました（', text)
+        self.assertNotEqual(self.environment()['setup']['scanned'], '2026-09-10T14:05+0900')
+
+    def test_off_a_terminal_a_second_scan_needs_force(self):
+        self.ready(agent='claude', setup={'scanned': '2026-09-10T14:05+0900'})
+        self.authed('claude')
+        result = self.run_cli('scan')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('scan --force', result.stdout)
+        self.assertIsNone(self.agent_run())
+        forced = self.run_cli('scan', '--force', FAKE_SCAN_WRITES='1')
+        self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
+        self.assertNotIn('やり直しますか', forced.stdout)
+        self.assertIsNotNone(self.agent_run())
 
     def test_failure_records_nothing_and_names_the_retry(self):
         self.ready(agent='claude')

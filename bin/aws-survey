@@ -347,7 +347,7 @@ guide_ready() {
     also_cmd "$CMD_NAME codex" "Codex と対話で調査を進めます"
   fi
   if scan_done; then
-    also_cmd "$CMD_NAME scan" "初期調査をやり直します（$(agent_label "$agent") が非対話で。待つだけ）"
+    also_cmd "$CMD_NAME scan" "初期調査をやり直します（$(agent_label "$agent") が非対話で。待つだけ。前回の日時を出して確かめてから始めます）"
   fi
   also_cmd "$CMD_NAME ls" "任意。アカウントで使っているリソースの一覧を眺めます（読むだけで、out/ には書きません）"
 }

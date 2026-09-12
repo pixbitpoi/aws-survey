@@ -2,6 +2,7 @@
 # 調査コンテナでエージェントを非対話で 1 回走らせ、対象アカウントの初期調査だけを行わせる（ホストで実行）
 #   aws-survey scan                    記録してあるエージェント（未定なら矢印キーで選ぶ）で初期調査を行う
 #   aws-survey scan --agent codex      エージェントを指定する（記録も更新する）
+#   aws-survey scan --force            初期調査が済んでいても、聞かずにやり直す（端末でないときはこれが要る）
 # 実体は libexec/commands/scan.sh。通常は aws-survey 経由で呼ぶ。
 #
 # ユーザーは待つだけ。中のエージェントは環境の確認（初回）と白紙の棚卸しをして、見つけたものと聞きたいことを out/ に
@@ -11,6 +12,7 @@
 # 見積もりは画面に出すだけで、ファイルにもエージェントにも渡さない。終わったら out/ に残したものを言い換えて示す。
 # ホストから渡す指示は「棚卸しだけ・ユーザーに聞かずに終える」に限る。対象の概要・調査項目・サービス名は渡さない
 # （AGENTS.md「ホストと調査コンテナ」。白紙で棚卸しさせる設計は、先に教えると発見ではなく確認になるため）。
+# 初期調査が済んでいれば（setup.scanned）、前回の日時を出して、やり直すかを先に聞く（Enter は「やり直さない」。--force で聞かない）。
 # Claude / Codex の認証はコンテナ内のボリュームに残る。無ければ先に対話でログインだけ済ませ（launch.sh の launch_agent_login。
 # 通常は init が済ませている）、そのあと非対話で続ける。モデルと effort は environment.json の agent から渡す（libexec/agents.sh）。
 set -euo pipefail
@@ -20,13 +22,14 @@ set -euo pipefail
 . "$LIBEXEC_DIR/launch.sh"   # container.sh が docker.sh を読む
 . "$LIBEXEC_DIR/menu.sh"
 
-AGENT_OPT=""
+AGENT_OPT=""; FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --agent)   [ $# -ge 2 ] || ui_die "--agent には claude か codex を指定してください。"; AGENT_OPT="$2"; shift 2 ;;
     --agent=*) AGENT_OPT="${1#--agent=}"; shift ;;
-    -h|--help|help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) ui_die "scan の不明なオプション: $1（--agent claude|codex）" ;;
+    --force|-f) FORCE=1; shift ;;
+    -h|--help|help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) ui_die "scan の不明なオプション: $1（--agent claude|codex / --force）" ;;
   esac
 done
 case "$AGENT_OPT" in ""|claude|codex) ;; *) ui_die "--agent は claude か codex です: $AGENT_OPT" ;; esac
@@ -155,6 +158,33 @@ ui_kv "アカウント" "$ACCOUNT_ID"
 ui_kv "リージョン" "$REGION"
 ui_kv "フェーズ" "$SURVEY_PHASE_DIR"
 echo ""
+
+# ---- 0. すでに初期調査が済んでいないか ----
+# setup.scanned（成功時に分までの日時で書く）があれば、一時キーを発行し直す前に、前回の日時を出してやり直すかを聞く。
+# 打ち直しただけで数十分の調査を始めないため。Enter は「やり直さない」。端末でなければ read_line が諦めるので --force が要る。
+# やり直しても out/ は消さない（記録が足されるだけ。out/ は調査エージェントの領分）。
+SCANNED=$(jq -r '.setup.scanned // empty' "$ENV_FILE")
+if [ -n "$SCANNED" ] && [ "$FORCE" -eq 0 ]; then
+  ui_warn "初期調査はすでに済んでいます（前回: $(sed 's/T/ /; s/[+-][0-9]\{4\}$//' <<< "$SCANNED")）"
+  ui_text "もう一度行うと、out/ の記録は消さずに、初期調査をやり直します（数十分かかります）。"
+  printf '  %s❯%s 初期調査をやり直しますか？ %s(y/N)%s: ' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET"
+  if ! read_line ans; then
+    echo ""
+    ui_text "答えを読めませんでした。やり直すなら $(ui_cmd "$AWS_SURVEY_CMD scan --force") を実行してください。"
+    exit 1
+  fi
+  case "$ans" in
+    y|Y|yes|YES) echo "" ;;
+    *)
+      ui_text "やり直しません。前回の結果はそのまま out/ にあります。"
+      if [ -n "${AGENT_OPT:-$SURVEY_AGENT}" ]; then
+        next_cmd "$AWS_SURVEY_CMD ${AGENT_OPT:-$SURVEY_AGENT}" "前回の初期調査の結果を手に、何を明らかにしたいかを中で決めて調査を進めます"
+      else
+        next_cmd "$AWS_SURVEY_CMD" "次の 1 手を案内します"
+      fi
+      exit 0 ;;
+  esac
+fi
 
 # ---- 1. 一時キー ----
 # あり・期限内・読み取り専用と確かめ済みか。初期調査は時間がかかるので、残りが短ければ（総時間の半分、上限 30 分。
