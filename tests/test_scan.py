@@ -344,6 +344,8 @@ class Scan(ScanCase):
         self.assertLess(runs.index(login), runs.index(trust))
         self.assertLess(runs.index(trust), runs.index(self.agent_run()))
         self.assertNotIn('-it', trust)
+        # 同じ記録で初回起動の案内も済んだことにする（無いと最初の対話起動でログイン方法の選択が出る）
+        self.assertTrue(any('hasCompletedOnboarding = true' in a for a in trust))
 
     def test_codex_needs_no_trust_record(self):
         self.ready(agent='codex')

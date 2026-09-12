@@ -101,9 +101,12 @@ launch_agent_authenticated() {
 # 非対話（claude -p）でも作業ディレクトリの settings.json（許可・フック）が効くよう、ワークスペースの信頼を記録する。
 # 対話で起動したときは信頼の確認画面で同じ記録ができる。非対話ではその画面が出ず、未信頼だと allow の項目が無視される
 # （「Ignoring N permissions.allow entries ... this workspace has not been trusted」。2026-09-12 に実測）。
+# あわせて初回起動の案内（onboarding）を済んだことにする。claude auth login は認証は残すがこの印を立てないため、
+# 印が無いと最初の対話起動（aws-survey claude）でテーマ選択に続いてログイン方法の選択が出て、認証をやり直す形になる
+# （認証が残っていても出る。2026-09-12 に実測）。
 # 記録先は CLAUDE_CONFIG_DIR の .claude.json（ボリュームの中）。他の項目はそのまま残す
 launch_trust_workspace() {
-  launch_agent_cli -- sh -c 'f=/home/node/.claude/.claude.json; [ -s "$f" ] || echo "{}" > "$f"; t=$(mktemp) && jq ".projects[\"/home/node/aws-survey\"].hasTrustDialogAccepted = true" "$f" > "$t" && cat "$t" > "$f" && rm -f "$t"'
+  launch_agent_cli -- sh -c 'f=/home/node/.claude/.claude.json; [ -s "$f" ] || echo "{}" > "$f"; t=$(mktemp) && jq ".projects[\"/home/node/aws-survey\"].hasTrustDialogAccepted = true | .hasCompletedOnboarding = true" "$f" > "$t" && cat "$t" > "$f" && rm -f "$t"'
 }
 
 # エージェントに渡すフラグ（モデルと effort。libexec/agents.sh）。environment.json の agent の値で、無ければ既定。
