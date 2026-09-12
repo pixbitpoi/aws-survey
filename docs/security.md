@@ -29,13 +29,13 @@ flowchart LR
 Identity Center を使うときは `auth.mfa_required` を false にし、MFA は Identity Center のログインで求めます。
 `aws-survey init` は Identity Center のログインでは MFA を聞かずに false にし、`aws-survey role --create` は true のままでは条件を書き込まずに止まります。
 
-`aws-survey init` では、借りられる相手を次から選びます。
+`aws-survey init` は、借りられる相手をいまのログイン（あなただけ）に固定します。広げたいときは `environment.json` の `auth.principal_arn` を直します。
 
-| 選択肢 | `principal_arn` に入る値 | 借りられる人 |
+| 書き方 | `principal_arn` に入る値 | 借りられる人 |
 | --- | --- | --- |
-| 自分だけ（既定） | いまのログインの ARN（Identity Center ならセッションの ARN、IAM ユーザーならユーザーの ARN） | あなただけ |
-| 同じロールでログインした人なら誰でも | パス付きのロール ARN（Identity Center なら同じ権限セットでログインした人） | そのロールを借りている人全員 |
-| 手で入力 | 任意の ARN | その ARN が表す相手 |
+| 自分だけ（`init` が書く） | いまのログインの ARN（Identity Center ならセッションの ARN、IAM ユーザーならユーザーの ARN） | あなただけ |
+| 同じロールでログインした人なら誰でも | パス付きのロール ARN（Identity Center なら同じ権限セットでログインした人。`aws iam get-role` で取る） | そのロールを借りている人全員 |
+| 任意 | 任意の ARN | その ARN が表す相手 |
 
 既にあるロールの信頼ポリシーと `principal_arn` の書き方が違っても、あなたが借りられるなら `aws-survey role` は不足として扱わず、
 範囲の違いを補足に書くだけにします。信頼ポリシーのほうが広い場合（信頼ポリシーがロール ARN で、`principal_arn` がそのロールのセッション ARN）も、

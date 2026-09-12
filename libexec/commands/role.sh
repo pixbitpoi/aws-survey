@@ -182,7 +182,7 @@ if role_json=$(aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME
                --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null)
   ui_kv "付いているポリシー" "${attached:-（なし）}"
   # 不足の洗い出し。揃っていれば「作る」のではなく「このロールを使う」案内にする
-  # 1 回のセッションの長さ（init の 8 問目）は、ロールの上限を超えられない。自分のロールなら --create が上限を合わせる。
+  # 1 回のセッションの長さ（init の duration_seconds）は、ロールの上限を超えられない。自分のロールなら --create が上限を合わせる。
   # 借りたロールの上限は変えられないので、environment.json 側を下げてもらう
   if [ "$DURATION" -gt "$max_session" ]; then
     if [ -z "$AUTH_ROUTE" ] || [ "$AUTH_ROUTE" = own_role ]; then
@@ -308,7 +308,29 @@ fi
 echo ""
 
 # ---- 判定のまとめ ----
+# ロールを自分で作る権限が無いときの案内。role（判定だけ）と role --create（作ろうとする前）の両方が出す
+show_cannot_create() {
+  ui_err "ロールを自分で作る権限がありません"
+  ui_text "次のどちらかで進めます。"
+  ui_text "  既存のロールを借りる: 読み取り専用で、自分を信頼しているロールがあれば使えます。"
+  ui_text "  管理者に頼む: 信頼ポリシーに自分を追加してもらいます。"
+  ui_text "借りられるロールを探すには:"
+  ui_text "  aws iam list-roles --profile $PROFILE_SRC --query 'Roles[].RoleName'"
+  ui_text "借りるロールには ReadOnlyAccess 相当が付いている必要があります。"
+  ui_text "セッションポリシーは禁止しか書いておらず、許可はロール側から来るためです。"
+  ui_text "1 回のセッションの長さも、そのロールの上限（MaxSessionDuration）を超えられません。"
+  ui_text "決めたら environment.json を書き換えます（借りる経路では --create は動きません）:"
+  ui_text "  auth.route      借りるなら existing_role、管理者に信頼してもらうなら granted_role"
+  ui_text "  auth.role_name  そのロール名"
+  ui_text "  setup.route_decided と setup.role_created  今日の日付（YYYY-MM-DD）"
+  ui_text "書けたら $AWS_SURVEY_CMD credentials に進みます。"
+}
 recorded=$(jq -r '[.setup.route_decided, .setup.role_created] | map(. // empty) | length' "$ENV_FILE")
+if [ "$DO_CREATE" -eq 1 ] && [ "$role_exists" -eq 0 ] && [ "$can_create" = no ] \
+   && { [ -z "$AUTH_ROUTE" ] || [ "$AUTH_ROUTE" = own_role ]; }; then
+  show_cannot_create
+  exit 1
+fi
 if [ "$DO_CREATE" -eq 0 ]; then
   if [ "$role_exists" -eq 1 ] && [ "${#shortfalls[@]}" -eq 0 ]; then
     ui_ok "ロールは用意できています"
@@ -337,21 +359,7 @@ if [ "$DO_CREATE" -eq 0 ]; then
         ui_ok "ロールを自分で作れます"
         echo ""
         next_cmd "$AWS_SURVEY_CMD role --create" "読み取り専用ロールを作ります（作成後、ロールの用意のしかたを記録します）" ;;
-      no)
-        ui_err "ロールを自分で作る権限がありません"
-        ui_text "次のどちらかで進めます。"
-        ui_text "  既存のロールを借りる: 読み取り専用で、自分を信頼しているロールがあれば使えます。"
-        ui_text "  管理者に頼む: 信頼ポリシーに自分を追加してもらいます。"
-        ui_text "借りられるロールを探すには:"
-        ui_text "  aws iam list-roles --profile $PROFILE_SRC --query 'Roles[].RoleName'"
-        ui_text "借りるロールには ReadOnlyAccess 相当が付いている必要があります。"
-        ui_text "セッションポリシーは禁止しか書いておらず、許可はロール側から来るためです。"
-        ui_text "1 回のセッションの長さも、そのロールの上限（MaxSessionDuration）を超えられません。"
-        ui_text "決めたら environment.json を書き換えます（借りる経路では --create は動きません）:"
-        ui_text "  auth.route      借りるなら existing_role、管理者に信頼してもらうなら granted_role"
-        ui_text "  auth.role_name  そのロール名"
-        ui_text "  setup.route_decided と setup.role_created  今日の日付（YYYY-MM-DD）"
-        ui_text "書けたら $AWS_SURVEY_CMD credentials に進みます。" ;;
+      no) show_cannot_create ;;
       *)
         ui_warn "判定できませんでした"
         echo ""

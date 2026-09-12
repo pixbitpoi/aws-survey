@@ -151,7 +151,17 @@ class Ls(ResourcesCase, PtyMixin):
         self.assertIn('ロードバランサー（0）', result.stdout)
         self.assertIn('aws-survey ec2', result.stdout)
         self.assertIn('aws-survey lambda', result.stdout)
-        self.assertIn('aws-survey run', result.stdout)
+        self.assertIn('aws-survey scan', result.stdout)          # 棚卸しがまだなら scan、済んでいれば claude / codex
+        self.assertNotIn('aws-survey run', result.stdout)
+
+    def test_after_the_scan_the_next_step_is_the_agent(self):
+        self.ready()
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['setup']['scanned'] = '2026-09-12T10:32+0900'; config['agent'] = 'codex'
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_cli('ls')
+        self.assertIn('aws-survey codex', result.stdout)
+        self.assertNotIn('aws-survey scan', result.stdout)
 
     def test_every_aws_call_happens_inside_the_container_and_nothing_is_written(self):
         self.ready()
@@ -359,6 +369,19 @@ class Lambda(ResourcesCase, PtyMixin):
         host_side = [c for c in self.aws_calls() if c['in_container'] != '1']
         self.assertEqual(host_side[0]['op'], 'get-caller-identity')
         self.assertIn('assume-role', [c['op'] for c in host_side])
+
+    def test_several_functions_are_picked_with_space_and_pulled_together(self):
+        self.ready()
+        self.add_tool('curl', '#!/bin/sh\nexit 1\n')
+        code, text = self.drive(['lambda'], [
+            ('Space 選ぶ', b' \x1b[B '),          # fn-node に印、↓、fn-py に印
+            ('\x00never', b'\r'),
+            ('選んだ 2 関数 に何をしますか', b'\r'),
+        ])
+        self.assertIn('✔ fn-node  nodejs20.x', text)
+        self.assertIn('✔ fn-py  python3.12', text)
+        self.assertIn('◆ aws-survey lambda pull', text)
+        self.assertIn('関数              fn-node fn-py', text)
 
     def test_picking_a_pulled_function_can_remove_it(self):
         self.ready()

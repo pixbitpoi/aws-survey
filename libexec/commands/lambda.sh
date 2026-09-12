@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lambda 関数にデプロイされているコードを取り出す（ホストで実行）。aws-survey lambda から呼ばれる。
 #
-#   aws-survey lambda                  一覧（調査コンテナの中で一時キーが読む）から関数を選んで、取り出す・消す（端末でなければ案内だけ）
+#   aws-survey lambda                  一覧（調査コンテナの中で一時キーが読む）から関数を選んで（複数可）、取り出す・消す（端末でなければ案内だけ）
 #   aws-survey lambda pull <関数名>... [--region <r>] [--with-deps]
 #   aws-survey lambda pull --all [--region <r>] [--with-deps]
 #                                   取り出し専用の一時キー（Lambda の読み取り 4 つだけ・15 分・ファイルに書かない）でコードを落とし、
@@ -400,8 +400,8 @@ cmd_pull() {
   else
     ui_ok "取り出しました。生の zip は残していません"
   fi
-  next_cmd "$AWS_SURVEY_CMD lambda list" "取り出してある関数とレイヤーを確かめます"
-  also_cmd "$AWS_SURVEY_CMD run" "調査コンテナを起動します。取り出したコードは code/ として読み取り専用で渡ります"
+  ui_text "取り出したコードは code/ として、調査コンテナに読み取り専用で渡ります（起動し直さなくても中から見えます）。"
+  survey_next_cmd
   [ "$FAILED" -eq 0 ]
 }
 
@@ -477,7 +477,8 @@ cmd_remove() {
 
 # ---- 引数なし: 一覧から選ぶ ----
 # 一覧は調査コンテナの中で読み取り専用の一時キーが読む（container_inventory）。取り出しと削除はここのホストの関数を呼ぶ。
-# choose_menu は EXIT トラップを潰すので、cmd_pull（一時ディレクトリの trap）より前に済ませる。
+# 関数は複数選べる（choose_multi。Space で印、Enter で決定）。選んだ中に取り出し済みがあれば「消す」も選べる。
+# choose_menu / choose_multi は EXIT トラップを潰すので、cmd_pull（一時ディレクトリの trap）より前に済ませる。
 cmd_interactive() {
   [ $# -eq 0 ] || { usage >&2; die "不明なサブコマンド: ${1}（pull / list / remove。引数なしなら一覧から選びます）"; }
   ui_title "aws-survey lambda"
@@ -527,22 +528,27 @@ cmd_interactive() {
     return 0
   fi
 
-  local picked sel="" act
-  choose_menu picked "コードを読みたい関数を選んでください" 0 "${labels[@]}"
-  for i in "${!labels[@]}"; do [ "${labels[i]}" != "$picked" ] || sel=$i; done
-  [ -n "$sel" ] || die "選択を読めませんでした。"
-  ui_ok "$picked"
+  local picks sel act any_pulled=0 what
+  local -a chosen=()
+  choose_multi picks "コードを読みたい関数を選んでください（Space で複数）" "${labels[@]}"
+  for sel in $picks; do
+    chosen+=("${names[sel]}")
+    ui_ok "${labels[sel]}"
+    [ -z "${pulled[sel]}" ] || any_pulled=1
+  done
+  [ ${#chosen[@]} -gt 0 ] || die "選択を読めませんでした。"
   echo ""
-  if [ -z "${pulled[sel]}" ]; then
-    choose_menu act "${names[sel]} に何をしますか？" 0 "デプロイされたコードを取り出す" "やめる"
+  if [ ${#chosen[@]} -eq 1 ]; then what="${chosen[0]}"; else what="選んだ ${#chosen[@]} 関数"; fi
+  if [ "$any_pulled" -eq 0 ]; then
+    choose_menu act "$what に何をしますか？" 0 "デプロイされたコードを取り出す" "やめる"
   else
-    choose_menu act "${names[sel]} に何をしますか？" 0 "取り直す（コードが変わっていなければ落とさない）" "取り出したコードを消す" "やめる"
+    choose_menu act "$what に何をしますか？" 0 "取り出す（取り出し済みは、コードが変わっていなければ落とさない）" "取り出したコードを消す" "やめる"
   fi
   ui_ok "$act"
   echo ""
   case "$act" in
-    "デプロイされたコードを取り出す"|"取り直す"*) cmd_pull "${names[sel]}" ;;
-    "取り出したコードを消す") cmd_remove "${names[sel]}" ;;
+    "デプロイされたコードを取り出す"|"取り出す"*) cmd_pull "${chosen[@]}" ;;
+    "取り出したコードを消す") cmd_remove "${chosen[@]}" ;;
     *) ui_text "ここで止めます。" ;;
   esac
 }

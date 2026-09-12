@@ -40,9 +40,35 @@
 
 利用者に見せる「次に打つコマンド」は `load-env.sh` が入れる `AWS_SURVEY_CMD`（`aws-survey` か `<本体>/aws-survey`）で
 組み立てる。`./run.sh` のようなスクリプト名を案内文に書かない。入口は `aws-survey`（`role` / `credentials` / `verify` /
-`run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh`）。実体は `role` / `credentials` / `verify` / `run` / `doctor` /
-`ls` / `ec2` / `ssh` / `lambda` が `libexec/commands/<名前>.sh`、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。
+`scan` / `claude` / `codex` / `run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh`）。実体は `role` / `credentials` / `verify` /
+`run` / `scan` / `doctor` / `ls` / `ec2` / `ssh` / `lambda` が `libexec/commands/<名前>.sh`、`claude` / `codex` は `libexec/commands/agent.sh`
+（第 1 引数がエージェント名）、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。
 イメージのビルドは `libexec/docker.sh`（`run` と `lambda pull` と `libexec/container.sh` が共有する）。
+調査コンテナ一式（一時キー・指示書・`method/`・`out/`・`code/`・Claude / Codex のボリューム）のマウント列は `libexec/launch.sh`
+（`run` と `scan` が共有する）。`container.sh` とは分ける。あちらは調査エージェントに渡さない道具を一時キーだけで動かす経路で、
+`out/` も指示書もボリュームも付けてはいけない。
+
+引数なしの `aws-survey` は段階 4（一時キー）までを止まらずに進め、段階 5 以降は `guide_ready` で「準備完了」と次のコマンドを順に
+案内して止まる（`ls` → `scan` → `claude` / `codex`。`run` は出さない）。`scan` は時間がかかり、`claude` / `codex` は端末を渡すので、
+自動では実行しない。段階 5「初期調査」は `setup.scanned`（`scan` が成功時に分までの日時で書く）で済・未済を見る。
+`out/00_進捗.md` があれば対話で始めた扱いで段階 6 に進める。
+
+### 非対話の棚卸し（`scan`）
+
+`aws-survey scan` は `launch.sh` のマウント列で `-it` を付けずに（stdin は `/dev/null`）`claude -p` か `codex exec` を 1 回走らせ、
+出力をそのまま流す。ホストから渡す指示は「棚卸しだけ・ユーザーに聞かずに終える」に限り、対象の概要・調査項目・サービス名を含めない
+（`tests/test_scan.py` が字面で見る）。棚卸しを承認前の前段と位置づける文言はコンテナ側（`survey-agents.md`・`method/00`・`04`）にあり、
+Cost Explorer を入口にする話もそちらに書く。
+Claude / Codex の認証はコンテナ内のボリュームに残る。判定は状態のボリューム 3 本だけを付けて各 CLI 自身に聞く
+（`launch_agent_authenticated`: `claude auth status --json` / `codex login status`。未認証なら終了コード 1。2026-09-12 に実測）。
+ファイル名を推測せず、トークンを環境変数で渡さない。
+未認証なら端末で `-it` のログインだけ先に行う（`claude auth login` / `codex login --device-auth`）。
+Claude はさらに `-p` の前にワークスペースの信頼を `.claude.json`（ボリュームの中）に記録する（`launch_trust_workspace`）。
+未信頼だと非対話では信頼の確認画面が出ず、作業ディレクトリの `settings.json` の allow が無視される（2026-09-12 に実測）。
+使うエージェントは `environment.json` の `agent` に「最後に使ったもの」として記録する（`scan --agent` も `aws-survey claude` / `codex` も上書きする）。
+記録の使い道は `scan` の既定と案内文だけ。
+起動前に `docker ps` で `<name>`（対話コンテナ）と `<name>-scan` を見て、動いていれば止まる（同じ `out/` に 2 つのエージェントを走らせない）。
+一時キーの残りが短ければ（総時間の半分、上限 30 分。この絶対値はホスト側だけに置く）発行し直してから始める。
 
 利用者に見せる入口はリソース名（`ls` / `ec2` / `lambda`）で、ホストで動くかコンテナで動くかは必要な資格情報で内部的に決め、
 利用者には見せない。元プロファイル（強い権限）が要るもの（`ssh setup` / `rotate` / `remove`、`lambda pull`）はホストで動き、
@@ -52,9 +78,11 @@
 （`container_inventory`。`lambda pull` が抽出器を貸すのと同じ型。イメージには焼かず、調査エージェントには届かない）。
 出力は 1 行 1 JSON で、読めないサービスも `denied` の行を落とさない。画面に出すだけで `out/` には書かない
 （対象の棚卸しを調査エージェントに先渡ししない規則は、ファイルに残さないことで守る）。
-`ec2` / `lambda`（引数なし）は一覧から矢印キーで選ばせ（`libexec/menu.sh` の `choose_menu`。`init` と共有）、選んだ 1 つを既存の
-`ssh.sh setup|verify|remove <対象>` に `exec`、`lambda.sh` の `cmd_pull` / `cmd_remove` に in-process で渡す。端末でなければ一覧と
-`next_cmd` の案内だけで終わる。`choose_menu` は EXIT トラップを張って外すので、`trap ... EXIT` を張る前に呼ぶ。
+`ec2` / `lambda`（引数なし）は一覧から矢印キーで選ばせ（`libexec/menu.sh` の `choose_menu`。`init` と共有。`lambda` は Space で複数選べる
+`choose_multi`）、選んだものを既存の `ssh.sh setup|verify|remove <対象>` に `exec`、`lambda.sh` の `cmd_pull` / `cmd_remove` に in-process で
+渡す。端末でなければ一覧と `next_cmd` の案内だけで終わる。`choose_menu` / `choose_multi` は EXIT トラップを張って外すので、`trap ... EXIT` を張る前に呼ぶ。
+準備が済んだ状態で終わるコマンド（`ls` / `lambda pull` / `credentials` / `verify`）の末尾は `load-env.sh` の `survey_next_cmd` で
+「棚卸しがまだなら `scan`、済んでいれば記録してあるエージェント」を案内する。`run`（素のシェル）は案内しない。
 一時キーの状態の判定（`key_state`）は `libexec/keys.sh` にあり、`bin/aws-survey` と `container.sh` が共有する。
 `ssh` と `lambda` は任意の追加機能。段階 0〜4 の判定には組み込まず、段階 5（調査）に着いてから `show_extras` で現状と足し方を出す。
 EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `ssh verify <host>`）が要るので、`ec2_pending` が
@@ -63,21 +91,24 @@ EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `s
 `ssh.hosts.<host>.verified_at`（`ssh verify` が成功時に書く。`installed_at` より古ければやり直し）。
 借りたロールでは `role --create` が管理者に頼む内容を出すだけなので、ループは状態が変わらないことを見て止まる。
 管理者が付けたあとの `role --create` は「付いているポリシー」から記録して先へ進む。
-`run.sh` は `code/` を空でも作って常に読み取り専用でマウントする。調査中に `lambda pull` したものが起動し直さずに見えるようにするため
+`launch.sh`（`run` / `scan`）は `code/` を空でも作って常に読み取り専用でマウントする。調査中に `lambda pull` したものが起動し直さずに見えるようにするため
 （`method/07` の依頼文がそれを前提にしている）。
 
 `lambda pull` の取り出し専用の一時キー（調査用ロールを Lambda の読み取り 4 つだけのインラインポリシーで借りる。`--policy-arns` は渡さない）は、
 ファイルに書かず、コマンドの引数（`ps` に出る）にも here-string（bash 3.2 では一時ファイルになる）にも載せない。`get-function` の応答には
 環境変数の値とコードの署名付き URL が入るので、`--query` で要る項目だけ取り、URL は `curl -K -` の標準入力で渡す。内容は `docs/design-lambda-code.md` の第 4・6.2 節。
 引数なしの `aws-survey` の判定は AWS を叩かずファイルだけで行う。
-端末（標準入力と標準出力の両方）なら案内した 1 手を止まらずに実行し、聞くのは `role --create`（アカウントに IAM ロールとポリシーを作る
-唯一の手。管理者から見える変更）の前の 1 回だけ（`guide_needs_confirm`）。端末でなければ 1 手ごとに `(Y/n)` で聞き、
-読めなければ案内だけで終わる（端末でない実行環境で黙って AWS を叩かないため）。
-`ssh setup` の末尾も同じで、標準入力と標準出力の両方が端末のときだけ「続けて `aws-survey` を実行しますか？」と聞き、
-「はい」なら引数なしの `aws-survey` に exec して残りの 3 手へ進む（`setup_offer_continue`）。案内文では `aws-survey` 1 本を主にし、
-`role --create` → `credentials` → `ssh verify` は「手で 1 手ずつ進めるなら」の補足に留める。
-`init` が聞くのは AWS への繋ぎ方の 9 項目だけ（`AGENTS.md`「ホストと調査コンテナ」）。項目を足すときは `environment.json` の雛形・`load-env.sh`・
-非対話モードの `AWS_SURVEY_INIT_*` を揃え、対象の概要や調査項目に踏み込まない。
+端末（標準入力と標準出力の両方）なら案内した 1 手を何も聞かずに実行する（`guide_needs_confirm`。`role --create` も準備に必ず要る 1 手なので
+聞かない。段階 2 は `role`（判定だけ）を挟まず `role --create` に直行し、作れない権限なら `role.sh` の `show_cannot_create` が手順を出して止まる）。
+端末でなければ 1 手ごとに `(Y/n)` で聞き、読めなければ案内だけで終わる（端末でない実行環境で黙って AWS を叩かないため）。
+`ssh setup` の末尾も同じで、標準入力と標準出力の両方が端末なら聞かずに引数なしの `aws-survey` に exec して残りの 3 手へ進み、
+端末でなければ `aws-survey` 1 本を案内する（`setup_continue`）。`role --create` → `credentials` → `ssh verify` は「手で 1 手ずつ進めるなら」の補足に留める。
+`init` が聞くのは AWS への繋ぎ方だけ（`AGENTS.md`「ホストと調査コンテナ」）。`name` / `source_profile` / `account_id` / `region` / `role_name` の
+5 つと、IAM ユーザーのログインでは `mfa_required` / `duration_seconds`。貸す相手（`principal_arn`）はいまのログインの自分だけ、`refresh_command` は
+aws-login に固定して聞かない（非対話の `--from` / `AWS_SURVEY_INIT_*` では渡せる）。項目を足すときは `environment.json` の雛形・`load-env.sh`・
+非対話モードの `AWS_SURVEY_INIT_*` を揃え、対象の概要や調査項目に踏み込まない。`init` は `.gitignore` に `environment.json` / `trust.json` を入れる
+（無ければ作り、あれば足りない行だけ足す）。画面に出すパスはホームの下なら `~` で省略する（`ui_path`。`ui_kv` は値に自動で掛ける。
+ファイルやコマンドに書く値には使わない）。
 `refresh_command` の既定は `aws-login --profile <元プロファイル>`（`refresh_default`）。`<名>-mfa` は aws-login が作る
 一時キーの保存先なので、渡すのは `-mfa` を外した元の名前。aws-login は formula の依存なので、在る前提で既定に出す。
 全角括弧が変数の直後に来るときは `$VAR（` ではなく `${VAR}（` と波括弧で囲む。
@@ -106,10 +137,11 @@ EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `s
 
 ## 信頼ポリシーの貸す相手（`principal_arn`）
 
-`init` の 3 問目は、いまのログイン（`sts get-caller-identity`）から「自分だけ」と、ロールを借りてログインしているときの
-「同じロールでログインした人なら誰でも」を番号の選択肢に出す（`choose_principal`）。後者のパス付きロール ARN は `iam get-role` で取る。
-セッション ARN から `arn:aws:iam::<ID>:role/<名前>` と組み立てるとパス（Identity Center なら `aws-reserved/sso.amazonaws.com/<region>/`）が落ち、
-信頼ポリシーが `MalformedPolicyDocument` で拒否される（2026-09-10 に実環境で発生）。
+`init` はいまのログイン（`sts get-caller-identity` の Arn）を「自分だけ」として書き、選ばせない。ログインを読めなければ手で入れさせる。
+「同じロールでログインした人なら誰でも」（パス付きのロール ARN）にしたいときは非対話（`--from` / `AWS_SURVEY_INIT_PRINCIPAL_ARN`）で渡すか
+`environment.json` を直す。そのときセッション ARN から `arn:aws:iam::<ID>:role/<名前>` と組み立てるとパス（Identity Center なら
+`aws-reserved/sso.amazonaws.com/<region>/`）が落ち、信頼ポリシーが `MalformedPolicyDocument` で拒否される（2026-09-10 に実環境で発生）。
+`iam get-role` で取ること。
 `role` の判定は文字の一致ではなく「`principal_arn` の相手が貸す相手に含まれるか」で見る（`principal_coverage`）。
 含まれるが書き方が違うだけなら不足にしない。信頼ポリシーのほうが広い（ロール ARN）場合も、狭い（いまのログインのセッション ARN だけ）場合も同じ。
 含まれないときと、MFA 必須なのに条件が無いときだけ不足にする。1 段目の「いまのログインと `principal_arn` が一致するか」も、
@@ -117,7 +149,7 @@ EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `s
 Identity Center でログインしたセッションには、MFA を通っていても `aws:MultiFactorAuthPresent` が付かない。信頼ポリシーに MFA の条件を
 付けると AssumeRole が AccessDenied になる（2026-09-11 に実測。条件ごとに別のロールを作り、反映を待ってから約 1 分試して確かめた。
 1 つのロールの信頼ポリシーを書き換えた直後の 1 回目で判定すると、古いポリシーで評価されて逆の結論になる。実際に一度そう誤った）。
-そのため Identity Center のログイン（`is_sso_arn`。ロール名が `AWSReservedSSO_` で始まる）では、`init` は MFA を聞かずに false にし、
+そのため Identity Center のログイン（`is_sso_arn`。ロール名が `AWSReservedSSO_` で始まる）では、`init` は MFA を聞かず（見出しも出さず）false にし、
 非対話で true を渡されたら止める。`role` は true なら false にするよう、信頼ポリシーに条件があれば借りられないと不足に挙げ、
 `role --create` は true のままでは条件を書き込まずに止める。Identity Center 以外で借りたロールからの MFA の扱いは未確認なので、今までどおり聞く。
 
@@ -128,7 +160,8 @@ Identity Center でログインしたセッションには、MFA を通ってい
 `AssumeRole` が `ValidationError ... 1 hour session limit for roles assumed by role chaining` で落ちる（2026-09-12 に実環境で発生。
 `role --create` が上限を 3 時間にしていても同じ）。1 時間を超えるには IAM ユーザーの長期キー（MFA 付き）でログインする経路が要る。
 判定は `ui.sh` の `is_chained_arn`（ログインの Arn）と `is_chained_principal`（`principal_arn`。セッション ARN でもロール ARN でも
-ロールを借りてのログイン）で行い、`init` は 8 問目を聞かずに 3600 に固定（非対話で超える値は拒否）、`role` は ⚠ を出し、
+ロールを借りてのログイン）で行い、`init` は `duration_seconds` を聞かずに 3600 に固定してまとめに「セッションの制限時間」として出し
+（非対話で超える値は拒否）、`role` は ⚠ を出し、
 `credentials` は発行前に判定して「`environment.json` の `auth.duration_seconds` を 3600 に直して、そのまま発行しますか？」と聞く
 （`read_line`。読めなければ案内だけで止まる）。AWS 側で断られたときも同じ案内で直して発行し直す。`update-role` を勧めない。
 既定の 3 時間（`DURATION_DEFAULT`）は IAM ユーザーのログイン向けで、変えない。

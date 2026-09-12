@@ -65,6 +65,9 @@ ui_role_audience() {
   esac
 }
 
+# エージェント名の言い換え。空なら両方
+agent_label() { case "${1:-}" in claude) echo "Claude Code" ;; codex) echo "Codex" ;; *) echo "Claude Code / Codex" ;; esac; }
+
 # Identity Center（SSO）のログインを表す ARN か。セッション ARN とパス付きのロール ARN のどちらも受ける。
 # このログインのセッションには aws:MultiFactorAuthPresent が付かないため、信頼ポリシーの MFA 条件を満たせない（init・role・credentials で使う）
 is_sso_arn() {
@@ -88,17 +91,30 @@ ui_chain_limit() {
   ui_text "1 時間を超える長さにするには、IAM ユーザーの長期キー（MFA 付き）でログインする経路が要ります。"
 }
 
+# ホームフォルダの下のパスを ~ で省略する（画面に出すときだけ。ファイルやコマンドに書く値には使わない）
+ui_path() {
+  local p="$1"
+  if [ -n "${HOME:-}" ] && [ "$HOME" != / ]; then
+    case "$p" in
+      "$HOME") p='~' ;;
+      "$HOME"/*) p="~${p#"$HOME"}" ;;
+    esac
+  fi
+  printf '%s' "$p"
+}
+
 # 表示幅。3 バイト文字（日本語）を幅 2 とみなす
 ui_width() {
   local chars bytes
   chars=${#1}; bytes=$(LC_ALL=C; printf '%s' "$1" | wc -c | tr -d ' ')
   echo $(( chars + (bytes - chars) / 2 ))
 }
-# ラベルと値。ラベルは幅 16 に揃える。ui_kv <ラベル> <値>
+# ラベルと値。ラベルは幅 16 に揃える。値がホームフォルダの下のパスなら ~ で省略する。ui_kv <ラベル> <値>
 ui_kv() {
-  local w pad; w=$(ui_width "$1"); pad=$(( 18 - w )); [ "$pad" -ge 2 ] || pad=2
-  ui_log "  $1  $2"; ui_quiet && return 0
-  printf '    %s%s%*s%s%s\n' "$C_DIM" "$1" "$pad" '' "$C_RESET" "$2"
+  local w pad v; w=$(ui_width "$1"); pad=$(( 18 - w )); [ "$pad" -ge 2 ] || pad=2
+  v=$(ui_path "$2")
+  ui_log "  $1  $v"; ui_quiet && return 0
+  printf '    %s%s%*s%s%s\n' "$C_DIM" "$1" "$pad" '' "$C_RESET" "$v"
 }
 
 # 次に打つコマンド。next_cmd が見出し付きの 1 本目、also_cmd がその続き。説明は「何をするか」を利用者の言葉で書く。
@@ -120,7 +136,8 @@ ui_die() {
 
 # ---- 簡潔表示の親側 ----
 # 回転する 1 行を描き続ける。ui_spin_loop <受け渡しの場所>。keep に足された行は先に出して残し、pause があるあいだは何も描かない。
-# 親は & で起動し、子が終わったら kill して \r\033[K で行を消す（ui_spin_end）。
+# 親は & で起動し、子が終わったら stop を置いて待つ（ui_spin_end）。ループは stop を見たら keep の残りを出し、行を消して終わる。
+# kill で止めると、keep の行を出している最中に切られて出し直しが二重に出ることがあるので、止め方は stop で揃える。
 ui_spin_loop() {
   local dir="$1" i=0 n=0 total line msg drawn=0
   local -a frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
@@ -139,6 +156,10 @@ ui_spin_loop() {
       n=$total; drawn=0
       printf '%s' "$n" > "$dir/printed"
     fi
+    if [ -e "$dir/stop" ]; then
+      [ "$drawn" -eq 0 ] || printf '\r\033[K'
+      exit 0
+    fi
     if [ -e "$dir/pause" ]; then
       [ "$drawn" -eq 0 ] || { printf '\r\033[K'; drawn=0; }
     else
@@ -149,12 +170,15 @@ ui_spin_loop() {
     sleep 0.1
   done
 }
-# 回転を止めて行を消し、ループがまだ出していない keep の行（終了の直前に足されたもの）を出す。ui_spin_end <受け渡しの場所> <ループの PID>
+# 回転を止めて行を消す。ループに stop を伝えて待つので、keep の行はループ側が出し切る。ループが応じないときだけ kill して、
+# 出していない keep の行をこちらで出す。ui_spin_end <受け渡しの場所> <ループの PID>
 ui_spin_end() {
-  local dir="$1" pid="$2" line n total
-  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  local dir="$1" pid="$2" line n total i
+  touch "$dir/stop"
+  for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
   printf '\r\033[K'
-  n=$(cat "$dir/printed" 2>/dev/null); n=${n:-0}
+  n=$(cat "$dir/printed" 2>/dev/null || true); n=${n:-0}
   total=$(wc -l < "$dir/keep" 2>/dev/null | tr -d ' '); total=${total:-0}
   [ "$total" -gt "$n" ] || return 0
   sed -n "$((n + 1)),${total}p" "$dir/keep" | while IFS= read -r line; do

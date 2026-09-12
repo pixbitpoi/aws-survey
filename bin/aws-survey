@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # aws-survey — ホスト側の準備・起動を 1 つの入口にまとめる
 #
-#   aws-survey                      いまの段階を判定し（AWS は叩かない）、次の 1 手を案内して、起動まで止まらずに進める。
-#                                   聞くのはロールとポリシーを作る前（role --create）の 1 回だけ。
-#                                   端末でなければ 1 手ごとに聞き、読めなければ案内だけで終わる（エージェントは 1 本ずつ手渡す）。
+#   aws-survey                      いまの段階を判定し（AWS は叩かない）、次の 1 手を案内して、準備完了まで止まらずに進める。
+#                                   端末なら何も聞かない（init の質問は除く）。端末でなければ 1 手ごとに聞き、
+#                                   読めなければ案内だけで終わる（エージェントは 1 本ずつ手渡す）。
 #                                   ssh setup のあとは、ポリシー → 一時キー → 接続の確認も同じ形で進める
 #   aws-survey status               到達点・一時キーの残り時間・本体とデータの場所
 #   aws-survey doctor               aws / jq / docker の有無と、発行失敗の切り分け（libexec/commands/doctor.sh）
@@ -12,9 +12,14 @@
 #   aws-survey role [--create]      経路の判定・ロール作成（libexec/commands/role.sh）
 #   aws-survey credentials          一時キーの発行・再発行（libexec/commands/credentials.sh）
 #   aws-survey verify               読み取り専用の検証（libexec/commands/verify.sh）
-#   aws-survey run [cmd]            コンテナのビルドと起動（libexec/commands/run.sh）
 #   aws-survey ls [サービス名...]   アカウントで使っているリソースの一覧（libexec/commands/ls.sh。調査コンテナの中で
 #                                   一時キーが読む。画面に出すだけで out/ には書かない）
+#   aws-survey scan [--agent claude|codex]
+#                                   調査コンテナでエージェントを非対話で 1 回走らせ、白紙の棚卸しだけを行わせる
+#                                   （libexec/commands/scan.sh。待つだけ。初回はエージェントを選び、そのログインを求められる）
+#   aws-survey claude [引数...]     調査コンテナで Claude Code を対話で起動する（libexec/commands/agent.sh。-c で続き）
+#   aws-survey codex [引数...]      同じく Codex（resume --last で続き）
+#   aws-survey run [cmd]            調査コンテナの素のシェルに入る（libexec/commands/run.sh。通常は使わない）
 #   aws-survey ec2                  EC2 の一覧から 1 台選んで、中を調べる準備へ進む（libexec/commands/ec2.sh。
 #                                   未登録なら ssh setup、登録済みなら ssh verify / ssh remove / 調査へ）
 #   aws-survey lambda               Lambda 関数の一覧から選んで、コードを取り出す・消す（libexec/commands/lambda.sh）
@@ -34,7 +39,8 @@
 #
 #   共通オプション:  --dir <対象フォルダ>   既定はカレントディレクトリ（AWS_SURVEY_DIR でも指定可）
 #
-#   init が聞くのは AWS への繋ぎ方だけ。対象の概要・調査項目は聞かない（AGENTS.md「ホストと調査コンテナ」）。
+#   init が聞くのは AWS への繋ぎ方だけ（name / source_profile / account_id / region / role_name。IAM ユーザーのログインでは
+#   mfa_required と duration_seconds も）。貸す相手は自分だけ、refresh_command は aws-login に固定する。対象の概要・調査項目は聞かない。
 #
 # 本体（AWS_SURVEY_HOME）はこのファイルの実体パス（シンボリックリンク解決後）の親。環境変数で上書き可。
 # 対象固有の値は対象フォルダの environment.json が持つ。ここには書かない。
@@ -138,6 +144,7 @@ load_env() { . "$LIBEXEC_DIR/load-env.sh"; }
 setup_value() { jq -r --arg k "$1" '.setup[$k] // empty' "$ENV_FILE"; }
 
 survey_started() { [ -f "$AWS_SURVEY_DIR/out/00_進捗.md" ]; }
+scan_done()      { [ -n "$(setup_value scanned)" ]; }
 
 # ---- 任意の追加（EC2 の中を調べる・Lambda のコードを読む）----
 # どちらも段階 5（調査）に着いてから足すもの。判定はファイルだけで行う。
@@ -188,7 +195,7 @@ ec2_pending() {
 # 任意の追加の現状。段階 5 の案内と status が出す。無いものは、足すためのコマンドを添える
 show_extras() {
   local n
-  ui_head "任意の追加（要らなければ、このまま調査に進めます）"
+  ui_head "任意の追加（要らなければ飛ばせます。scan の前でも後でも足せて、次にコンテナを起動したときから中で使えます）"
   if [ -n "$SSH_HOSTS" ]; then
     ui_ok "EC2 の中を調べる: 登録済みホスト ${SSH_HOSTS}"
   else
@@ -205,12 +212,9 @@ show_extras() {
   echo ""
 }
 
-print_places() { printf "  %s対象フォルダ:%s %s\n" "$C_DIM" "$C_RESET" "$AWS_SURVEY_DIR"; }
+print_places() { printf "  %s対象フォルダ:%s %s\n" "$C_DIM" "$C_RESET" "$(ui_path "$AWS_SURVEY_DIR")"; }
 
-init_guidance() {
-  next_cmd "$CMD_NAME init" "AWS への繋ぎ方を 9 問で聞いて environment.json を作ります"
-  ui_text "Claude Code / Codex に「準備して」と伝えると、必要なことを順に聞かれます。"
-}
+init_guidance() { next_cmd "$CMD_NAME init" "AWS への繋ぎ方を聞いて environment.json を作ります"; }
 
 # ---- 表示 ----
 . "$LIBEXEC_DIR/ui.sh"
@@ -233,11 +237,11 @@ guide_show_next() {
 }
 
 # 段階を 1 本のトラックで見せる。✔ 済 / ● いまここ / ○ まだ。番号は手順書の「段階 N」と対応する。
-STAGE_LABELS=("前提" "設定" "経路・ロール" "検証" "一時キー" "調査")
-STAGE_DONE=("" "" "" "" "" "")
+STAGE_LABELS=("前提" "設定" "経路・ロール" "検証" "一時キー" "初期調査" "調査")
+STAGE_DONE=("" "" "" "" "" "" "")
 show_track() {
   local cur="$1" detail="$2" i label name chars bytes width
-  for i in 0 1 2 3 4 5; do
+  for i in 0 1 2 3 4 5 6; do
     # 全角を 2 桁として揃える（3 バイト文字は幅 2 とみなす）
     name=${STAGE_LABELS[i]}; chars=${#name}; bytes=$(LC_ALL=C; printf '%s' "$name" | wc -c | tr -d ' ')
     width=$(( chars + (bytes - chars) / 2 ))
@@ -278,19 +282,17 @@ cmd_guide() {
     show_track 1 "$reason"
     # 壊れている・雛形のままなら差し替えになる。その確認は init 側が改めて出す
     [ ! -f "$ENV_FILE" ] || ui_text "いまある environment.json は init が退避してから作り直します。"
-    ui_text "Claude Code / Codex に「準備して」と伝えると、必要なことを順に聞かれます。"
-    guide_next "init" "AWS への繋ぎ方を 9 問で聞いて environment.json を作ります"
+    guide_next "init" "AWS への繋ぎ方を聞いて environment.json を作ります"
     return 0
   fi
   load_env
   STAGE_DONE[1]="$SURVEY_NAME / アカウント $ACCOUNT_ID / $REGION"
 
   if [ -z "$(setup_value route_decided)" ] || [ -z "$(setup_value role_created)" ]; then
-    show_track 2 "setup.route_decided / setup.role_created が未記録（ロール ${ROLE_NAME}）"
-    ui_text "ロールがまだ無ければ自分で作れるかを、もうあれば environment.json と合っているかを調べます。"
-    ui_text "作れないときは、既にあるロールを借りるか管理者に頼む形になります。どちらになるか・そのあと何を書き換えるかは、この判定が出します。"
-    guide_next "role" "調査用ロールの状態を調べます（読むだけで、何も変えません）"
-    guide_also "role --create" "続けて、ロールが無ければ作り、あれば environment.json に合わせて整えます"
+    show_track 2 "調査用ロール ${ROLE_NAME} がまだ用意できていません"
+    ui_text "ロールが無ければ作り、あれば environment.json と合っているかを確かめて整えます。"
+    ui_text "作れない権限のときは、既にあるロールを借りるか管理者に頼む形になります。その手順を出して止まります。"
+    guide_next "role --create" "調査用ロールを用意します（無ければ作り、あれば environment.json に合わせて整えます）"
     return 0
   fi
   STAGE_DONE[2]="${AUTH_ROUTE:-未定} / $ROLE_NAME"
@@ -312,7 +314,7 @@ cmd_guide() {
 
   case "$KEY_STATE" in
     missing)
-      show_track 4 "一時キーがありません: $AWS_DIR/credentials"
+      show_track 4 "一時キーがありません: $(ui_path "$AWS_DIR/credentials")"
       guide_next "credentials" "読み取り専用の一時キーを発行します"
       return 0 ;;
     expired)
@@ -326,31 +328,63 @@ cmd_guide() {
   esac
   STAGE_DONE[4]="残り約 ${KEY_LEFT_MIN} 分 / ${KEY_TOTAL_MIN} 分${KEY_NOTE}（期限 ${KEY_EXP}）"
 
+  # 段階 5（初期調査）は scan で白紙の棚卸しを済ませたか。対話で始めていれば（out/00_進捗.md あり）済んだ扱いで 6 へ
+  local cur=5
+  if scan_done; then
+    cur=6; STAGE_DONE[5]="済（$(setup_value scanned)）"
+  elif survey_started; then
+    cur=6; STAGE_DONE[5]="対話で開始済み"
+  fi
+
   # 任意の追加（EC2 の中を調べる）の準備が途中なら、その 1 手を先に案内する。調査コンテナは止めなくてよい
   if ec2_pending; then
-    show_track 5 "EC2 の中を調べる準備が途中: $EC2_DETAIL"
+    show_track "$cur" "EC2 の中を調べる準備が途中: $EC2_DETAIL"
     show_extras
     ui_text "調査コンテナが動いていても、そのまま進められます（中からは終わったあとに見えます）。"
-    ui_text "EC2 の準備を後回しにして調査を始めるなら $(ui_cmd "$CMD_NAME run") を打ちます。"
+    ui_text "EC2 の準備を後回しにして調査を始めるなら $(ui_cmd "$CMD_NAME ${SURVEY_AGENT:-claude}") を打ちます。"
     guide_next "$EC2_NEXT" "$EC2_NEXT_DESC"
     return 0
   fi
 
-  if survey_started; then
-    show_track 5 "調査: 開始済み（out/00_進捗.md あり）。続きはコンテナ内の台帳に従います"
+  if [ "$cur" -eq 5 ]; then
+    show_track 5 "初期調査: 未実施。白紙の棚卸しをエージェントに 1 回で行わせます（ユーザーには聞きません）"
+  elif survey_started; then
+    show_track 6 "調査: 開始済み（out/00_進捗.md あり）。続きはコンテナ内の台帳に従います"
   else
-    show_track 5 "調査: 未開始。目的と進め方はコンテナ内でユーザーと決めます"
+    show_track 6 "調査: 棚卸し済み。何を明らかにしたいかは、コンテナ内でユーザーと決めます"
   fi
   show_extras
-  guide_next "run" "調査コンテナを起動します。中で Claude Code / Codex と調査を進めます"
-  guide_also "ls" "アカウントで使っているリソースの一覧を出します（読むだけで、out/ には書きません）"
+  guide_ready
 }
 
-# 端末なら止まらずに進める。聞くのは role --create（アカウントに IAM ロールとポリシーを作る唯一の手。管理者から見える変更）だけ。
+# 準備が終わったあとの案内。ここから先は自動では実行しない（scan は時間がかかり、claude / codex は端末を渡す）
+# 順は ls（何があるか）→ scan（棚卸し）→ claude / codex（対話）。run（素のシェル）は出さない。
+guide_ready() {
+  local agent="${SURVEY_AGENT:-}"
+  ui_head "準備完了。次はこの順で進めます"
+  if ! scan_done; then
+    also_cmd "$CMD_NAME scan" "まず、白紙の棚卸しをエージェントに 1 回で行わせます（非対話。待つだけ。初回はエージェントを選びます）"
+  fi
+  if [ -n "$agent" ]; then
+    also_cmd "$CMD_NAME $agent" "$(agent_label "$agent") と対話で調査を進めます"
+    case "$agent" in
+      claude) also_cmd "$CMD_NAME claude -c" "直前の会話の続きから" ;;
+      codex)  also_cmd "$CMD_NAME codex resume --last" "直前の会話の続きから" ;;
+    esac
+  else
+    also_cmd "$CMD_NAME claude" "Claude Code と対話で調査を進めます"
+    also_cmd "$CMD_NAME codex" "Codex と対話で調査を進めます"
+  fi
+  if scan_done; then
+    also_cmd "$CMD_NAME scan" "白紙の棚卸しをやり直します（$(agent_label "$agent") が非対話で。待つだけ）"
+  fi
+  also_cmd "$CMD_NAME ls" "任意。アカウントで使っているリソースの一覧を眺めます（読むだけで、out/ には書きません）"
+}
+
+# 端末なら何も聞かずに進める（どの 1 手も準備に必ず要るもので、role --create もその 1 つ）。
 # 端末でなければ 1 手ごとに聞く（黙って AWS を叩かないため。read_line が諦めれば案内だけで終わる）。
 guide_needs_confirm() {
-  { [ -t 0 ] && [ -t 1 ]; } || return 0
-  case "$1" in "role --create") return 0 ;; *) return 1 ;; esac
+  if [ -t 0 ] && [ -t 1 ]; then return 1; else return 0; fi
 }
 
 # いま実行してよいか聞く。Enter は「はい」。端末でなければ read_line が諦めるので、案内だけ出して終わる。
@@ -417,8 +451,12 @@ cmd_guide_loop() {
     else
       cmd_guide || return $?
     fi
+    [ -n "$GUIDE_NEXT" ] || {
+      # 準備完了の案内は cmd_guide が出す。端末の 2 周目以降はその出力を捨てているので、ここで改めて出す
+      [ "$compact" -eq 0 ] || [ "$first" -eq 1 ] || { echo ""; guide_ready; }
+      return 0
+    }
     first=0
-    [ -n "$GUIDE_NEXT" ] || return 0
     # 直前に実行した 1 手で段階が変わらなかったときは、その続き（role --create など）を出す。
     # 続きが無ければ、同じコマンドを勧め続けずにここで止める。
     if [ "$GUIDE_NEXT" = "$ran" ]; then
@@ -463,7 +501,9 @@ cmd_guide_loop() {
 }
 
 # ---- init ----
-# 聞くのは AWS への繋ぎ方だけ（設計案「init の対話」の 9 項目）。auth.route・phase_dir・ssh（EC2 の中を調べる任意機能）は聞かず、既定を書く。
+# 聞くのは AWS への繋ぎ方だけ。name / source_profile / account_id / region / role_name の 5 つと、IAM ユーザーのログインでは
+# mfa_required / duration_seconds。貸す相手（principal_arn）はいまのログイン（自分だけ）、refresh_command は aws-login に固定し、
+# auth.route・phase_dir・ssh（EC2 の中を調べる任意機能）も聞かずに既定を書く。非対話（--from / AWS_SURVEY_INIT_*）ではどれも渡せる。
 # 対話・非対話のどちらでも、検証（init_validate）と書き出し（init_write）は同じ経路を通る。
 INIT_FROM=""; INIT_FORCE=0
 I_NAME=""; I_PROFILE=""; I_ARN=""; I_ACCOUNT=""; I_MFA=""; I_REFRESH=""; I_REGION=""; I_DURATION=""; I_ROLE=""
@@ -534,7 +574,7 @@ choose_profile() {
       sel=${entries[sel-1]}
     fi
     for i in "${entries[@]}"; do
-      if [ "$i" = "$sel" ]; then I_PROFILE="$sel"; return 0; fi
+      if [ "$i" = "$sel" ]; then I_PROFILE="$sel"; ui_ok "source_profile: ${C_BOLD}${I_PROFILE}${C_RESET}"; return 0; fi
     done
     ui_err "一覧にありません。"
   done
@@ -551,48 +591,7 @@ choose_profile_menu() {
   ui_ok "source_profile: ${C_BOLD}${I_PROFILE}${C_RESET}"
 }
 
-# 3 問目。いまのログイン（sts get-caller-identity の Arn）から、調査用ロールを貸す相手を番号で選ばせて I_ARN に入れる。
-# 選択肢は「自分だけ」（その Arn）、ロールを借りてログインしているときの「同じロールでログインした人なら誰でも」
-# （パス付きのロール ARN）、「手で入力」。パス付きのロール ARN は iam get-role で取る。Arn から組み立てるとパスが落ち、
-# 信頼ポリシーが MalformedPolicyDocument で拒否される。読めなければその選択肢を出さない。
-PICK_MAX=0
-valid_pick() { [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le "$PICK_MAX" ]; }
-choose_principal() {
-  local me="$1" who="" role="" role_arn="" pick=""
-  local -a arns=()
-  case "$me" in
-    arn:*:sts::*:assumed-role/*/*) role=${me#*:assumed-role/}; who=${role#*/}; role=${role%%/*} ;;
-    arn:*:iam::*:user/*)           who="IAM ユーザー ${me##*/}" ;;
-    *) ask I_ARN "principal_arn" "$me" valid_arn; return 0 ;;
-  esac
-  ui_text "次から番号で選んでください。"
-  arns+=("$me")
-  ui_text "  1) 自分だけ（${who}）"
-  ui_text "     $me"
-  if [ -n "$role" ]; then
-    if role_arn=$(aws iam get-role --profile "$I_PROFILE" --role-name "$role" --query Role.Arn --output text 2>/dev/null) \
-       && valid_arn "$role_arn"; then
-      arns+=("$role_arn")
-      ui_text "  2) $(ui_role_audience "$role")"
-      ui_text "     $role_arn"
-    else
-      ui_text "  （ロール $role の ARN を読めないため、「同じロールでログインした人なら誰でも」は選べません）"
-    fi
-  fi
-  arns+=("")
-  ui_text "  ${#arns[@]}) ARN を手で入力する"
-  PICK_MAX=${#arns[@]}
-  ask pick "番号" "1" valid_pick
-  I_ARN=${arns[pick-1]}
-  if [ -z "$I_ARN" ]; then
-    ask I_ARN "principal_arn" "" valid_arn
-  else
-    ui_erase 1
-    ui_ok "principal_arn: ${C_BOLD}${I_ARN}${C_RESET}"
-  fi
-}
-
-# 8 問目。よく使う長さを番号で選ばせて I_DURATION に入れる。番号の代わりに秒（900〜43200）をそのまま打ってもよい
+# duration_seconds。よく使う長さを番号で選ばせて I_DURATION に入れる。番号の代わりに秒（900〜43200）をそのまま打ってもよい
 # （非対話の入力列と互換。番号は 1〜4 なので秒と混ざらない）。
 DURATION_CHOICES=(3600 10800 18000 28800)
 DURATION_LABELS=("1 時間" "3 時間" "5 時間" "8 時間")
@@ -677,17 +676,13 @@ ask() {
 }
 
 init_interactive() {
-  local profiles ident arn_def acct_def mfa_def region_def
-  ui_text "AWS への繋ぎ方を 9 問で聞きます。Enter で ( ) の既定を受け付けます。"
-  ui_text "対象がどんなシステムか・何を調べたいかは、ここでは聞きません（調査コンテナの中でユーザーと決めます）。"
-  echo ""
-
-  ui_head "1/9 name"
+  local profiles ident acct_def mfa_def region_def
+  ui_head "name"
   ui_text "対象を表す短い英数字名。イメージ名・一時キーの置き場（~/.aws-survey/<name>/）に使います。"
   ask I_NAME "name" "$(default_name)" valid_name
 
   echo ""
-  ui_head "2/9 source_profile"
+  ui_head "source_profile"
   ui_text "ロールを借りる元になるホスト側のプロファイル（aws configure list-profiles）。"
   ui_text "いま有効なキーを持つ方を選びます。MFA の一時キーを別プロファイル（<名>-mfa など）に保存する運用なら、その保存先の方です。"
   profiles=$(profile_candidates)
@@ -696,67 +691,56 @@ init_interactive() {
     init_die "source_profile を選べません。"
   fi
   choose_profile "$profiles"
-
-  echo ""
-  ui_head "3/9 principal_arn（調査用ロールを誰に貸すか）"
-  ui_text "調査用ロールの信頼ポリシー（そのロールを借りられる相手の名簿）に書く相手を決めます。"
-  arn_def=""; acct_def=""
+  # 調査用ロールを貸す相手（信頼ポリシー）は、いまのログインの自分だけに固定する。読めなければ手で入れる
+  I_ARN=""; acct_def=""
   if ident=$(aws sts get-caller-identity --profile "$I_PROFILE" --output json 2>/dev/null); then
-    arn_def=$(printf '%s' "$ident" | jq -r '.Arn // empty')
+    I_ARN=$(printf '%s' "$ident" | jq -r '.Arn // empty')
     acct_def=$(printf '%s' "$ident" | jq -r '.Account // empty')
-    ui_kv "いまのログイン" "$arn_def"
-  else
-    ui_warn "$I_PROFILE で sts get-caller-identity が通りません（未ログインか期限切れ）。手で入力するか、"
-    ui_text "別の端末でログインし直してから、もう一度 $CMD_NAME init を実行してください。"
   fi
-  choose_principal "$arn_def"
+  if [ -n "$I_ARN" ] && valid_arn "$I_ARN"; then
+    ui_ok "調査用ロールを貸す相手: 自分だけ（${I_ARN}）"
+  else
+    ui_warn "$I_PROFILE でログインできていません（未ログインか期限切れ）。"
+    ui_text "別の端末でログインし直してから、もう一度 $CMD_NAME init を実行するか、調査用ロールを貸す相手の ARN を手で入れます。"
+    ask I_ARN "principal_arn（調査用ロールを貸す相手）" "" valid_arn
+  fi
+  I_REFRESH=$(refresh_default "$I_PROFILE")
 
   echo ""
-  ui_head "4/9 account_id"
+  ui_head "account_id"
   ui_text "調べる AWS アカウント ID（12 桁）。"
   ask I_ACCOUNT "account_id" "$acct_def" valid_account
 
-  echo ""
-  ui_head "5/9 mfa_required"
+  # Identity Center のログインでは、ロールの側で MFA を確かめられない（信頼ポリシーに条件を付けると借りられなくなる）ので聞かずに false
   if is_sso_arn "$I_ARN"; then
-    # 聞いても y は選べない（y にすると信頼ポリシーに満たせない条件が付き、借りられなくなる）
     I_MFA=false
-    ui_text "Identity Center のログインでは、ロールの側で MFA を確かめられません（MFA はログインのときに求めます）。"
-    ui_ok "mfa_required: ${C_BOLD}false${C_RESET}"
   else
+    echo ""
+    ui_head "mfa_required"
     ui_text "ロールを借りるときに MFA 済みであることを求めるか。y にすると、信頼ポリシーに「MFA 済みの人だけ」の条件を付けます。"
     mfa_def=$(mfa_default_from_arn "$I_ARN")
     ask I_MFA "mfa_required (y/n)" "$([ "$mfa_def" = true ] && echo y || echo n)" valid_bool to_bool
   fi
 
   echo ""
-  ui_head "6/9 refresh_command"
-  ui_text "$I_PROFILE が切れたとき、何を実行して有効にし直すか（環境ごとに違う唯一の操作）。無ければ - 。"
-  ui_text "既定は aws-login です（MFA / SSO を設定から判定してログインし直します）。別のコマンドなら書き換えてください。"
-  ask I_REFRESH "refresh_command" "$(refresh_default "$I_PROFILE")" ""
-  [ "$I_REFRESH" = "-" ] && I_REFRESH=""
-
-  echo ""
-  ui_head "7/9 region"
+  ui_head "region"
   ui_text "主に見るリージョン。既定リージョンになります。"
   region_def=$(profile_region "$I_PROFILE")
   ask I_REGION "region" "$region_def" valid_region
 
-  echo ""
-  ui_head "8/9 duration_seconds"
-  ui_text "1 回の調査セッションに取れる時間。一時キーの長さになります。"
-  ui_text "有効期限ではなく、調査エージェントの働き方を決める値です。短ければ守備範囲を狭く、長ければ通しで進めます。"
-  ui_text "借りるロールでは、そのロールの上限（既定 1 時間）を超える長さは発行できません。"
+  # 借りたロールからのログイン（Identity Center も）は、AWS の決まり（ロールチェーン）で 1 時間が上限。聞かずに固定する
   if is_chained_principal "$I_ARN"; then
-    ui_text "貸す相手（3 問目）はロールを借りてのログインなので、AWS の決まり（ロールチェーン）で 1 時間が上限です。ロール側の上限では延ばせません。"
     I_DURATION=$CHAIN_MAX_SECONDS
-    ui_ok "duration_seconds: ${C_BOLD}${I_DURATION}${C_RESET}（1 時間。借りたロールからの上限）"
   else
+    echo ""
+    ui_head "duration_seconds"
+    ui_text "1 回の調査セッションに取れる時間。一時キーの長さになります。"
+    ui_text "有効期限ではなく、調査エージェントの働き方を決める値です。短ければ守備範囲を狭く、長ければ通しで進めます。"
     choose_duration
   fi
 
   echo ""
-  ui_head "9/9 role_name"
+  ui_head "role_name"
   ui_text "調査に使う読み取り専用ロールの名前。借りる経路では既存ロール名。"
   ask I_ROLE "role_name" "aws-survey-readonly" valid_role
 }
@@ -846,15 +830,16 @@ init_write() {
             role_name: $role, refresh_command: (if $refresh == "" then null else $refresh end),
             duration_seconds: $duration},
      phase_dir: "01_基礎調査",
+     agent: null,
      ssh: {user: "diag", hosts: {}},
-     setup: {route_decided: null, role_created: null, readonly_verified: null, container_verified: null}}' \
+     setup: {route_decided: null, role_created: null, readonly_verified: null, container_verified: null, scanned: null}}' \
     > "$tmp" || { rm -f "$tmp"; init_die "environment.json を組み立てられませんでした。"; }
   jq -e . "$tmp" >/dev/null 2>&1 || { rm -f "$tmp"; init_die "書き出した JSON が読めません。"; }
   mv "$tmp" "$ENV_FILE" || init_die "書き込めません: $ENV_FILE"
   chmod 600 "$ENV_FILE" 2>/dev/null
   local reason
   reason=$(env_state) || init_die "書き出した environment.json を load-env.sh が受け付けません: $reason"
-  ui_ok "書き出しました: $ENV_FILE"
+  ui_ok "書き出しました: $(ui_path "$ENV_FILE")"
 }
 
 # out/ の器と、対象フォルダ用の AGENTS.md / CLAUDE.md
@@ -876,7 +861,7 @@ init_scaffold() {
 
 - 準備と立ち上げに手順書は無い。\`aws-survey\`（引数なし）が段階を判定し、次の 1 手を出し、確認しながら実行する。
 - 詰まったら \`aws-survey doctor\`。ツールの有無と、一時キーを発行できない原因を切り分ける。
-- \`aws-survey run\` で調査コンテナが立ち上がったら、ホスト側の仕事は終わり。
+- \`aws-survey scan\`（非対話の棚卸し）か \`aws-survey claude\` / \`aws-survey codex\`（対話）で調査コンテナが立ち上がったら、ホスト側の仕事は終わり。
   調査も、結果の説明も、報告の検証も、コンテナの中の調査エージェントが持っている。ここから先回りしない。
 - 対象の概要・調査項目・フェーズの目的をここで作らない。それらは調査コンテナの中でユーザーと決め、\`out/\` に記録される。
   ここで扱うのは AWS への繋ぎ方だけ。
@@ -889,6 +874,23 @@ EOF
     printf '@AGENTS.md\n' > "$AWS_SURVEY_DIR/CLAUDE.md"
     ui_ok "CLAUDE.md を置きました${C_DIM}（AGENTS.md を読み込むだけ）${C_RESET}"
   fi
+  init_gitignore
+}
+
+# environment.json と trust.json にはアカウント ID が入るので、対象フォルダを Git で管理しても載らないように .gitignore に入れておく。
+# 既にあれば足りない行だけ足す。out/（調査の記録）を含めるかは任意なので書かない
+init_gitignore() {
+  local f="$AWS_SURVEY_DIR/.gitignore" line added=0
+  for line in /environment.json /environment.json.bak /trust.json; do
+    if [ -f "$f" ]; then
+      grep -qx -- "$line" "$f" && continue
+      [ -z "$(tail -c 1 "$f")" ] || printf '\n' >> "$f"
+    fi
+    printf '%s\n' "$line" >> "$f" || init_die "書き込めません: $f"
+    added=1
+  done
+  [ "$added" -eq 1 ] || return 0
+  ui_ok ".gitignore に environment.json と trust.json を入れました${C_DIM}（アカウント ID が入るため）${C_RESET}"
 }
 
 cmd_init() {
@@ -925,19 +927,16 @@ cmd_init() {
   ui_kv "region" "$I_REGION"
   ui_kv "source_profile" "$I_PROFILE"
   ui_kv "role_name" "$I_ROLE"
-  ui_kv "duration" "$I_DURATION 秒"
-  ui_text "読み取り専用ロールをどう用意するか（自分で作る / 既存のロールを借りる）はまだ決めていません。"
-  ui_text "次の $CMD_NAME role が、このアカウントでロールを作れるかを調べて決めます。"
+  ui_kv "ロールを貸す相手" "$I_ARN"
+  if is_chained_principal "$I_ARN"; then
+    ui_kv "セッションの上限" "$(duration_label "$I_DURATION")${C_DIM}（借りたロールからのログインは、AWS の決まりで 1 時間が上限）${C_RESET}"
+  else
+    ui_kv "セッションの上限" "$(duration_label "$I_DURATION")"
+  fi
+  [ "$I_MFA" != true ] || ui_kv "MFA" "ロールを借りるときに MFA 済みであることを求める"
+  ui_kv "再ログイン" "$I_REFRESH"
   echo ""
-  ui_head "このフォルダを Git で管理するなら"
-  ui_text "environment.json と trust.json にはアカウント ID が入ります。init は .gitignore を作らないので、"
-  ui_text "次の 3 行を .gitignore に書いてください。"
-  echo "      /environment.json"
-  echo "      /environment.json.bak"
-  echo "      /trust.json"
-  ui_text "out/（調査の記録）を含めるかは任意です。"
-  echo ""
-  next_cmd "$CMD_NAME role" "このアカウントでロールを自分で作れるか調べます（読むだけで、何も作りません）"
+  next_cmd "$CMD_NAME role --create" "調査用ロールを用意します（無ければ作り、あれば environment.json に合わせて整えます）"
 }
 
 # ---- status ----
@@ -982,6 +981,7 @@ cmd_status() {
   milestone route_decided     "ロールの用意のしかたを決めた"
   milestone role_created      "ロールを用意した"
   milestone readonly_verified "読み取り専用であることを確かめた"
+  milestone scanned            "白紙の棚卸しを済ませた"
   milestone container_verified "コンテナの中で環境を確かめた"
   echo ""
   ui_head "一時キー"
@@ -994,6 +994,8 @@ cmd_status() {
   esac
   echo ""
   ui_head "調査"
+  ui_kv "エージェント" "$(agent_label "${SURVEY_AGENT:-}")${SURVEY_AGENT:+（最後に使ったもの）}"
+  if scan_done; then ui_ok "棚卸し済み（$(setup_value scanned)）"; else ui_skip "棚卸し: まだ（$CMD_NAME scan）"; fi
   if survey_started; then
     ui_ok "開始済み（out/00_進捗.md あり）"
   else
@@ -1067,7 +1069,7 @@ cmd_doctor() {
   [ "$ok" -eq 1 ]
 }
 
-cmd_help() { sed -n '2,35p' "$SELF" | sed 's/^# \{0,1\}//'; }
+cmd_help() { sed -n '2,43p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 case "$CMD" in
   "")          cmd_guide_loop ;;
@@ -1079,6 +1081,8 @@ case "$CMD" in
   credentials) exec "$LIBEXEC_DIR/commands/credentials.sh" "$@" ;;
   verify)      exec "$LIBEXEC_DIR/commands/verify.sh" "$@" ;;
   run)         exec "$LIBEXEC_DIR/commands/run.sh" "$@" ;;
+  scan)        exec "$LIBEXEC_DIR/commands/scan.sh" "$@" ;;
+  claude|codex) exec "$LIBEXEC_DIR/commands/agent.sh" "$CMD" "$@" ;;
   ls)          exec "$LIBEXEC_DIR/commands/ls.sh" "$@" ;;
   ec2)         exec "$LIBEXEC_DIR/commands/ec2.sh" "$@" ;;
   ssh)         exec "$LIBEXEC_DIR/commands/ssh.sh" "$@" ;;

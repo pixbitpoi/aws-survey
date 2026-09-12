@@ -219,5 +219,5 @@ echo ""
 if [ -z "$(jq -r '.setup.readonly_verified // empty' "$ENV_FILE")" ]; then
   next_cmd "$AWS_SURVEY_CMD verify" "この一時キーが読み取り専用であることを確かめます（省略できません）"
 else
-  next_cmd "$AWS_SURVEY_CMD run" "調査コンテナを起動します"
+  survey_next_cmd
 fi

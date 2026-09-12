@@ -96,7 +96,7 @@ for svc in $(jq -r 'select(.kind == "service") | .service' <<< "$inv" | grep -vx
   render_service "$inv" "$svc"
 done
 echo ""
-also_cmd "$AWS_SURVEY_CMD ec2"    "EC2 を一覧から選んで、中を調べる準備をします"
-also_cmd "$AWS_SURVEY_CMD lambda" "Lambda 関数を一覧から選んで、コードを取り出します"
-also_cmd "$AWS_SURVEY_CMD run"    "調査コンテナを起動します。中で Claude Code / Codex と調査を進めます"
+survey_next_cmd
+also_cmd "$AWS_SURVEY_CMD ec2"    "任意。EC2 を一覧から選んで、中を調べる準備をします"
+also_cmd "$AWS_SURVEY_CMD lambda" "任意。Lambda 関数を一覧から選んで、コードを取り出します"
 exit "$rc"

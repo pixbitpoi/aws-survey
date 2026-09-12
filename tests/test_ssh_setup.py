@@ -218,9 +218,10 @@ class Setup(SshSetupCase):
         self.assertIn(INSTANCE, tag)
         self.assertIn('Key=diag:ssh,Value=smoke', tag)
         self.assertIn('送った形: plain', result.stdout)
-        # 続きの 3 手は引数なしの aws-survey が案内する。個々のコマンドも読める
+        # 端末でなければ、続きの 3 手は引数なしの aws-survey を案内する（端末ならそのまま exec で進む）。個々のコマンドも読める
         self.assertIn('あと 3 手', result.stdout)
-        self.assertIn('aws-survey ssh list', result.stdout)
+        self.assertIn('残りの 3 手を順に進めます', result.stdout)
+        self.assertNotIn('ssh list', result.stdout)
         self.assertIn('aws-survey role --create', result.stdout)
         self.assertIn('aws-survey credentials', result.stdout)
         self.assertIn('aws-survey ssh verify web1', result.stdout)

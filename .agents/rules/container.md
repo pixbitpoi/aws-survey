@@ -49,12 +49,17 @@
 | --- | --- | --- |
 | `container/method/` | ディレクトリのマウント | その場で効く |
 | `container/instructions/survey-agents.md` と `survey-claude.md` | 単一ファイルのマウント | 再起動が要る。エディタがファイルを置き換えるとコンテナ側は古いまま |
-| `container/settings.json` / `codex/` / `hooks/` / `bashrc` / `survey-status` / `survey-ui.sh` / `ec2` | イメージに焼き込み | 再ビルドが要る（`aws-survey run` が毎回ビルドする） |
+| `container/settings.json` / `codex/` / `hooks/` / `bashrc` / `survey-status` / `survey-ui.sh` / `ec2` | イメージに焼き込み | 再ビルドが要る（`aws-survey scan` / `claude` / `codex` / `run` が毎回ビルドする） |
 
 コンテナへ渡るものは `container/` だけではない。対象フォルダの `out/` はディレクトリのマウントなので
 双方向にその場で効き（目的と規則・システム概要を直せば調査エージェントがすぐ読む）、`environment.json` の
-`phase_dir` / `region` / `name` は起動時に読むので次回の `aws-survey run` から効く。
+`phase_dir` / `region` / `name` は起動時に読むので次回の起動（`aws-survey scan` / `claude` / `codex` / `run`）から効く。
 同じ `out/` に対して 2 つのエージェントを同時に走らせない。台帳と監査ログの書き手が競合する。
+`aws-survey scan` は起動前に `docker ps` で対話コンテナと自分の名前を見て、動いていれば止まる。
+
+`aws-survey scan` は調査エージェントを非対話（`claude -p` / `codex exec`）で 1 回動かす。ホストが渡す指示は「ユーザーが応答できない回」と
+「棚卸しだけ」であり、その回に何をするかは `method/00` の「ユーザーが応答できない回」が持つ。環境の確認と白紙の棚卸しを
+承認前の前段とする位置づけは `survey-agents.md` と `method/00` / `04` にある。ホストのコマンド名はそこにも書かない。
 
 ホストが同じイメージを `docker run --rm` で 1 コマンドだけ動かす経路がある（`aws-survey ls` / `ec2` / `lambda` の一覧と
 `ssh verify` の `ec2 --selftest`。`libexec/container.sh`）。渡すのは一時キーの ro マウントだけで、`out/` も指示書も
@@ -117,7 +122,7 @@ Claude 側の 2 経路が揃っていることは `tests/test_guards.py` の `Au
 環境の自己点検をフェーズにしないこと。フェーズはミッションの単位であり、
 「自分を縛る仕組みを検証せよ」という指示は、調査エージェントに知らせない前提を持ち込む。
 
-`Dockerfile` のビルド文脈は `container/`（`run.sh` が `docker build -f <本体>/Dockerfile <本体>/container`）。
+`Dockerfile` のビルド文脈は `container/`（`libexec/docker.sh` が `docker build -f <本体>/Dockerfile <本体>/container`）。
 `COPY` のパスは `container/` からの相対で書く。文脈の外は `COPY` できない。
 
 ## フックを変えたら、通る例と落ちる例の両方を確かめる
@@ -152,9 +157,9 @@ echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs > out/.
 | `container/hooks/aws-readonly-guard.sh` | `> out/…` を通す正規表現（再ビルドが要る） |
 | `container/method/01_進め方.md` | 成果物の置き場所・コマンドの作法・大きな出力の扱い |
 | `container/instructions/survey-agents.md` | 出力の置き場所の図 |
-| `libexec/commands/run.sh`（`aws-survey run`） | 起動時に作るフォルダ |
+| `libexec/launch.sh`（`run` と `scan` が共有） | 起動時に作るフォルダ |
 
-`container/` にあるものは Dockerfile の `COPY` か `run.sh` のマウントで必ず調査コンテナへ届く
+`container/` にあるものは Dockerfile の `COPY` か `launch.sh` のマウントで必ず調査コンテナへ届く
 （`tests/test_launcher.py` の `ContainerDelivery`）。
 
 `instructions/` のファイル名を `AGENTS.md` / `CLAUDE.md` に戻さない。ホストの開発エージェントが自動読込し、

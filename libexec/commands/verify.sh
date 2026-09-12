@@ -170,7 +170,7 @@ if [ "$fail" -eq 0 ]; then
   ui_ok "読み取り専用であることを確認しました"
   env_mark_setup readonly_verified "読み取り専用であることを確かめた"
   echo ""
-  next_cmd "$AWS_SURVEY_CMD run" "調査コンテナを起動します。中で Claude Code / Codex と調査を進めます"
+  survey_next_cmd
   exit 0
 else
   ui_err "読み取り専用になっていません。environment.json には記録しません。"

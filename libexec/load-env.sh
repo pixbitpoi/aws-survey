@@ -30,7 +30,7 @@ command -v jq >/dev/null || _die "jq が必要です（brew install jq）。"
 if [ ! -f "$ENV_FILE" ]; then
   _die "environment.json がありません: $ENV_FILE
   このフォルダは、まだどの AWS アカウント向けにも設定されていません。
-  aws-survey init で AWS への繋ぎ方を聞き取って作ります（Claude Code / Codex に「準備して」と伝えても案内されます）。"
+  aws-survey init で AWS への繋ぎ方を聞き取って作ります。"
 fi
 jq -e . "$ENV_FILE" >/dev/null 2>&1 || _die "environment.json が壊れています: $ENV_FILE"
 
@@ -54,6 +54,13 @@ DURATION="${DURATION:-$(_get .auth.duration_seconds)}"
 # 実際に何のフェーズにするかは、調査コンテナの中でユーザーと決める。
 SURVEY_PHASE_DIR="${SURVEY_PHASE_DIR:-$(_get .phase_dir)}"
 SURVEY_PHASE_DIR="${SURVEY_PHASE_DIR:-01_基礎調査}"
+# 調査に使うエージェント（claude / codex）。最後に使ったものを scan と claude / codex の入口が記録する。
+# 未定なら空で、scan が矢印キーで聞く。案内文の「次に打つコマンド」もこれで組み立てる。
+SURVEY_AGENT="${SURVEY_AGENT:-$(_get .agent)}"
+case "$SURVEY_AGENT" in
+  ""|claude|codex) ;;
+  *) _die "environment.json の agent が不正です: ${SURVEY_AGENT}（claude か codex。未定なら null）" ;;
+esac
 
 for _v in SURVEY_NAME ACCOUNT_ID REGION PROFILE_SRC ROLE_NAME DURATION SURVEY_PHASE_DIR; do
   [ -n "${!_v}" ] || _die "environment.json に $_v にあたる項目がありません。templates/environment.json と見比べてください。"
@@ -126,13 +133,37 @@ docker_check_shared() {
   return 1
 }
 
-# セットアップの到達点を environment.json に記録する。2 つ目は利用者に見せる言い換え（省略時はキー名）
+# 準備が済んだあとの次の 1 手。棚卸し（scan）がまだなら scan、済んでいれば記録してあるエージェントとの対話。
+# ls / lambda pull / credentials / verify など、準備が済んだ状態で終わるコマンドの末尾が出す。run（素のシェル）は案内しない
+survey_next_cmd() {
+  if [ -z "$(jq -r '.setup.scanned // empty' "$ENV_FILE")" ]; then
+    next_cmd "$AWS_SURVEY_CMD scan" "白紙の棚卸しをエージェントに 1 回で行わせます（非対話。待つだけ）"
+  elif [ -n "$SURVEY_AGENT" ]; then
+    next_cmd "$AWS_SURVEY_CMD $SURVEY_AGENT" "$(agent_label "$SURVEY_AGENT") と対話で調査を進めます"
+  else
+    next_cmd "$AWS_SURVEY_CMD claude" "Claude Code と対話で調査を進めます（Codex なら $AWS_SURVEY_CMD codex）"
+  fi
+}
+
+# セットアップの到達点を environment.json に記録する。2 つ目は利用者に見せる言い換え（省略時はキー名）、
+# 3 つ目は記録する値（省略時は今日の日付。分まで要るときは呼ぶ側が渡す）
 #   env_mark_setup role_created "ロールを用意した"
+#   env_mark_setup scanned "白紙の棚卸しを済ませた" "$(date '+%FT%H:%M%z')"
 env_mark_setup() {
-  local key="${1:-}" label="${2:-${1:-}}" tmp
+  local key="${1:-}" label="${2:-${1:-}}" value="${3:-$(date +%F)}" tmp
   [ -n "$key" ] || { echo "env_mark_setup: キー名がありません" >&2; return 1; }
   tmp=$(mktemp) || return 0
-  jq --arg k "$key" --arg d "$(date +%F)" '.setup[$k] = $d' "$ENV_FILE" > "$tmp" \
+  jq --arg k "$key" --arg d "$value" '.setup[$k] = $d' "$ENV_FILE" > "$tmp" \
     && mv "$tmp" "$ENV_FILE" \
-    && ui_text "environment.json に記録しました: ${label}（$(date +%F)）"
+    && ui_text "environment.json に記録しました: ${label}（${value}）"
+}
+
+# 調査に使うエージェントを記録する（最後に使ったもの）。同じなら何も書かない
+#   env_set_agent claude
+env_set_agent() {
+  local agent="${1:-}" tmp
+  case "$agent" in claude|codex) ;; *) echo "env_set_agent: claude か codex を指定してください" >&2; return 1 ;; esac
+  [ "$agent" != "$SURVEY_AGENT" ] || return 0
+  tmp=$(mktemp) || return 0
+  jq --arg a "$agent" '.agent = $a' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE" && SURVEY_AGENT="$agent"
 }

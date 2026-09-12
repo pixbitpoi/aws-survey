@@ -1,4 +1,4 @@
-"""Check libexec/commands/run.sh arguments without Docker, AWS, or the user's real config.
+"""Check libexec/commands/run.sh (and the launch.sh it shares with scan) without Docker, AWS, or the user's real config.
 
 Paths resolve in two systems: AWS_SURVEY_HOME (this distribution) and AWS_SURVEY_DIR
 (the target folder holding environment.json and out/). Temporary keys live under
@@ -28,7 +28,8 @@ class Launcher(unittest.TestCase):
         self.root = Path(self.temp.name).resolve()
         for name in ['bin', 'libexec', 'libexec/commands', 'container']:
             (self.root / name).mkdir()
-        for name in ['bin/aws-survey', 'libexec/commands/run.sh', 'libexec/load-env.sh', 'libexec/ui.sh', 'libexec/docker.sh']:
+        for name in ['bin/aws-survey', 'libexec/commands/run.sh', 'libexec/load-env.sh', 'libexec/ui.sh', 'libexec/docker.sh',
+                     'libexec/launch.sh']:
             shutil.copy(ROOT / name, self.root / name)
         docker = self.root / 'bin/docker'
         docker.write_text('#!/usr/bin/env python3\nimport json, os, sys\nwith open(os.environ["SMOKE_DOCKER_LOG"], "a") as f:\n f.write(json.dumps(sys.argv[1:])+"\\n")\n')
@@ -218,9 +219,9 @@ class ContainerDelivery(unittest.TestCase):
     @staticmethod
     def delivered_sources():
         """What reaches the survey container: COPY paths (relative to the container/ build context)
-        and run.sh mounts (absolute under AWS_SURVEY_HOME)."""
+        and launch.sh mounts (absolute under AWS_SURVEY_HOME; run and scan share them)."""
         baked = re.findall(r'^COPY\s+(\S+)', (ROOT / 'Dockerfile').read_text(), re.MULTILINE)
-        mounted = re.findall(r'\$AWS_SURVEY_HOME/([^:"\s]+):', (ROOT / 'libexec/commands/run.sh').read_text())
+        mounted = re.findall(r'\$AWS_SURVEY_HOME/([^:"\s]+):', (ROOT / 'libexec/launch.sh').read_text())
         return {f'container/{path}' for path in baked} | set(mounted)
 
     def test_every_container_file_is_delivered(self):
@@ -301,7 +302,7 @@ class BakedNotMounted(unittest.TestCase):
             self.assertIn(source, baked, f'{source} is no longer COPYed into the image')
 
     def test_guards_are_not_mounted_at_launch(self):
-        mounted = re.findall(r'\$AWS_SURVEY_HOME/([^:"\s]+):', (ROOT / 'libexec/commands/run.sh').read_text())
+        mounted = re.findall(r'\$AWS_SURVEY_HOME/([^:"\s]+):', (ROOT / 'libexec/launch.sh').read_text())
         for source in self.GUARD_SOURCES:
             self.assertNotIn(f'container/{source}', mounted,
                              f'{source} is mounted; a mounted guard can be edited from inside')
@@ -343,7 +344,7 @@ class CliInstallLayout(unittest.TestCase):
 
     Auto-update needs somewhere writable. Installing Claude Code natively puts it under the
     node user's ~/.local, so it can replace its own binary without /usr/local ever becoming
-    writable - the guard's settings.json and hooks stay root-owned either way. run.sh keeps
+    writable - the guard's settings.json and hooks stay root-owned either way. launch.sh keeps
     ~/.local in a named volume, otherwise every update would be thrown away with the --rm
     container and re-downloaded next launch.
 
@@ -355,7 +356,7 @@ class CliInstallLayout(unittest.TestCase):
 
     def setUp(self):
         self.dockerfile = (ROOT / 'Dockerfile').read_text()
-        self.launcher = (ROOT / 'libexec/commands/run.sh').read_text()
+        self.launcher = (ROOT / 'libexec/launch.sh').read_text()
 
     def test_codex_names_a_version(self):
         self.assertIn('@openai/codex@${CODEX_VERSION}', self.dockerfile)
@@ -402,7 +403,7 @@ class Ec2Layout(unittest.TestCase):
 
     def setUp(self):
         self.dockerfile = (ROOT / 'Dockerfile').read_text()
-        self.launcher = (ROOT / 'libexec/commands/run.sh').read_text()
+        self.launcher = (ROOT / 'libexec/launch.sh').read_text()
 
     def test_the_wrapper_is_copied_and_executable(self):
         self.assertIn('COPY ec2           /usr/local/bin/ec2', self.dockerfile)
@@ -431,7 +432,7 @@ class RegionIsNotBaked(unittest.TestCase):
 
     Environment variables win over profile configuration, so a default frozen into the
     image would silently outrank environment.json: changing the region there would appear
-    to work and have no effect. run.sh passes the configured value with -e instead, and the
+    to work and have no effect. launch.sh passes the configured value with -e instead, and the
     claude-ro profile carries it too.
     """
 
@@ -443,4 +444,4 @@ class RegionIsNotBaked(unittest.TestCase):
 
     def test_launcher_passes_the_configured_region(self):
         self.assertIn('-e "AWS_DEFAULT_REGION=$REGION"',
-                      (ROOT / 'libexec/commands/run.sh').read_text())
+                      (ROOT / 'libexec/launch.sh').read_text())

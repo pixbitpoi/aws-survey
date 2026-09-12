@@ -25,7 +25,7 @@ prefix へリンクされるのは `bin` / `sbin` / `etc` / `include` / `share` 
 アップグレードでそれが切れる。formula は `write_env_script` で `opt_prefix`
 （`/opt/homebrew/opt/aws-survey`。バージョンを含まない）を渡してこれを防ぐ。
 `tests/test_distribution.py` が `opt` 経由のツリーを組んで、表示されるパスが keg を指さないことを見る。
-なお `init` は対象フォルダに絶対パスを焼き込まない（`aws-survey run` から先はコンテナの仕事なので、
+なお `init` は対象フォルダに絶対パスを焼き込まない（コンテナの起動から先はコンテナの仕事なので、
 生成する `AGENTS.md` が配布物を参照しない）。
 
 実体を `libexec/` に置くのは `libexec` の定義どおり（ユーザーが直接叩かない実行ファイル）で、リポジトリ側で
@@ -46,7 +46,7 @@ formula と `tests/test_distribution.py` の `INCLUDED_HIDDEN` を揃えるこ�
 | 入らないもの | 理由 |
 | --- | --- |
 | `README.md`・`docs/` | **利用者向け文書の正本は GitHub**（`brew home aws-survey`）。配布物の中には読む手段が無く、参照する側も無い |
-| `AGENTS.md`・`CLAUDE.md`・`.agents/` | 開発時の入口と規則。`aws-survey run` から先はコンテナの仕事なので、インストール済みのツリーの中で作業するエージェントはいない。開発は git clone で行う |
+| `AGENTS.md`・`CLAUDE.md`・`.agents/` | 開発時の入口と規則。コンテナの起動から先はコンテナの仕事なので、インストール済みのツリーの中で作業するエージェントはいない。開発は git clone で行う |
 | `tests/` | 開発時にリポジトリで走らせる（`ec2_install_smoke.sh` は Docker が要るので手で実行する） |
 | `environment.json`・`out/`・`trust.json`・一時キー | 対象フォルダとホームに属する。配布物には無い |
 

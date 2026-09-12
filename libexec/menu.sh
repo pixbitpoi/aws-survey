@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 矢印キーで 1 つ選ぶメニュー。aws-survey（init）と、一覧から選ばせるコマンド（ec2 / lambda）が source する。
+# 矢印キーで 1 つ（choose_menu）か複数（choose_multi）選ぶメニュー。aws-survey（init）と、一覧から選ばせるコマンド（ec2 / lambda）が source する。
 # ui.sh の色（C_CYAN など）と ui_die を使うので、ui.sh のあとに読み込む。
 #
 # ⚠️ choose_menu は EXIT トラップを張って（カーソルを戻すため）決定後に外す。呼ぶ側の `trap ... EXIT` を潰すので、
@@ -53,6 +53,60 @@ choose_menu() {
   done
   printf -v "$var" '%s' "${entries[cursor]}"
   # 問い + 候補 + ヒント + Enter で bash が出す改行 1 行を消して、呼ぶ側の結果 1 行に畳む
+  printf '\033[%dA' "$((count+3))"
+  printf '\033[J'
+  show_cursor
+  trap - EXIT
+}
+
+# 複数選ぶ。↑↓ / j k で移動、Space で印を付け外し、a で全部、Enter で決定、q または Ctrl-D で中断。
+# choose_multi <結果の変数名> <問いの文> <候補>...  結果は選んだ候補の番号（0 始まり）を空白区切りで入れる。
+# 1 つも選ばずに Enter は、いまカーソルのある 1 つを選んだことにする（1 つだけならメニューと同じ手数）。
+choose_multi() {
+  local var="$1" title="$2"; shift 2
+  local -a entries=("$@") marks=()
+  local count=${#entries[@]} i key rest cursor=0 picked=""
+  for i in "${!entries[@]}"; do marks[i]=0; done
+  draw_multi() {
+    local i m
+    for i in "${!entries[@]}"; do
+      if [ "${marks[i]}" = 1 ]; then m="${C_GREEN}◉${C_RESET}"; else m="${C_DIM}○${C_RESET}"; fi
+      if [ "$i" = "$cursor" ]; then
+        printf '\033[K  %s❯%s %s %s%s%s\n' "$C_CYAN" "$C_RESET" "$m" "$C_CYAN" "${entries[i]}" "$C_RESET"
+      else
+        printf '\033[K    %s %s%s%s\n' "$m" "$C_DIM" "${entries[i]}" "$C_RESET"
+      fi
+    done
+    printf '\033[K  %s↑↓ 移動 · Space 選ぶ · a 全部 · Enter 決定 · q 中断%s\n' "$C_DIM" "$C_RESET"
+  }
+  show_cursor() { printf '\033[?25h'; }
+  trap show_cursor EXIT
+  printf '\033[?25l'
+  printf '  %s❯%s %s\n' "$C_CYAN" "$C_RESET" "$title"
+  draw_multi
+  while :; do
+    IFS= read -rsn1 key || { show_cursor; echo ""; ui_die "${title}: 選択が中断されました。"; }
+    case "$key" in
+      $'\e')
+        read -rsn2 -t 0.2 rest || rest=
+        case "$rest" in
+          '[A') [ "$cursor" -le 0 ] || cursor=$((cursor-1)) ;;
+          '[B') [ "$cursor" -ge $((count-1)) ] || cursor=$((cursor+1)) ;;
+        esac
+        ;;
+      k) [ "$cursor" -le 0 ] || cursor=$((cursor-1)) ;;
+      j) [ "$cursor" -ge $((count-1)) ] || cursor=$((cursor+1)) ;;
+      ' ') if [ "${marks[cursor]}" = 1 ]; then marks[cursor]=0; else marks[cursor]=1; fi ;;
+      a) for i in "${!entries[@]}"; do marks[i]=1; done ;;
+      '') break ;;
+      q) show_cursor; echo ""; ui_die "${title}: 選択が中断されました。" ;;
+    esac
+    printf '\033[%dA' "$((count+1))"
+    draw_multi
+  done
+  for i in "${!entries[@]}"; do [ "${marks[i]}" = 1 ] && picked="${picked:+$picked }$i"; done
+  [ -n "$picked" ] || picked="$cursor"
+  printf -v "$var" '%s' "$picked"
   printf '\033[%dA' "$((count+3))"
   printf '\033[J'
   show_cursor

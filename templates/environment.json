@@ -12,6 +12,7 @@
     "duration_seconds": 10800
   },
   "phase_dir": "01_基礎調査",
+  "agent": null,
   "ssh": {
     "user": "diag",
     "hosts": {}
@@ -20,6 +21,7 @@
     "route_decided": null,
     "role_created": null,
     "readonly_verified": null,
-    "container_verified": null
+    "container_verified": null,
+    "scanned": null
   }
 }
