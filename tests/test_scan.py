@@ -331,6 +331,107 @@ class Scan(ScanCase):
         self.assertIn('初期調査を終えました（', text)
         self.assertIn('生データ 2 件', text)
 
+    # 経路の候補: SSM 管理下で稼働中の EC2 が 2 台（1 台は停止中で候補にならない）と Lambda が 2 個
+    ROUTES = INVENTORY + [
+        {'kind': 'item', 'service': 'ec2', 'region': 'test-region', 'id': 'i-0aaa', 'name': 'web1', 'state': 'running', 'extra': {'type': 't3.micro', 'ssm': 'Online'}},
+        {'kind': 'item', 'service': 'ec2', 'region': 'test-region', 'id': 'i-0bbb', 'name': 'old', 'state': 'stopped', 'extra': {'type': 't3.micro', 'ssm': 'なし'}},
+        {'kind': 'item', 'service': 'lambda', 'region': 'test-region', 'id': 'fn-a', 'name': 'fn-a', 'state': 'Active', 'extra': {'modified': '2026-09-01T00:00:00.000+0000'}},
+        {'kind': 'item', 'service': 'lambda', 'region': 'test-region', 'id': 'fn-b', 'name': 'fn-b', 'state': 'Active', 'extra': {'modified': '2026-09-02T00:00:00.000+0000'}},
+    ]
+    DECLINE_EC2 = ('中を調べられるようにしますか', b'\x1b[B\r')
+    DECLINE_LAMBDA = ('コードを取り出して読めるようにしますか', b'\x1b[B\x1b[B\r')
+
+    def test_on_a_terminal_the_inside_routes_are_offered_before_the_agent_and_can_be_declined(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        code, text = self.drive(['scan'], [self.DECLINE_EC2, self.DECLINE_LAMBDA],
+                                env_extra={'FAKE_INVENTORY': json.dumps(self.ROUTES), 'FAKE_SCAN_WRITES': '1'})
+        self.assertEqual(code, 0, text)
+        self.assertIn('中まで読めるようにする（任意）', text)
+        self.assertIn('EC2 が 1 台あります（SSM 管理下で稼働中・未登録）', text)     # the stopped one is not a candidate
+        self.assertIn('Lambda 関数が 2 個あります（未取り出し）', text)
+        self.assertIn('EC2: 今回は足さない', text)
+        self.assertIn('Lambda: 今回は足さない', text)
+        self.assertNotIn('ssh setup', text)
+        self.assertNotIn('lambda pull', text)
+        self.assertIsNotNone(self.agent_run())
+        self.assertLess(text.index('中まで読めるようにする'), text.index('初期調査（'))
+        # the closing guidance counts what is still not added, and names only those commands
+        self.assertIn('まだ中を読めるようにしていないものがあります（EC2 1 台・Lambda 2 関数）', text)
+        self.assertIn('aws-survey ec2 ', text)
+        self.assertIn('aws-survey lambda ', text)
+        for word in ['i-0aaa', 'web1', 'fn-a']:                                  # the routes are the host's business, not the prompt's
+            self.assertNotIn(word, self.agent_run()[self.agent_run().index('-p') + 1])
+
+    def test_pulling_every_lambda_runs_pull_before_the_agent_and_a_failure_does_not_stop_the_survey(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        code, text = self.drive(['scan'], [self.DECLINE_EC2, ('コードを取り出して読めるようにしますか', b'\r')],
+                                env_extra={'FAKE_INVENTORY': json.dumps(self.ROUTES), 'FAKE_SCAN_WRITES': '1'}, timeout=60)
+        self.assertEqual(code, 0, text)
+        self.assertIn('Lambda: 全部取り出す', text)
+        self.assertIn('aws-survey lambda pull fn-a fn-b', text)                 # the host command, folded into one line
+        # the fake aws cannot really pull (the pull key's self-check reads what it must not), so the route is reported as not added
+        self.assertIn('足せなかった経路があります。初期調査はそのまま始めます', text)
+        self.assertIsNotNone(self.agent_run())
+        self.assertIn('初期調査を終えました', text)
+
+    def test_registering_an_instance_runs_ssh_setup_before_the_agent(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        code, text = self.drive(['scan'], [('中を調べられるようにしますか', b'\r'), ('インスタンスを選んでください', b'\r'), self.DECLINE_LAMBDA],
+                                env_extra={'FAKE_INVENTORY': json.dumps(self.ROUTES), 'FAKE_SCAN_WRITES': '1'}, timeout=60)
+        self.assertEqual(code, 0, text)
+        self.assertIn('EC2: 一覧から選んで登録する', text)
+        self.assertIn('i-0aaa  web1  t3.micro', text)
+        self.assertIn('aws-survey ssh setup i-0aaa', text)
+        self.assertTrue(any(c[:1] == ['aws'] and 'describe-instances' in c for c in self.calls()), 'ssh setup must have started resolving the target')
+        self.assertIn('足せなかった経路があります', text)                      # the fake aws knows no instance; the survey still runs
+        self.assertIsNotNone(self.agent_run())
+
+    def test_registered_hosts_and_pulled_code_are_not_offered_again(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        config = self.environment()
+        config['ssh']['hosts'] = {'web1': {'instance_id': 'i-0aaa', 'installed_at': '2026-09-01T00:00:00+00:00'}}
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        manifest = self.target / 'code' / 'lambda' / 'test-region' / 'fn-a' / '_manifest.json'
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text('{}')
+        code, text = self.drive(['scan'], [self.DECLINE_LAMBDA],
+                                env_extra={'FAKE_INVENTORY': json.dumps(self.ROUTES), 'FAKE_SCAN_WRITES': '1'})
+        self.assertEqual(code, 0, text)
+        self.assertNotIn('EC2 が', text)
+        self.assertIn('Lambda 関数が 1 個あります（未取り出し）', text)
+        self.assertIn('まだ中を読めるようにしていないものがあります（EC2 0 台・Lambda 1 関数）', text)
+        self.assertNotIn('aws-survey ec2 ', text)                                # web1 is registered: nothing to add on the EC2 side
+        self.assertIn('aws-survey lambda ', text)
+
+    def test_when_every_route_is_added_the_guidance_says_so_instead_of_offering_them(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        config = self.environment()
+        config['ssh']['hosts'] = {'web1': {'instance_id': 'i-0aaa', 'installed_at': '2026-09-01T00:00:00+00:00'}}
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        for fn in ('fn-a', 'fn-b'):
+            manifest = self.target / 'code' / 'lambda' / 'test-region' / fn / '_manifest.json'
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text('{}')
+        code, text = self.drive(['scan'], [], env_extra={'FAKE_INVENTORY': json.dumps(self.ROUTES), 'FAKE_SCAN_WRITES': '1'})
+        self.assertEqual(code, 0, text)
+        self.assertNotIn('中まで読めるようにする', text)
+        self.assertIn('中を読む経路（EC2 web1・Lambda 2 関数）はすべて足してあり、報告に入っています', text)
+        self.assertNotIn('aws-survey ec2 ', text)
+        self.assertNotIn('aws-survey lambda ', text)
+        self.assertNotIn('経路を足したあと', text)
+
+    def test_without_candidates_nothing_is_asked(self):
+        self.ready(agent='claude')
+        self.authed('claude')
+        code, text = self.drive(['scan'], [], env_extra={'FAKE_INVENTORY': json.dumps(self.INVENTORY), 'FAKE_SCAN_WRITES': '1'})
+        self.assertEqual(code, 0, text)
+        self.assertNotIn('中まで読めるようにする', text)
+
     def test_on_a_terminal_an_unreadable_account_falls_back_to_a_generic_estimate(self):
         self.ready(agent='claude')
         self.authed('claude')

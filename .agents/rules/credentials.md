@@ -61,14 +61,14 @@ ERROR ログ（`codex_core::tools::router`）は `RUST_LOG` で消す（環境�
 ログイン切れは JSON のエラー行（401 Unauthorized）が文章に戻るので `SCAN_LOG` の grep で判定できる（2026-09-13 に実測）。ホストから渡す指示は「基礎調査を報告（`report/構成報告.md`・`report/ユーザー確認事項.md`）まで・ユーザーに聞かずに終える・
 報告が既にあれば検証してから `survey-status` に出ている経路を読んで更新する・確認事項の回答欄は答えとして扱う・
 一時キーは自動で入れ替わるので時間で切り上げない」に限り、対象の概要・調査項目・サービス名を含めない（`tests/test_scan.py` が字面で見る）。
-何を集めて何を書くかはコンテナ側（`survey-agents.md`・`method/00`・`04`）にあり、Cost Explorer を入口にする話もそちらに書く。
+何を集めて何を書くかはコンテナ側（`survey-agents.md`・`method/調べ方.md`・`報告.md`）にあり、Cost Explorer を入口にする話もそちらに書く。
 報告まで書くと一時キーの上限（借りたロールからは 1 時間）を超えうるので、エージェントが動いているあいだ `scan_keys_loop` が一時キーを見張り、
 `survey-status` が「仕上げてください」を出す境目（総時間の 2/3、上限 40 分。`scan_refresh_min`）を切る前に `credentials.sh` を非対話で走らせて
 入れ替える（`$AWS_DIR` は ro のディレクトリマウントなので、書き換えれば次の `aws` 呼び出しから効く）。元プロファイルが切れていれば
 `credentials.sh` はログインのコマンドを対話で走らせようとするので、先に `sts get-caller-identity` で確かめ、切れていれば利用者に別の端末での
 `aws-survey credentials` を 1 度だけ案内して待つ（中の調査は続く）。間隔は `AWS_SURVEY_SCAN_KEY_INTERVAL`（既定 60 秒。テストが縮める）。
 `setup.scanned` を書くのは `report/構成報告.md` があるときだけで、無ければ「済んでいない扱い」と言って `scan` をもう一度案内する
-（次の回は `raw/` を使って続きから。`method/00`）。
+（次の回は `raw/` を使って続きから。`method/調べ方.md`）。
 Claude / Codex の認証はコンテナ内のボリュームに残る。判定は状態のボリューム 3 本だけを付けて各 CLI 自身に聞く
 （`launch_agent_authenticated`: `claude auth status --json` / `codex login status`。未認証なら終了コード 1。2026-09-12 に実測）。
 ファイル名を推測せず、トークンを環境変数で渡さない。
@@ -94,10 +94,15 @@ Claude はさらに `-p` の前にワークスペースの信頼を `.claude.jso
 ファイルにも `SCAN_PROMPT` にも入れない（対象の棚卸しを先渡ししない）。終わったら `scan_summary` が、この回に書かれたファイルだけを
 置き場所ごとに言い換えて示し（生データの件数と名前、`report/構成報告.md` と `report/ユーザー確認事項.md` の見出し。中身の要約はしない）、
 `scan_next` が次の 1 手（報告を読む → 任意で `ec2` / `lambda` の経路を足す → `claude` / `codex` で対話）を出す。
+端末では見積もりの列挙（`SCAN_INV`）から EC2（running・SSM Online・未登録）と Lambda（未取り出し）の候補を拾い、起動前に「中まで読めるようにする（任意）」を聞く（`scan_routes`）。
+EC2 は `ssh setup` → `role --create` → `credentials` → `ssh verify` の 4 手、Lambda は `lambda pull` を `ui_fold` で 1 手 1 行に畳んで通し、失敗したら警告してその経路なしで始める
+（ロールを借りている経路では導入までで止め、管理者への依頼を案内する）。候補が無ければ何も聞かない。端末でなければ聞かない。終わったあとの `scan_next` も同じ候補（`scan_candidates`。登録・取り出し済みを除いた残り）を数え、
+残りがあればその分だけ `ec2` / `lambda` / `scan` を並べ、無ければ「経路はすべて足してあり、報告に入っている」と言う（列挙が無い非端末では登録済みホストと取り出してあるコードの有無で出し分ける）。
+`choose_menu` が EXIT トラップを潰すので `SCAN_LOG` の trap より前に呼ぶ。エージェントに渡す指示にはこの結果を入れない（経路は `survey-status` から知る）。偽の `docker` と pty での検証は `tests/test_scan.py` の `ROUTES`。
 起動前に `docker ps` で `<name>`（対話コンテナ）と `<name>-scan` を見て、動いていれば止まる（同じ `out/` に 2 つのエージェントを走らせない）。
 初期調査が済んでいれば（`setup.scanned` あり）、一時キーを発行し直す前に前回の日時を出して「続けますか？ (y/N)」と聞く（打ち直しただけで数十分の調査を
 始めないため。Enter は続けない）。2 回目は白紙のやり直しではなく、エージェントが報告を検証し、足した経路（EC2 の中・Lambda のコード）と
-確認事項の回答欄を読んで報告を更新する（`method/00`）。引数なしの `aws-survey` も、初期調査済みで経路があれば `scan` を任意の 1 手として並べる。
+確認事項の回答欄を読んで報告を更新する（`method/調べ方.md`）。引数なしの `aws-survey` も、初期調査済みで経路があれば `scan` を任意の 1 手として並べる。
 端末でなければ `read_line` が諦めて `--force` を案内し、`scan --force` なら聞かずに進む。`out/` は消さない。
 一時キーの残りが短ければ（総時間の半分、上限 30 分。`keys.sh` の `key_session_min`。この絶対値はホスト側だけに置く）聞かずに発行し直してから始める（`key_ensure`）。
 
@@ -142,7 +147,7 @@ EC2 だけは登録のあとに 3 手（`role --create` → `credentials` → `s
 借りたロールでは `role --create` が管理者に頼む内容を出すだけなので、ループは状態が変わらないことを見て止まる。
 管理者が付けたあとの `role --create` は「付いているポリシー」から記録して先へ進む。
 `launch.sh`（`run` / `scan`）は `code/` を空でも作って常に読み取り専用でマウントする。調査中に `lambda pull` したものが起動し直さずに見えるようにするため
-（`method/07` の依頼文がそれを前提にしている）。
+（`method/経路.md` の依頼文がそれを前提にしている）。
 
 `lambda pull` の取り出し専用の一時キー（調査用ロールを Lambda の読み取り 4 つだけのインラインポリシーで借りる。`--policy-arns` は渡さない）は、
 ファイルに書かず、コマンドの引数（`ps` に出る）にも here-string（bash 3.2 では一時ファイルになる）にも載せない。`get-function` の応答には

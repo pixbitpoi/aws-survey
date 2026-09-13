@@ -17,6 +17,9 @@
 # 一時キーは ro のディレクトリマウントなので、書き換えればコンテナの次の aws 呼び出しから効く（survey-status もそう案内している）。
 # 初期調査が済んでいれば（setup.scanned）、前回の日時を出して、やり直すかを先に聞く（Enter は「やり直さない」。--force で聞かない）。
 # 報告が書かれないまま終わった回は setup.scanned を付けず、もう一度 scan を案内する（次の回は raw/ を使って続きから。method/調べ方.md）。
+# 端末では起動前に、量の見積もりの列挙で分かった EC2（SSM 管理下で稼働中・未登録）と Lambda（未取り出し）について、中まで読めるようにするかを聞き、
+# ssh setup → role --create → credentials → ssh verify と lambda pull をここから通してから 1 回起動する（scan_routes）。初回の報告に中まで入れるため。
+# エージェントは survey-status から経路を知るだけで、対象の概要は渡さない。
 # Claude / Codex の認証はコンテナ内のボリュームに残る。無ければ先に対話でログインだけ済ませ（launch.sh の launch_agent_login。
 # 通常は init が済ませている）、そのあと非対話で続ける。モデルと effort は environment.json の agent から渡す（libexec/agents.sh）。
 set -euo pipefail
@@ -57,9 +60,11 @@ on_terminal() { [ -t 0 ] && [ -t 1 ]; }
 # 時間は「150 秒 + 生データ 1 件あたり 50 秒 + 報告を書く 600 秒」、環境の確認（初回）があれば 120 秒足す。
 EST_REPORT_SECONDS=600
 EST_FILES=12; EST_SECONDS=$((150 + 50 * 12 + EST_REPORT_SECONDS))
+SCAN_INV=""      # 見積もりに使った列挙。scan_routes が EC2 と Lambda の候補を拾うのにも使う
 scan_estimate() {
   local inv billed cost_ok active denied items s note
   inv=$(container_inventory_spin cost ec2 lambda vpc s3 rds ecs elb cloudfront 2>/dev/null) || true
+  SCAN_INV="$inv"
   if [ -z "$inv" ] || ! jq -e 'select(.kind == "service" and .status == "ok")' <<< "$inv" >/dev/null 2>&1; then
     ui_text "調査の量を見積もれなかったので、一般的な目安（$(ui_duration "$EST_SECONDS")ほど）で進捗を出します。"
   else
@@ -76,6 +81,105 @@ scan_estimate() {
     [ -f "$OUT_DIR/.survey/env/check.md" ] || EST_SECONDS=$((EST_SECONDS + 120))
     ui_ok "見積もり: ${note}。目安は $(ui_duration "$EST_SECONDS")ほど（進捗は推定です）"
   fi
+}
+
+# ---- 経路を足す（端末だけ・任意）----
+# 見積もりの列挙にある EC2（running・SSM Online・未登録）と Lambda（未取り出し）を候補にして、起動前に聞く。
+# 足すのはホストのコマンドで、EC2 は ssh setup → role --create → credentials → ssh verify の 4 手（引数なしの aws-survey と同じ順）、
+# Lambda は lambda pull。ui_fold で 1 手 1 行に畳む（AWS_SURVEY_CHAIN=1 になるので、各コマンドは末尾の案内を黙り、ssh setup は
+# 自分で aws-survey に進まない）。失敗したら警告して、その経路なしで初期調査を始める（あとから足して scan し直せる。scan_next が案内する）。
+# ロールを借りている経路（auth.route が own_role でない）では role --create がポリシーを表示するだけなので、導入までで止めて管理者への依頼を案内する。
+# choose_menu / choose_multi は EXIT トラップを潰すので、SCAN_LOG の trap より前に呼ぶ。
+SSH_SH="$LIBEXEC_DIR/commands/ssh.sh"
+# まだ足していない候補を SCAN_INV から拾う（登録済み・取り出し済みは除く）。scan_routes の問いと、終わったあとの案内（scan_next）が使う
+#   scan_candidates → ec2_ids / ec2_labels / fn_names / fn_labels（呼ぶ側の配列）
+scan_candidates() {
+  local id name state ssm type modified registered
+  ec2_ids=(); ec2_labels=(); fn_names=(); fn_labels=()
+  [ -n "$SCAN_INV" ] || return 0
+  registered=$(jq -r '.ssh.hosts // {} | .[].instance_id' "$ENV_FILE" 2>/dev/null)
+  while IFS=$'\t' read -r id name state ssm type; do
+    [ -n "$id" ] || continue
+    [ "$state" = running ] && [ "$ssm" = Online ] || continue
+    ! grep -qx "$id" <<< "$registered" || continue
+    ec2_ids+=("$id"); ec2_labels+=("${id}${name:+  $name}${type:+  $type}")
+  done < <(jq -r 'select(.kind == "item" and .service == "ec2") | [.id, .name, .state, (.extra.ssm // "?"), (.extra.type // "")] | @tsv' <<< "$SCAN_INV")
+  while IFS=$'\t' read -r id state modified; do
+    [ -n "$id" ] || continue
+    [ ! -f "$AWS_SURVEY_DIR/code/lambda/$REGION/$id/_manifest.json" ] || continue
+    fn_names+=("$id"); fn_labels+=("${id}  更新 ${modified%%.*}")
+  done < <(jq -r 'select(.kind == "item" and .service == "lambda") | [.id, .state, (.extra.modified // "")] | @tsv' <<< "$SCAN_INV")
+}
+scan_routes() {
+  local -a ec2_ids=() ec2_labels=() fn_names=() fn_labels=() chosen=()
+  local id picks sel act alias ok=0 failed=0
+  scan_candidates
+  [ ${#ec2_ids[@]} -gt 0 ] || [ ${#fn_names[@]} -gt 0 ] || return 0
+
+  echo ""
+  ui_head "中まで読めるようにする（任意）"
+  ui_text "AWS の API で見えるのはリソースの外側までです。先に経路を足すと、EC2 の中（ログ・サービスの状態）と Lambda のコードが初期調査の報告に入ります。"
+  ui_text "足すのはこのホストでの作業で、EC2 には診断ゲートウェイを置きます（読むだけ。あとで $AWS_SURVEY_CMD ssh remove で外せます）。"
+  echo ""
+
+  if [ ${#ec2_ids[@]} -gt 0 ]; then
+    choose_menu act "EC2 が ${#ec2_ids[@]} 台あります（SSM 管理下で稼働中・未登録）。中を調べられるようにしますか？" 0 \
+      "一覧から選んで登録する" "今回は足さない"
+    ui_ok "EC2: $act"
+    if [ "$act" = "一覧から選んで登録する" ]; then
+      chosen=()
+      choose_multi picks "中を調べたいインスタンスを選んでください（Space で複数）" "${ec2_labels[@]}"
+      for sel in $picks; do chosen+=("${ec2_ids[sel]}"); ui_ok "${ec2_labels[sel]}"; done
+      ok=0
+      for id in "${chosen[@]}"; do
+        if ui_fold "EC2 ${id} に診断ゲートウェイを導入した" "$AWS_SURVEY_CMD ssh setup $id" bash "$SSH_SH" setup "$id"; then ok=$((ok + 1)); else failed=1; fi
+      done
+      if [ "$ok" -gt 0 ]; then
+        if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
+          ui_fold "接続を許すポリシーを調査用ロールに付けた" "$AWS_SURVEY_CMD role --create" bash "$LIBEXEC_DIR/commands/role.sh" --create \
+            && ui_fold "その権限を含めて一時キーを発行し直した" "$AWS_SURVEY_CMD credentials" bash "$LIBEXEC_DIR/commands/credentials.sh" < /dev/null \
+            || failed=1
+          if [ "$failed" -eq 0 ]; then
+            for id in "${chosen[@]}"; do
+              alias=$(jq -r --arg id "$id" '.ssh.hosts // {} | to_entries[] | select(.value.instance_id == $id) | .key' "$ENV_FILE" 2>/dev/null | head -n 1)
+              [ -n "$alias" ] || continue
+              ui_fold "${alias} に調査コンテナから接続して確かめた" "$AWS_SURVEY_CMD ssh verify $alias" bash "$SSH_SH" verify "$alias" || failed=1
+            done
+          fi
+        else
+          ui_warn "ロールを借りているので、接続を許すポリシーは管理者に付けてもらう必要があります。$(ui_cmd "$AWS_SURVEY_CMD") がポリシーを表示します"
+          ui_text "付いたら $(ui_cmd "$AWS_SURVEY_CMD") で残りの手を進め、$(ui_cmd "$AWS_SURVEY_CMD scan") をもう一度実行すると中を読んで報告を更新します。"
+          failed=1
+        fi
+      fi
+    fi
+    echo ""
+  fi
+
+  if [ ${#fn_names[@]} -gt 0 ]; then
+    choose_menu act "Lambda 関数が ${#fn_names[@]} 個あります（未取り出し）。コードを取り出して読めるようにしますか？" 0 \
+      "全部取り出す" "一覧から選ぶ" "今回は足さない"
+    ui_ok "Lambda: $act"
+    chosen=()
+    case "$act" in
+      "全部取り出す") chosen=("${fn_names[@]}") ;;
+      "一覧から選ぶ")
+        choose_multi picks "コードを読みたい関数を選んでください（Space で複数）" "${fn_labels[@]}"
+        for sel in $picks; do chosen+=("${fn_names[sel]}"); ui_ok "${fn_labels[sel]}"; done ;;
+    esac
+    if [ ${#chosen[@]} -gt 0 ]; then
+      ui_fold "Lambda のコードを取り出した（${#chosen[@]} 関数）" "$AWS_SURVEY_CMD lambda pull ${chosen[*]}" bash "$LIBEXEC_DIR/commands/lambda.sh" pull "${chosen[@]}" < /dev/null || failed=1
+    fi
+    echo ""
+  fi
+
+  if [ "$failed" -ne 0 ]; then
+    ui_warn "足せなかった経路があります。初期調査はそのまま始めます（あとから足して $AWS_SURVEY_CMD scan をもう一度実行すると、中を読んで報告を更新します）"
+    echo ""
+  fi
+  # 経路を足すと環境の記録（登録済みホスト）が変わる。起動時の判定は load-env.sh が読んだ値を使うので、読み直す
+  SSH_HOSTS=$(jq -r '.ssh.hosts // {} | keys | join(" ")' "$ENV_FILE")
+  return 0
 }
 
 # ---- 進捗 ----
@@ -211,17 +315,35 @@ scan_summary() (   # サブシェル。無いフォルダや空の grep で止�
       done
 )
 
-# 次の 1 手。報告を読む → 中を見る経路を足す（任意）→ 対話で続ける。EC2 と Lambda の一覧は各コマンドが出すので、ここでは並べない
+# 次の 1 手。報告を読む → まだ足していない経路があればそれを足す（任意）→ 対話で続ける。
+# 経路の案内は実態に合わせる: 見積もりの列挙（SCAN_INV）から残りの候補を数え、無ければ ec2 / lambda を並べない。
+# 列挙が無い（端末でない）ときは、登録済みホストと取り出してあるコードの有無で出し分ける。EC2 と Lambda の一覧は各コマンドが出すので、ここでは並べない
 #   scan_next <エージェント>
 scan_next() {
-  local agent="$1"
+  local agent="$1" pulled
+  local -a ec2_ids=() ec2_labels=() fn_names=() fn_labels=()
   ui_head "次にやること"
   ui_text "報告（$(ui_path "$OUT_DIR/report/構成報告.md")）を読みます。確認事項（$(ui_path "$OUT_DIR/report/ユーザー確認事項.md")）には回答欄があり、そこに書けば次の回が読みます。"
-  ui_text "AWS の API で見えるのはリソースの外側までです。中まで調べるなら、先に経路を足します（要らなければ飛ばせます）。"
-  also_cmd "$AWS_SURVEY_CMD ec2" "EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
-  also_cmd "$AWS_SURVEY_CMD lambda" "Lambda のコードを取り出して読めるようにします。一覧から選びます"
-  also_cmd "$AWS_SURVEY_CMD scan" "経路を足したあと、もう一度実行すると、中を読んで報告を非対話で更新します"
-  echo ""
+  pulled=0   # code/lambda が無いと find が失敗する（set -e / pipefail）ので、あるときだけ数える
+  [ ! -d "$AWS_SURVEY_DIR/code/lambda" ] || pulled=$(find "$AWS_SURVEY_DIR/code/lambda" -mindepth 3 -maxdepth 3 -name _manifest.json 2>/dev/null | wc -l | tr -d ' ')
+  if [ -n "$SCAN_INV" ]; then
+    scan_candidates
+    if [ ${#ec2_ids[@]} -gt 0 ] || [ ${#fn_names[@]} -gt 0 ]; then
+      ui_text "まだ中を読めるようにしていないものがあります（EC2 ${#ec2_ids[@]} 台・Lambda ${#fn_names[@]} 関数）。足すなら、先に経路を足してからもう一度 scan します（要らなければ飛ばせます）。"
+      [ ${#ec2_ids[@]} -eq 0 ] || also_cmd "$AWS_SURVEY_CMD ec2" "EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
+      [ ${#fn_names[@]} -eq 0 ] || also_cmd "$AWS_SURVEY_CMD lambda" "Lambda のコードを取り出して読めるようにします。一覧から選びます"
+      also_cmd "$AWS_SURVEY_CMD scan" "経路を足したあと、もう一度実行すると、中を読んで報告を非対話で更新します"
+      echo ""
+    elif [ -n "$SSH_HOSTS" ] || [ "${pulled:-0}" -gt 0 ]; then
+      ui_text "中を読む経路（${SSH_HOSTS:+EC2 ${SSH_HOSTS}}${SSH_HOSTS:+${pulled:+・}}${pulled:+Lambda ${pulled} 関数}）はすべて足してあり、報告に入っています。"
+    fi
+  elif [ -z "$SSH_HOSTS" ] && [ "${pulled:-0}" -eq 0 ]; then
+    ui_text "AWS の API で見えるのはリソースの外側までです。中まで調べるなら、先に経路を足します（要らなければ飛ばせます）。"
+    also_cmd "$AWS_SURVEY_CMD ec2" "EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
+    also_cmd "$AWS_SURVEY_CMD lambda" "Lambda のコードを取り出して読めるようにします。一覧から選びます"
+    also_cmd "$AWS_SURVEY_CMD scan" "経路を足したあと、もう一度実行すると、中を読んで報告を非対話で更新します"
+    echo ""
+  fi
   next_cmd "$AWS_SURVEY_CMD $agent" "報告を手に対話で続けます。質問への回答・中を読む・確認事項の答えを伝える、のどれからでも"
 }
 
@@ -294,7 +416,13 @@ launch_prepare_dirs
 launch_agent_login "$AGENT" || exit 1
 echo ""
 
-# ---- 5. 実行 ----
+# ---- 5. 経路（端末だけ）と実行 ----
+# 見積もりの列挙は経路の候補にも使うので、端末では先に読む。scan_routes は EXIT トラップを潰す（choose_menu）ので、SCAN_LOG の trap より前
+if on_terminal; then
+  scan_estimate
+  scan_routes
+  echo ""
+fi
 ui_head "初期調査（$(agent_label "$AGENT")）"
 ui_text "対象アカウントに何があるかを洗い出し、構成の報告と確認事項を out/ に書きます。質問はしないので、待つだけです。"
 ui_text "止めるときは Ctrl-C（もう一度 $AWS_SURVEY_CMD scan を実行すると、それまでに残した生データを使って続きから書きます）。"
@@ -324,8 +452,7 @@ agent_cmd() {
 }
 status=0
 if on_terminal; then
-  # 端末では先に量を見積もり、回転する印と推定の進捗を 1 行に出し続ける。エージェントの出力はその上に流す（keep）
-  scan_estimate
+  # 端末では回転する印と推定の進捗を 1 行に出し続ける。エージェントの出力はその上に流す（keep）
   scan_start=$(date +%s)
   SPIN_DIR=$(mktemp -d) || ui_die "一時ディレクトリを作れません。"
   : > "$SPIN_DIR/keep"; touch "$START_MARK"; printf '%s' "初期調査中 $(scan_bar 0)  始めています" > "$SPIN_DIR/msg"
