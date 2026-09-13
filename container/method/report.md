@@ -33,55 +33,123 @@
 
 ### 2. 構成図
 
-C4 モデルで描きます。Structurizr DSL を `out/report/c4/workspace.dsl` に書き、報告のこの節には PNG を貼ります。
+C4 モデルで、3 つの高さから描きます。Structurizr DSL を `out/report/c4/workspace.dsl` に書き、報告のこの節には PNG を貼ります。
 PNG はこの環境では作れません。この回の終わりに外で作られ、`out/report/c4/<ビューのキー>.png`（凡例は `<ビューのキー>-key.png`）として
 同じ場所に置かれます。DSL に誤りがあると `out/report/c4/_render-error.txt` に原因が置かれるので、`survey-status` にそれが出ていたら
 読んで DSL を直すのが先です。DSL の文法はこの環境では確かめられないので、下の見本の形から外れないでください。
 
-**書き方。**
+**3 つの高さ。** 読み手は上から順に降りていきます。1 つの系統につき 3 枚です。
 
-- 系統（独立したシステム）1 つが `softwareSystem`、その中の AWS リソースが `container`。技術の欄に種類（`ECS Fargate x2`、`Aurora MySQL`）を書きます
-- 利用者は `person`、AWS の外のもの（GitHub Actions・SaaS・他のアカウント）は `softwareSystem` に `tags "外部"`
-- 線は繋がりが分かっているものだけ。推測の線は `tags "推測"`（点線になる）。参照先が存在しないものは `tags "存在しない"`。
-  データストアは `tags "データ"`（円筒になる）。図に入らなかったものは 4 節に書きます
-- ビューは `systemLandscape "landscape"`（全体）と、系統ごとの `container <系統> "<系統>-containers"`。キーは英数字とハイフンだけ（ファイル名になる）
-- どのビューにも `include *` と `autoLayout lr` を書きます。`theme`・`!include`・URL は使いません（外に出ない環境なので効かない）。
-  `styles` は見本のものをそのまま写します
-- 報告のこの節には `![全体](c4/landscape.png)` と系統ごとの `![shop](c4/shop-containers.png)` を、1 行ずつ貼ります
+| ビュー | キー | 何を見せるか |
+| --- | --- | --- |
+| `systemLandscape` | `landscape` | 系統（独立したシステム）と、利用者、AWS の外のもの（SaaS・他アカウント・デプロイ元）。系統同士の繋がりも |
+| `container <系統>` | `<系統>-containers` | その系統の AWS リソース 1 つ 1 つと、入口 → コンピュート → データストアの繋がり。EC2 の中で動くもの（nginx・アプリ・同居する DB）は 1 つずつ `container` にし、ホスト名の `group` で囲む |
+| `deployment <系統>` | `<系統>-deployment` | どこに置かれているか。リージョン → VPC → サブネット → インスタンスの入れ子（`deploymentNode`）。VPC の外のマネージドサービスは「VPC 外」の node にまとめる。SG の要点・CIDR・インスタンスタイプは node の名前と説明に |
+
+**分類。** すべての要素に次のタグを 1 つ付けます（見た目は `styles` が決める。凡例に出る）。状態のタグは重ねて付けます。
+
+| タグ | 何 | 見た目 |
+| --- | --- | --- |
+| `入口` | CloudFront・ALB / NLB・API Gateway・関数 URL・Route 53 のレコード | 緑 |
+| `コンピュート` | EC2 の中のプロセス・ECS サービス・Lambda・App Runner・バッチ | 青 |
+| `データ` | RDS / Aurora・DynamoDB・ElastiCache・S3・EFS・Secrets / パラメータ | 紫の円筒 |
+| `非同期` | SQS・SNS・EventBridge・Step Functions・Kinesis | 橙のパイプ |
+| `監視` | アラーム・ロググループ・通知先 | 灰青 |
+| `外部` | AWS の外（`softwareSystem` に付ける） | 灰 |
+| `存在しない` | 参照されているが実体が無い（重ねて付ける） | 白地に赤の破線 |
+| `停止中` | 止まっている・呼ばれた形跡が無い（重ねて付ける） | 薄灰 |
+
+**粒度。** 1 リソース 1 要素。「Lambda ×3」のようにまとめません。3 節の表にある行は、原則すべて図のどこかにあります。
+環境（prod / stg）や世代が分かれていれば、系統を分けるか、配置図の `deploymentEnvironment` を分けます。
+図に入らなかったものは 4 節に書きます。
+
+**線。** 繋がりが分かっているものだけ引き、ラベルはポート・API 名・トリガーのように短く（10 字程度）。理由や根拠は本文に書きます。
+推測の線は `tags "推測"`（点線）。方向は呼ぶ側 → 呼ばれる側。
+
+**書き方の決まり。**
+
+- 系統 1 つが `softwareSystem`、その中の AWS リソースが `container`。技術の欄に種類と版（`ECS Fargate x2`、`Aurora MySQL 8`）
+- 利用者は `person`。AWS の外は `softwareSystem` に `tags "外部"`
+- キーは英数字とハイフンだけ（ファイル名になる）。どのビューにも `include *` と `autoLayout lr`
+- `theme`・`!include`・URL は使いません（外に出ない環境なので効かない）。`styles` は見本のものをそのまま写します
+- 秘密の値・アカウント ID・IP アドレス（CIDR は可）を図に入れません
+- 報告のこの節には、全体 → 系統ごとに構成図 → 配置図の順で、1 行ずつ貼ります:
+  `![全体](c4/landscape.png)`、`![shop の構成](c4/shop-containers.png)`、`![shop の配置](c4/shop-deployment.png)`
 - 本文の中で小さく見せたい流れ（非同期の順序・バッチの並び・状態遷移）は Mermaid で本文に書いて構いません。C4 の代わりにはしません
 
-**見本**（`workspace.dsl`。名前・説明・線は対象に合わせて書き換え、`styles` はそのまま）:
+**見本**（`workspace.dsl`。名前・説明・線・node は対象に合わせて書き換え、`styles` はそのまま）:
 
 ```
 workspace "アカウント 123456789012 の構成" {
     model {
         user = person "利用者" "ブラウザ"
-        github = softwareSystem "GitHub Actions" "デプロイ元（AWS の外）" {
+        github = softwareSystem "GitHub Actions" "デプロイ元" {
             tags "外部"
         }
         shop = softwareSystem "shop（EC サイト）" "注文 API と決済らしい" {
-            cf  = container "CloudFront d1234" "配信" "CloudFront"
-            alb = container "ALB shop-prod" "入口" "ALB"
-            api = container "shop-api" "注文 API" "ECS Fargate x2"
-            db  = container "shop-db" "注文データ" "Aurora MySQL" {
-                tags "データ"
+            cf  = container "CloudFront d1234" "配信" "CloudFront" {
+                tags "入口"
             }
-            q   = container "shop-jobs" "非同期ジョブ" "SQS"
-            fn  = container "shop-worker" "領収書を S3 に置くらしい（コード未読）" "Lambda Python 3.12"
-            s3  = container "shop-receipts" "存在しない" "S3" {
+            alb = container "ALB shop-prod" "入口" "ALB" {
+                tags "入口"
+            }
+            group "EC2 web2（同居）" {
+                nginx = container "nginx" "80 で受けて転送" "nginx" {
+                    tags "コンピュート"
+                }
+                api = container "shop API" "注文 API" "Python 3" {
+                    tags "コンピュート"
+                }
+                pg = container "PostgreSQL" "注文データ" "PostgreSQL 15" {
+                    tags "データ"
+                }
+            }
+            q   = container "shop-jobs" "非同期ジョブ" "SQS" {
+                tags "非同期"
+            }
+            fn  = container "shop-worker" "領収書を置くらしい（コード未読）" "Lambda Python 3.12" {
+                tags "コンピュート"
+            }
+            s3  = container "shop-receipts" "参照されるが実体なし" "S3" {
                 tags "データ" "存在しない"
+            }
+            alarm = container "shop-cpu-high" "CPU 80% で通知先なし" "CloudWatch アラーム" {
+                tags "監視"
             }
         }
         user -> cf "HTTPS"
         cf -> alb "443"
-        alb -> api "443"
-        api -> db "3306"
+        alb -> nginx "80"
+        nginx -> api "8000"
+        api -> pg "5432"
         api -> q "SendMessage"
         q -> fn "トリガー"
         fn -> s3 "PutObject" {
             tags "推測"
         }
-        github -> api "デプロイ（OIDC）"
+        alarm -> api "監視"
+        github -> fn "デプロイ（OIDC）"
+
+        prod = deploymentEnvironment "本番" {
+            deploymentNode "ap-northeast-1" "" "リージョン" {
+                deploymentNode "CloudFront / Lambda（VPC 外）" "" "マネージド" {
+                    containerInstance cf
+                    containerInstance fn
+                    containerInstance q
+                    containerInstance alarm
+                }
+                deploymentNode "vpc-0abc（10.0.0.0/16）" "" "VPC" {
+                    deploymentNode "public-1a（10.0.1.0/24）" "" "サブネット" {
+                        containerInstance alb
+                        deploymentNode "web2（t3.micro）" "SG: 80 を ALB から" "EC2 Amazon Linux 2023" {
+                            containerInstance nginx
+                            containerInstance api
+                            containerInstance pg
+                        }
+                    }
+                }
+            }
+        }
     }
     views {
         systemLandscape "landscape" {
@@ -89,6 +157,10 @@ workspace "アカウント 123456789012 の構成" {
             autoLayout lr
         }
         container shop "shop-containers" {
+            include *
+            autoLayout lr
+        }
+        deployment shop "本番" "shop-deployment" {
             include *
             autoLayout lr
         }
@@ -101,16 +173,34 @@ workspace "アカウント 123456789012 の構成" {
                 shape person
                 background #08427b
             }
-            element "外部" {
-                background #999999
+            element "入口" {
+                background #2e7d32
+            }
+            element "コンピュート" {
+                background #1168bd
             }
             element "データ" {
                 shape cylinder
+                background #6a1b9a
+            }
+            element "非同期" {
+                shape pipe
+                background #ef6c00
+            }
+            element "監視" {
+                background #546e7a
+            }
+            element "外部" {
+                background #999999
             }
             element "存在しない" {
                 background #ffffff
                 color #cc0000
                 border dashed
+            }
+            element "停止中" {
+                background #bdbdbd
+                color #424242
             }
             relationship "Relationship" {
                 dashed false
@@ -217,7 +307,7 @@ AWS の API では決められなかったことを、何を見れば決まる�
 報告を「書けた」と言う前に、読み手の立場で確かめます。
 
 - [ ] 1 節だけ読んで、このアカウントが何をしているか（または分からない理由）が言える
-- [ ] `c4/workspace.dsl` があり、ビューが 3 節の系統と 1 対 1 で、線が 3 節の経路と食い違わない。`c4/_render-error.txt` が無い
+- [ ] `c4/workspace.dsl` があり、系統ごとに構成図と配置図があり、3 節の表の行が図にあり、線が 3 節の経路と食い違わない。`c4/_render-error.txt` が無い
 - [ ] 主要なリソース（コンピュート・データストア・入口・ロール）が 1 つずつ表にあり、役割が書いてある。本文に「〜は N 個」だけの文が無い
 - [ ] 6 節に、事実の突き合わせから言えることが根拠つきで書いてある（本当に何も無いなら、そう書いてある）
 - [ ] 推測が推測と分かる書き方になっている。読めなかったもの・見ていないリージョンが書いてある
