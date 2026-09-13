@@ -15,13 +15,9 @@
 set -uo pipefail
 
 # ~/.aws-claude は読み取り専用マウントなので、書き込める out/ に出す。
-# 置き場は out/_環境/ = 「この環境自体の記録」の区画（フェーズの成果物とは分ける）。
-LOG="${SURVEY_AUDIT_LOG:-$HOME/aws-survey/out/_環境/aws-audit.log}"
+# 置き場は out/.survey/env/ = 「この環境自体の記録」の区画（調査の成果物 report/ とは分ける）。
+LOG="${SURVEY_AUDIT_LOG:-$HOME/aws-survey/out/.survey/env/aws-audit.log}"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
-
-# 例示に使う保存先。run.sh が現在のフェーズを環境変数で渡す。
-# 渡っていない場合でも、拒否理由が古いフェーズ名を指さないようにしておく。
-PHASE="${SURVEY_PHASE_DIR:-<フェーズ>}"
 
 payload=$(cat)
 cmd=$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
@@ -42,10 +38,10 @@ deny() {
 ・aws と ec2 は単独で、1 行で実行してください（パイプ・連結・\$()・改行は不可）
 ・EC2 の中は ec2 <host> <動詞> [引数...] で調べます（ssh / scp / sftp の直接実行は不可）
 ・生の JSON を保存するときは次の形が使えます:
-    aws ec2 describe-instances --max-items 100 > out/${PHASE}/raw/raw-ec2.json
+    aws ec2 describe-instances --max-items 100 > out/.survey/raw/raw-ec2.json
   保存先は out/ 配下（サブフォルダ可・.. は不可）・拡張子は json / txt / csv のみです。
 ・保存した JSON は jq で必要な部分だけ取り出してください:
-    jq '[.Reservations[].Instances[] | {id:.InstanceId}]' out/${PHASE}/raw/raw-ec2.json
+    jq '[.Reservations[].Instances[] | {id:.InstanceId}]' out/.survey/raw/raw-ec2.json
 ・軽い絞り込みは --query と --output でも構いません
 MSG
   exit 2
@@ -101,7 +97,7 @@ fi
 # 生の JSON をファイルに落とせないと、出力が必ずエージェントの文脈を経由してしまい
 # トークンを浪費するため。out/ 以外は root 所有で書き込めないので、書ける場所は増えない。
 #
-# out/ 配下のサブディレクトリも許可する（フェーズごとに out/NN_名前/raw/ に分けるため）。
+# out/ 配下のサブディレクトリも許可する（生データは out/.survey/raw/、環境の記録は out/.survey/env/）。
 # 文字クラスは「危険な ASCII を除く」形にしてある。日本語のフォルダ名を通すためで、
 # 代わりに .. による脱出を明示的に塞いでいる。
 # 改行は norm で空白に潰れるため、生のコマンドで見る。2 行目以降は別のコマンドとして実行される。

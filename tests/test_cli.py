@@ -295,8 +295,8 @@ class StateTable(CliCase):
     def test_stage_5_survey_started(self):
         self.verified()
         self.write_keys(iso(datetime.now(timezone.utc) + timedelta(minutes=45)))
-        (self.target / 'out').mkdir()
-        (self.target / 'out/00_進捗.md').write_text('# 進捗\n')
+        (self.target / 'out/.survey').mkdir(parents=True)
+        (self.target / 'out/.survey/state.md').write_text('# 台帳\n')
         self.assert_stage(self.run_cli(), 6, '開始済み', '対話で開始済み')
 
     def test_stage_6_after_scan_names_the_remembered_agent(self):
@@ -678,7 +678,7 @@ class Init(CliCase):
         self.assertEqual(config['auth']['refresh_command'], None)
         self.assertEqual(config['auth']['duration_seconds'], 10800)     # 既定は 3 時間
         self.assertEqual(config['auth']['role_name'], 'aws-survey-readonly')
-        self.assertEqual(config['phase_dir'], '01_基礎調査')
+        self.assertNotIn('phase_dir', config)                              # out/ is report/ raw/ .survey/; no phase folders
         self.assertEqual(config['setup'], {k: None for k in template['setup']})
         loaded = self.load_env()
         self.assertEqual(loaded.returncode, 0, loaded.stderr)
@@ -732,7 +732,7 @@ class Init(CliCase):
         distribution: everything after launch belongs to the survey agent in the container.
         """
         self.run_cli('init', **INIT_ENV)
-        self.assertTrue((self.target / 'out/_環境').is_dir())
+        self.assertTrue((self.target / 'out/.survey/env').is_dir())
         agents = (self.target / 'AGENTS.md').read_text()
         self.assertNotIn('.agents/rules', agents)
         self.assertIn('対象の概要・調査項目', agents)
@@ -1091,7 +1091,7 @@ class Init(CliCase):
         self.assertEqual((fake_home / 'AGENTS.md').read_text(), 'body\n')
         self.assertFalse((fake_home / 'CLAUDE.md').exists())
         self.assertTrue((fake_home / 'environment.json').exists())
-        self.assertTrue((fake_home / 'out/_環境').is_dir())
+        self.assertTrue((fake_home / 'out/.survey/env').is_dir())
 
     def test_role_create_records_own_role_when_unset(self):
         self.run_cli('init', **INIT_ENV)
@@ -1447,7 +1447,7 @@ class EmptyFolderToRun(CliCase):
         self.assertEqual(launch[0], 'docker')
         self.assertIn(f'{self.target}/out:/home/node/aws-survey/out', launch)
         self.assertIn(f'{self.home}/.aws-survey/target:/home/node/.aws-claude:ro', launch)
-        self.assertTrue((self.target / 'out/01_基礎調査/raw').is_dir())
+        self.assertTrue((self.target / 'out/.survey/raw').is_dir())
         # No wrapper scripts at the repository root: the only entry point is bin/aws-survey.
         self.assertFalse((ROOT / 'run.sh').exists())
         self.assertFalse((ROOT / 'aws-survey').exists())

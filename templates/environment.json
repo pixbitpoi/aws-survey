@@ -11,7 +11,6 @@
     "refresh_command": "TEMPLATE-元プロファイルを有効にし直すコマンド（例 aws-login --profile foo）。無ければ null",
     "duration_seconds": 10800
   },
-  "phase_dir": "01_基礎調査",
   "agent": {
     "name": null,
     "model": null,

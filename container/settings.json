@@ -16,8 +16,10 @@
       "Bash(claude --version)",
       "Bash(codex --version)",
       "Read(//home/node/aws-survey/out/**)",
+      "Read(//home/node/aws-survey/out/.survey/**)",
       "Read(//home/node/aws-survey/code/**)",
-      "Edit(//home/node/aws-survey/out/**)"
+      "Edit(//home/node/aws-survey/out/**)",
+      "Edit(//home/node/aws-survey/out/.survey/**)"
     ],
     "deny": [
       "Bash(sudo:*)",
@@ -43,7 +45,7 @@
       "Bash(session-manager-plugin:*)",
       "WebFetch",
       "WebSearch",
-      "Edit(//home/node/aws-survey/out/_環境/aws-audit.log)",
+      "Edit(//home/node/aws-survey/out/.survey/env/aws-audit.log)",
       "Read(//home/node/.aws-claude/**)",
       "Read(//home/node/aws-survey/.claude/**)",
       "Edit(//home/node/aws-survey/.claude/**)"

@@ -14,13 +14,13 @@ CLI_VOLUME="${SURVEY_NAME}-cli"
 NPM_VOLUME="${SURVEY_NAME}-npm"
 OUT_DIR="$AWS_SURVEY_DIR/out"
 
-# 成果物の置き場。フェーズごとにフォルダを分ける（out/NN_フェーズ名/ と その raw/ log/ report/）。
-# out/_環境/ は「この環境自体の記録」＝ 動作確認の結果と監査ログ（ホスト側で回収する証跡）。
-# コンテナ内からは mkdir できてもよいが、現在のフェーズの器はホスト側で用意しておく。
+# 成果物の置き場。out/report/（人が読む）と out/.survey/（生データ・エージェントの台帳・ログ）の 2 つ。
+# out/.survey/env/ は「この環境自体の記録」＝ 動作確認の結果と監査ログ（ホスト側で回収する証跡）。
+# コンテナ内からは mkdir できてもよいが、器はホスト側で用意しておく。
 # code/（aws-survey lambda pull の取り出し先）は空でも作って常に読み取り専用で渡す。コンテナを動かしたまま
 # lambda pull したものが起動し直さずに見える（method/07 の依頼文の前提）
 launch_prepare_dirs() {
-  mkdir -p "$OUT_DIR" "$OUT_DIR/_環境" "$OUT_DIR/$SURVEY_PHASE_DIR/raw" "$OUT_DIR/$SURVEY_PHASE_DIR/log" "$OUT_DIR/$SURVEY_PHASE_DIR/report"
+  mkdir -p "$OUT_DIR/report" "$OUT_DIR/.survey/raw" "$OUT_DIR/.survey/log" "$OUT_DIR/.survey/env"
   mkdir -p "$AWS_SURVEY_DIR/code"
 }
 
@@ -56,14 +56,13 @@ launch_run() {
     -v "$NPM_VOLUME:/home/node/.npm-global" \
     -e TZ=Asia/Tokyo \
     -e "AWS_DEFAULT_REGION=$REGION" \
-    -e "SURVEY_PHASE_DIR=$SURVEY_PHASE_DIR" \
     "$IMAGE" "$@"
 }
 
 # 初回の動作確認が済んでいれば、到達点として environment.json に記録する。
 # 記録するのは「調査エージェントが確認結果を書いた」ことまで。中身は判断しない。
 launch_record_verified() {
-  local note="$OUT_DIR/_環境/00_動作確認.md"
+  local note="$OUT_DIR/.survey/env/check.md"
   if [ -s "$note" ] && [ -z "$(jq -r '.setup.container_verified // empty' "$ENV_FILE")" ]; then
     echo ""
     env_mark_setup container_verified "コンテナの中で環境を確かめた"

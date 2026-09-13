@@ -386,7 +386,7 @@ EC2 の `ssh setup` と同じ扱いで書いてよいかを §11 で決める。
    依存の除外と一覧・ソースマップからの復元・alias の版のディレクトリ・レイヤーの判定・仕込んだ値と署名付き URL が残っていないこと）
 4. 取り直しと一覧: 2 回目の `pull` は「変わっていません」、`aws-survey lambda list`
 5. 調査コンテナ（Claude Code と Codex の両方）。`survey-status` に取り出してある関数の数が出ること。フックと `settings.json` を変えたので、
-   `method/03` の動作確認をやり直させて `out/_環境/00_動作確認.md` に追記させる。加えて `lambda get-function` が拒否されること、
+   `method/03` の動作確認をやり直させて `out/.survey/env/check.md` に追記させる。加えて `lambda get-function` が拒否されること、
    `WebFetch` が拒否されること（Claude Code）、`grep -rn boto3 code/` が通ること、`method/07` に沿って 2 つの関数の入口・呼んでいる AWS・
    環境変数の名前を読み、設定と突き合わせられること。`out/` に仕込んだ値（`LEAKCHECK-` と環境変数の値）が写っていないこと
 6. 片付け: 対象フォルダで `aws-survey lambda remove --all`、`tests/live/lambda/cleanup.sh`

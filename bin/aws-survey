@@ -108,7 +108,7 @@ load_env() { . "$LIBEXEC_DIR/load-env.sh"; }
 
 setup_value() { jq -r --arg k "$1" '.setup[$k] // empty' "$ENV_FILE"; }
 
-survey_started() { [ -f "$AWS_SURVEY_DIR/out/00_進捗.md" ]; }
+survey_started() { [ -f "$AWS_SURVEY_DIR/out/.survey/state.md" ]; }
 scan_done()      { [ -n "$(setup_value scanned)" ]; }
 
 # ---- 任意の追加（EC2 の中を調べる・Lambda のコードを読む）----
@@ -295,7 +295,7 @@ cmd_guide() {
   esac
   STAGE_DONE[4]="残り約 ${KEY_LEFT_MIN} 分 / ${KEY_TOTAL_MIN} 分${KEY_NOTE}（期限 ${KEY_EXP}）"
 
-  # 段階 5（初期調査）は scan で初期調査（生データと報告）を済ませたか。対話で始めていれば（out/00_進捗.md あり）済んだ扱いで 6 へ
+  # 段階 5（初期調査）は scan で初期調査（生データと報告）を済ませたか。対話で始めていれば（out/.survey/state.md あり）済んだ扱いで 6 へ
   local cur=5
   if scan_done; then
     cur=6; STAGE_DONE[5]="済（$(setup_value scanned)）"
@@ -316,9 +316,9 @@ cmd_guide() {
   if [ "$cur" -eq 5 ]; then
     show_track 5 "初期調査: 未実施。$(agent_label "${SURVEY_AGENT:-}") が非対話で 1 回行います（ユーザーには聞きません）"
   elif survey_started; then
-    show_track 6 "調査: 開始済み（out/00_進捗.md あり）。続きはコンテナ内の台帳に従います"
+    show_track 6 "調査: 開始済み（out/.survey/state.md あり）。続きはコンテナ内の台帳に従います"
   else
-    show_track 6 "調査: 初期調査済み（報告は out/ の report/ に）。続きはコンテナ内でユーザーと対話で進めます"
+    show_track 6 "調査: 初期調査済み（報告は out/report/ に）。続きはコンテナ内でユーザーと対話で進めます"
   fi
   show_extras brief
   guide_ready
@@ -341,6 +341,9 @@ guide_ready() {
   fi
   [ -n "$SSH_HOSTS" ] || also_cmd "$CMD_NAME ec2" "任意。EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
   [ "$(lambda_pulled_count)" -gt 0 ] || also_cmd "$CMD_NAME lambda" "任意。Lambda のコードを取り出して読めるようにします。一覧から選びます"
+  if scan_done && { [ -n "$SSH_HOSTS" ] || [ "$(lambda_pulled_count)" -gt 0 ]; }; then
+    also_cmd "$CMD_NAME scan" "任意。足した経路（EC2 の中・Lambda のコード）を非対話で読み、報告を更新します"
+  fi
   if [ -n "$agent" ]; then
     also_cmd "$CMD_NAME $agent" "$(agent_label "$agent") と対話で調査を進めます"
     case "$agent" in
@@ -463,7 +466,7 @@ cmd_guide_loop() {
 # 聞くのは AWS への繋ぎ方と、調査に使うエージェントだけ。name / source_profile / region / role_name の 4 つと、IAM ユーザーのログインでは
 # mfa_required / duration_seconds、そのあとエージェント（claude / codex）とモデル・effort。
 # account_id はいまのログインのアカウント（読めなければ手で入れる）、貸す相手（principal_arn）はいまのログイン（自分だけ）、
-# refresh_command は aws-login に固定し、auth.route・phase_dir・ssh（EC2 の中を調べる任意機能）も聞かずに既定を書く。
+# refresh_command は aws-login に固定し、auth.route・ssh（EC2 の中を調べる任意機能）も聞かずに既定を書く。
 # 非対話（--from / AWS_SURVEY_INIT_*）ではどれも渡せる。対話・非対話のどちらでも、検証（init_validate）と書き出し（init_write）は同じ経路を通る。
 # 書き出したあと、端末で docker があればエージェントのログインまで済ませる（libexec/commands/login.sh）。
 # 画面は、決まった項目を「◆ 項目: 値」の 1 行に畳む（init_begin / init_done。端末のときだけ消す）。
@@ -898,7 +901,6 @@ init_write() {
      auth: {route: null, source_profile: $profile, principal_arn: $arn, mfa_required: $mfa,
             role_name: $role, refresh_command: ($refresh | opt),
             duration_seconds: $duration},
-     phase_dir: "01_基礎調査",
      agent: {name: ($agent | opt), model: ($model | opt), effort: ($effort | opt)},
      ssh: {user: "diag", hosts: {}},
      setup: {route_decided: null, role_created: null, readonly_verified: null, container_verified: null, scanned: null}}' \
@@ -912,7 +914,7 @@ init_write() {
 
 # out/ の器と、対象フォルダ用の AGENTS.md / CLAUDE.md
 init_scaffold() {
-  mkdir -p "$AWS_SURVEY_DIR/out/_環境" || init_die "out/ を作れません。"
+  mkdir -p "$AWS_SURVEY_DIR/out/.survey/env" || init_die "out/ を作れません。"
   if [ "$AWS_SURVEY_DIR" = "$AWS_SURVEY_HOME" ]; then
     ui_text "対象フォルダが本体そのものなので AGENTS.md / CLAUDE.md は置きません。"
     return 0
@@ -1038,7 +1040,6 @@ cmd_status() {
   ui_kv "リージョン" "$REGION"
   ui_kv "ロール" "$ROLE_NAME"
   ui_kv "ロールの用意" "$(route_label "$AUTH_ROUTE")"
-  ui_kv "フェーズ" "$SURVEY_PHASE_DIR"
   echo ""
   ui_head "済んだこと（environment.json に記録された日付）"
   milestone() {
@@ -1064,7 +1065,7 @@ cmd_status() {
   ui_kv "エージェント" "$([ -n "${SURVEY_AGENT:-}" ] && agent_summary "$SURVEY_AGENT" "$SURVEY_AGENT_MODEL" "$SURVEY_AGENT_EFFORT" || echo "未定（scan のときに選びます）")"
   if scan_done; then ui_ok "初期調査済み（$(setup_value scanned)）"; else ui_skip "初期調査: まだ（$CMD_NAME scan）"; fi
   if survey_started; then
-    ui_ok "開始済み（out/00_進捗.md あり）"
+    ui_ok "開始済み（out/.survey/state.md あり）"
   else
     ui_skip "未開始"
   fi

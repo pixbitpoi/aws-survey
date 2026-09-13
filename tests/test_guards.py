@@ -20,7 +20,7 @@ class Guards(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
-        (self.root / 'out/_環境').mkdir(parents=True)
+        (self.root / 'out/.survey/env').mkdir(parents=True)
         self.env = patch.dict(os.environ, {'SURVEY_AUDIT_LOG': str(self.root / 'audit.tsv')})
         self.env.start()
         self.root_patch = patch.object(guard, 'ROOT', self.root)
@@ -46,8 +46,8 @@ class Guards(unittest.TestCase):
     def test_aws_policy_for_both_agents(self):
         cases = [
             ('aws ec2 describe-vpcs', True),
-            ('aws ec2 describe-vpcs > out/01_基礎調査/raw/vpcs.json', True),
-            ('aws resource-explorer-2 search --query-string "*" > out/01_基礎調査/raw/rex.json', True),
+            ('aws ec2 describe-vpcs > out/.survey/raw/vpcs.json', True),
+            ('aws resource-explorer-2 search --query-string "*" > out/.survey/raw/rex.json', True),
             ('aws ec2 terminate-instances --instance-ids i-0', False),
             ('aws sqs receive-message --queue-url example', False),
             ('aws ssm get-parameter --name example', False),
@@ -70,7 +70,7 @@ class Guards(unittest.TestCase):
             ('ec2 web1 help', True),
             ('ec2 --list', True),
             ('ec2 --selftest web1', True),
-            ('ec2 web1 tail /var/log/messages --lines 200 > out/01_基礎調査/raw/web1-messages.txt', True),
+            ('ec2 web1 tail /var/log/messages --lines 200 > out/.survey/raw/web1-messages.txt', True),
             ('ec2 web1 grep /var/log/secure --pattern ssh --ignore-case', True),
             ('ec2 web1 service sshd', True),
             ('ec2 web1', False),
@@ -92,16 +92,16 @@ class Guards(unittest.TestCase):
             # method/07: configuration saved with the variable names and only the chosen non-secret values
             ("aws lambda get-function-configuration --function-name f --query '{Runtime:Runtime,Handler:Handler,Role:Role,"
              "CodeSha256:CodeSha256,EnvNames:keys(Environment.Variables),EnvValues:{TABLE_NAME:Environment.Variables.TABLE_NAME}}'"
-             " > out/01_基礎調査/raw/raw-lambda-cfg-f.json", True),
+             " > out/.survey/raw/raw-lambda-cfg-f.json", True),
             ('aws lambda get-policy --function-name f', True),
             ('aws lambda list-function-url-configs --function-name f --max-items 10', True),
             ('aws events list-rule-names-by-target --target-arn arn:aws:lambda:r:0:function:f --max-items 20', True),
             ('aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Invocations '
              '--dimensions Name=FunctionName,Value=f --start-time 2026-09-11T00:00:00Z --end-time 2026-09-11T01:00:00Z '
              '--period 3600 --statistics Sum', True),
-            ('aws cloudfront get-function --name f out/01_基礎調査/raw/cf-f.txt', True),
+            ('aws cloudfront get-function --name f out/.survey/raw/cf-f.txt', True),
             ('aws lambda get-function --function-name f', False),
-            ('aws lambda get-function --function-name f > out/01_基礎調査/raw/f.json', False),
+            ('aws lambda get-function --function-name f > out/.survey/raw/f.json', False),
             ('aws lambda get-layer-version --layer-name l --version-number 1', False),
             ('aws lambda get-layer-version-by-arn --arn arn:aws:lambda:r:0:layer:l:1', False),
             # searching code and saved output may mention aws / boto3 when the reading command runs alone
@@ -109,7 +109,7 @@ class Guards(unittest.TestCase):
             ("grep -rn 'aws.config' code/", True),
             ("rg -n '@aws-sdk/client-s3' code/", True),
             ('head -20 code/lambda/r/f/src/aws_client.py', True),
-            ('wc -l out/01_基礎調査/raw/aws-lambda.json', True),
+            ('wc -l out/.survey/raw/aws-lambda.json', True),
             ('grep boto3 code/ | aws s3 ls', False),
             ('grep $(aws sts get-caller-identity) code/', False),
             ('grep -rn boto3 code/ > out/hits.txt', False),
@@ -140,9 +140,9 @@ class Guards(unittest.TestCase):
             ("python3 -c \"import os; os.system('ssh web1 bash')\"", False),
             ('$(ec2 web1 uptime)', False),
             # words inside arguments are not commands: reading saved output that mentions ssh is fine
-            ('grep ssh out/01_基礎調査/raw/web1-secure.txt', True),
-            ("grep -c 'ssh' out/01_基礎調査/raw/web1-secure.txt", True),
-            ('jq . out/01_基礎調査/raw/raw-ec2.json', True),
+            ('grep ssh out/.survey/raw/web1-secure.txt', True),
+            ("grep -c 'ssh' out/.survey/raw/web1-secure.txt", True),
+            ('jq . out/.survey/raw/raw-ec2.json', True),
             ('cat out/ec2/notes.txt', True),
             # the search exception is for the reading command alone, not as a prefix to something else
             ('grep -rn boto3 code/ && aws s3 ls', False),
@@ -157,19 +157,19 @@ class Guards(unittest.TestCase):
                 self.assertEqual(result.returncode, 0 if allowed else 2, result.stderr)
 
     def test_codex_shell(self):
-        for command in ['ls out/', "jq '.Vpcs | length' out/raw.json", 'survey-status', 'mkdir -p out/01_基礎調査/raw']:
+        for command in ['ls out/', 'ls -A out/ out/.survey/', "jq '.Vpcs | length' out/raw.json", 'survey-status', 'mkdir -p out/.survey/raw', 'mkdir -p out/.survey/log']:
             with self.subTest(command=command):
                 self.check_codex('Bash', command, True)
-        for command in ['bash -c "aws sts get-caller-identity"', 'python3 -c "print(1)"', 'cat /home/node/.aws-claude/credentials', 'rm out/_環境/aws-audit.log', 'cat out/x; node script.js', 'rg --pre=sh text out/', 'mkdir -p /tmp/new', 'ls $(pwd)', 'cat out/x > out/_環境/aws-audit.log', 'ssh web1 uptime', 'cat /home/node/.aws-claude/ssh/config']:
+        for command in ['bash -c "aws sts get-caller-identity"', 'python3 -c "print(1)"', 'cat /home/node/.aws-claude/credentials', 'rm out/.survey/env/aws-audit.log', 'cat out/x; node script.js', 'rg --pre=sh text out/', 'mkdir -p /tmp/new', 'ls $(pwd)', 'cat out/x > out/.survey/env/aws-audit.log', 'ssh web1 uptime', 'cat /home/node/.aws-claude/ssh/config']:
             with self.subTest(command=command):
                 self.check_codex('Bash', command, False)
 
     def test_patch_paths_and_moves(self):
-        for path, allowed in [('out/report.md', True), ('AGENTS.md', False), ('CLAUDE.md', False), ('method/x.md', False), ('out/../AGENTS.md', False), ('out/_環境/aws-audit.log', False)]:
+        for path, allowed in [('out/report.md', True), ('out/report/構成報告.md', True), ('out/.survey/state.md', True), ('AGENTS.md', False), ('CLAUDE.md', False), ('method/x.md', False), ('out/../AGENTS.md', False), ('out/.survey/env/aws-audit.log', False)]:
             with self.subTest(path=path):
                 self.check_codex('apply_patch', f'*** Begin Patch\n*** Add File: {path}\n+text\n*** End Patch', allowed)
         self.check_codex('apply_patch', '*** Begin Patch\n*** Update File: out/x.md\n*** Move to: method/x.md\n@@\n-a\n+b\n*** End Patch', False)
-        (self.root / 'out/alias').symlink_to(self.root / 'out/_環境')
+        (self.root / 'out/alias').symlink_to(self.root / 'out/.survey/env')
         self.check_codex('apply_patch', '*** Begin Patch\n*** Add File: out/alias/aws-audit.log\n+x\n*** End Patch', False)
 
     def test_unknown_and_malformed_tools(self):
@@ -330,7 +330,7 @@ class AuditLogPermissions(unittest.TestCase):
     and both are required: neither one alone closes the other's path.
     """
 
-    LOG = '//home/node/aws-survey/out/_環境/aws-audit.log'
+    LOG = '//home/node/aws-survey/out/.survey/env/aws-audit.log'
 
     def setUp(self):
         self.deny = json.loads((ROOT / 'container/settings.json').read_text())['permissions']['deny']

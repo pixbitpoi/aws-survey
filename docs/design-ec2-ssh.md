@@ -618,8 +618,8 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
    `tests/test_launcher.py`、`ssh verify` の呼び出しは偽の `docker` で `tests/test_ssh_install.py`。
 6. `method/06`、`survey-status`、`security.md`、`README.md`。**済**（2026-09-10。`aws-survey run` のコンテナで `survey-status` に
    登録済みホストが出ること（端末では装飾付き、端末でないときは素の文字列、接続設定の無い対象では何も出ない）、
-   調査コンテナの Claude Code に `method/06` を読ませて `ec2 <host>` の `help` / `uptime` / `services` / `ls` / `tail` を `out/<フェーズ>/raw/` に
-   保存させ、監査ログに `ALLOW` が残り、`out/_環境/00_動作確認.md` に記録が書かれ、終了後に SSM のセッションが残らないことを確認）。
+   調査コンテナの Claude Code に `method/06` を読ませて `ec2 <host>` の `help` / `uptime` / `services` / `ls` / `tail` を `out/.survey/raw/` に
+   保存させ、監査ログに `ALLOW` が残り、`out/.survey/env/check.md` に記録が書かれ、終了後に SSM のセッションが残らないことを確認）。
 7. `aws-survey ssh rotate` / `ssh remove`（§4.6）、`ssh list` の鍵の作成日時、導入スクリプトの `ClientAliveInterval`。**済**（2026-09-10、
    実 EC2 の Amazon Linux 2023。`--log` 付きの再導入 → `ssh verify` が `log` を省略せず 19 項目通過 → `rotate` で鍵を差し替えて
    `ssh verify` がもう一度通過 → `remove` が `REMOVED clean` で終わり、別の RunCommand で §4.5 の表の全部・ユーザー・グループ・
@@ -634,7 +634,7 @@ ec2 <host> <verb> [args...] [> out/<相対パス>.(txt|json)]
    `ssh verify`（20 項目）が通って元の状態に戻した。古い一時キーが全拒否になることと、作成直後の `credentials` の失敗は §4.6）。
    偽の `aws` での IAM の呼び出し順は `tests/test_ssh_setup.py`、ラッパーの後片付けの呼び出し順と引数の渡し方は `tests/test_guards.py`（偽の `ssh` と `aws`）。
    調査コンテナの Codex（`codex login --device-auth` で認証）に `method/06` を読ませ、`ec2 web1` の `help` / `uptime` / `services` / `tail` を
-   `out/<フェーズ>/raw/raw-web1-<何>.txt` に保存させて、監査ログに 4 件の `ALLOW`、EC2 側の journal に 4 件の `allow`、終了後に SSM の
+   `out/.survey/raw/raw-web1-<何>.txt` に保存させて、監査ログに 4 件の `ALLOW`、EC2 側の journal に 4 件の `allow`、終了後に SSM の
    セッションが残らないことを確認（Claude Code での同じ確認は第 6 段）。
 
 実機の相手は `tests/live/ec2/`（`launch.sh` が AL2023 を 1 台起動して user-data で nginx・API・Redis・PostgreSQL・timer・cron を構成し、

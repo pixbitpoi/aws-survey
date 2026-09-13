@@ -28,7 +28,7 @@ class Handler(BaseHTTPRequestHandler):
         commands = {
             1: (shell, {'command': 'aws ec2 terminate-instances --instance-ids i-0'}),
             2: ('apply_patch', '*** Begin Patch\n*** Add File: out/smoke.md\n+smoke passed\n*** End Patch'),
-            3: ('apply_patch', '*** Begin Patch\n*** Add File: out/_環境/aws-audit.log\n+tampered\n*** End Patch'),
+            3: ('apply_patch', '*** Begin Patch\n*** Add File: out/.survey/env/aws-audit.log\n+tampered\n*** End Patch'),
             4: (shell, {'command': 'ls out/'}),
         }
         if index in commands:
@@ -57,7 +57,7 @@ class Handler(BaseHTTPRequestHandler):
 server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 root = Path('/home/node/aws-survey')
-(root / 'out/_環境').mkdir(parents=True, exist_ok=True)
+(root / 'out/.survey/env').mkdir(parents=True, exist_ok=True)
 cmd = ['codex', '--strict-config', '-c', 'model_provider="smoke"', '-c', 'model="gpt-5.4"',
        '-c', 'model_providers.smoke.name="Smoke"', '-c', f'model_providers.smoke.base_url="http://127.0.0.1:{server.server_port}/v1"',
        '-c', 'model_providers.smoke.wire_api="responses"', '-c', 'model_providers.smoke.requires_openai_auth=false',
@@ -91,7 +91,7 @@ context = json.dumps(requests[0], ensure_ascii=False)
 assert 'AWS インフラの調査' in context, 'distribution AGENTS.md was not loaded'
 assert 'ホストと調査コンテナ' not in context, 'development instructions leaked'
 assert (root / 'out/smoke.md').read_text().strip() == 'smoke passed', 'allowed patch did not run'
-audit = (root / 'out/_環境/aws-audit.log').read_text()
+audit = (root / 'out/.survey/env/aws-audit.log').read_text()
 assert 'DENY' in audit and 'terminate-instances' in audit, audit
 assert 'tampered' not in audit, 'audit patch was not blocked'
 all_requests = json.dumps(requests, ensure_ascii=False)

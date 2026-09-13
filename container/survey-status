@@ -10,12 +10,11 @@ CRED_FILE=/home/node/.aws-claude/credentials
 SSH_CONFIG=/home/node/.aws-claude/ssh/config
 CODE_DIR=/home/node/aws-survey/code
 
-# プロファイル・リージョン・アカウント・フェーズ。資格情報があるときだけ最後に出す。
+# プロファイル・リージョン・アカウント。資格情報があるときだけ最後に出す。
 show_context() {
   local line="プロファイル ${AWS_PROFILE:-未設定}"
   [ -n "$region" ]  && line="$line ・ リージョン $region"
   [ -n "$account" ] && line="$line ・ アカウント $account"
-  [ -n "${SURVEY_PHASE_DIR:-}" ] && line="$line ・ フェーズ $SURVEY_PHASE_DIR"
   sui_text "$line"
   show_hosts
   show_code

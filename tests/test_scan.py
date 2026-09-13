@@ -69,18 +69,17 @@ if (cmd[0] == "claude" and "-p" in cmd) or (cmd[0] == "codex" and "exec" in cmd)
     if os.environ.get("FAKE_SCAN_NOT_LOGGED_IN"):
         print("Not logged in. Please run /login", file=sys.stderr); sys.exit(1)
     out = mounts["/home/node/aws-survey/out"]
-    phase = next(a.split("=", 1)[1] for a in argv if a.startswith("SURVEY_PHASE_DIR="))
+    assert not any(a.startswith("SURVEY_PHASE_DIR=") for a in argv), "there is no phase any more: out/ is report/ raw/ .survey/"
     if os.environ.get("FAKE_SCAN_WRITES"):
-        os.makedirs(os.path.join(out, "_環境"), exist_ok=True)
-        os.makedirs(os.path.join(out, phase, "raw"), exist_ok=True)
-        os.makedirs(os.path.join(out, phase, "log"), exist_ok=True)
-        os.makedirs(os.path.join(out, phase, "report"), exist_ok=True)
-        open(os.path.join(out, "_環境", "00_動作確認.md"), "w").write("確認した\n")
+        for d in (".survey/env", ".survey/log", ".survey/raw", "report"):
+            os.makedirs(os.path.join(out, d), exist_ok=True)
+        open(os.path.join(out, ".survey", "env", "check.md"), "w").write("確認した\n")
+        open(os.path.join(out, ".survey", "state.md"), "w").write("# 台帳\n")
         for n in ("raw-a.json", "raw-b.json"):
-            open(os.path.join(out, phase, "raw", n), "w").write("{}\n")
-        open(os.path.join(out, phase, "log", "01_基礎調査.md"), "w").write("# 第 1 回\n")
-        open(os.path.join(out, phase, "report", "構成報告.md"), "w").write("# 構成報告\n\n## 概要\n\n- 2 件\n\n## A. 全体像\n\n## 外からは分からないこと\n")
-        open(os.path.join(out, phase, "report", "ユーザー確認事項.md"), "w").write("# 確認事項\n\n## 中を見れば分かること\n\n## ユーザーにしか分からないこと\n")
+            open(os.path.join(out, ".survey", "raw", n), "w").write("{}\n")
+        open(os.path.join(out, ".survey", "log", "01-baseline.md"), "w").write("# 第 1 回\n")
+        open(os.path.join(out, "report", "構成報告.md"), "w").write("# 構成報告\n\n## 概要\n\n- 2 件\n\n## システムごとの経路\n\n## 外からは分からないこと\n\n## 付録: リソース一覧\n")
+        open(os.path.join(out, "report", "ユーザー確認事項.md"), "w").write("# 確認事項\n\n## 中を見れば分かること\n\n## ユーザーにしか分からないこと\n\n### Q1. 何のシステムですか\n\n回答:\n")
     if os.environ.get("FAKE_SCAN_SLOW"):
         import time; time.sleep(float(os.environ["FAKE_SCAN_SLOW"]))
     if cmd[0] == "codex":
@@ -160,7 +159,6 @@ class Scan(ScanCase):
                       'smoke-codex:/home/node/.codex', 'smoke-claude:/home/node/.claude', 'smoke-cli:/home/node/.local',
                       'smoke-npm:/home/node/.npm-global']:
             self.assertIn(mount, launch)
-        self.assertIn('SURVEY_PHASE_DIR=01_基礎調査', launch)
         image = launch.index('smoke:latest')
         # モデルと effort は environment.json の agent から（未定なら既定の opus / medium）
         self.assertEqual(launch[image + 1:image + 8], ['claude', '--model', 'opus', '--effort', 'medium', '--strict-mcp-config', '-p'])
@@ -168,21 +166,26 @@ class Scan(ScanCase):
         self.assertIn('inventory in progress', result.stdout)           # the agent's output is streamed
         self.assertIn('初期調査を終えました（', result.stdout)
         # what the run left in out/, by place: the raw files by count and name, the report and the asks by their headings
-        self.assertIn('生データ 2 件  01_基礎調査/raw/', result.stdout)
+        self.assertIn('生データ 2 件  .survey/raw/', result.stdout)
         self.assertIn('raw-a.json raw-b.json', result.stdout)
-        self.assertIn('報告  01_基礎調査/report/構成報告.md', result.stdout)
+        self.assertIn('報告  report/構成報告.md', result.stdout)
         self.assertIn('・概要', result.stdout)
+        self.assertIn('・システムごとの経路', result.stdout)
         self.assertIn('・外からは分からないこと', result.stdout)
-        self.assertIn('確認事項  01_基礎調査/report/ユーザー確認事項.md', result.stdout)
+        self.assertIn('確認事項  report/ユーザー確認事項.md', result.stdout)
         self.assertIn('・中を見れば分かること', result.stdout)
-        self.assertIn('01_基礎調査/log/01_基礎調査.md', result.stdout)
-        self.assertIn('環境の確認の記録  _環境/00_動作確認.md', result.stdout)
+        self.assertIn('・Q1. 何のシステムですか', result.stdout)
+        self.assertIn('回答欄', result.stdout)                                # the user writes answers into the file
+        self.assertIn('エージェントの記録  .survey/log/01-baseline.md', result.stdout)
+        self.assertIn('エージェントの記録  .survey/state.md', result.stdout)
+        self.assertIn('環境の確認の記録  .survey/env/check.md', result.stdout)
         self.assertNotIn('白紙', result.stdout)
         self.assertNotIn('棚卸し', result.stdout)
         # the next step: read the report, optionally add the inside routes, then the conversation
         self.assertIn('次にやること', result.stdout)
         self.assertIn('aws-survey ec2', result.stdout)
         self.assertIn('aws-survey lambda', result.stdout)
+        self.assertIn('aws-survey scan', result.stdout)                     # a second scan reads the added routes, non-interactively
         self.assertIn('aws-survey claude', result.stdout)
         # off a terminal there is no progress line and no sizing run: the only container runs are the login checks and the agent
         self.assertFalse(any('/x/inventory.sh' in c for c in self.docker_runs()))
@@ -200,7 +203,7 @@ class Scan(ScanCase):
         self.authed('claude')
         result = self.run_cli('scan')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('生データ（01_基礎調査/raw/）は書かれていません', result.stdout)
+        self.assertIn('生データ（.survey/raw/）は書かれていません', result.stdout)
         self.assertIn('構成報告.md）は書かれていません', result.stdout)
         self.assertIn('ユーザー確認事項.md）は書かれていません', result.stdout)
         # without a report the survey is not done: scan is offered again (it continues from the raw data), not the conversation
@@ -243,6 +246,9 @@ class Scan(ScanCase):
         self.assertIn('method/04', prompt)
         self.assertIn('報告', prompt)                                    # through to the report, not just the raw data
         self.assertIn('一時キーは自動で入れ替わる', prompt)               # so the agent does not wind down on the clock
+        self.assertIn('method/05', prompt)                                   # a second run verifies the report first
+        self.assertIn('survey-status に出ている経路', prompt)                 # and reads whatever inside routes exist, without asking
+        self.assertIn('回答欄', prompt)                                      # answers written into the asks file count as answers
         for word in ['EC2', 'Lambda', 'VPC', 'S3', 'RDS', 'Cost', 'CloudFront', 'aws-survey', 'libexec']:
             self.assertNotIn(word, prompt, f'{word} must not be handed to the agent from the host')
 
@@ -468,13 +474,17 @@ class Scan(ScanCase):
         self.assertIn('● 6 ', guide.stdout)
         self.assertIn('✔ 5 初期調査', guide.stdout)
 
-    def test_a_second_scan_shows_the_last_time_and_asks_before_starting_over(self):
+    def test_a_second_scan_shows_the_last_time_and_asks_before_continuing(self):
+        # a second scan is not a restart: the agent verifies the report, then reads the routes added since (EC2, Lambda code)
         self.ready(agent='claude', setup={'scanned': '2026-09-10T14:05+0900'})
         self.authed('claude')
-        code, text = self.drive(['scan'], [('やり直しますか？', b'n\r')])
+        code, text = self.drive(['scan'], [('続けますか？', b'n\r')])
         self.assertEqual(code, 0, text)
         self.assertIn('初期調査はすでに済んでいます（前回: 2026-09-10 14:05）', text)
-        self.assertIn('やり直しません', text)
+        self.assertIn('報告を検証し', text)
+        self.assertIn('足した経路', text)
+        self.assertNotIn('やり直し', text)
+        self.assertIn('続けません', text)
         self.assertIn('aws-survey claude', text)
         self.assertFalse(any(c[0] == 'docker' for c in self.calls()))   # no key check, no sizing, no agent
         self.assertEqual(self.environment()['setup']['scanned'], '2026-09-10T14:05+0900')
@@ -484,13 +494,13 @@ class Scan(ScanCase):
         self.authed('claude')
         result = self.run_cli('scan', input='\n')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('やり直しません', result.stdout)
+        self.assertIn('続けません', result.stdout)
         self.assertIsNone(self.agent_run())
 
-    def test_answering_yes_starts_the_survey_over_and_keeps_out(self):
+    def test_answering_yes_continues_the_survey_and_keeps_out(self):
         self.ready(agent='claude', setup={'scanned': '2026-09-10T14:05+0900'})
         self.authed('claude')
-        code, text = self.drive(['scan'], [('やり直しますか？', b'y\r')], env_extra={'FAKE_SCAN_WRITES': '1'})
+        code, text = self.drive(['scan'], [('続けますか？', b'y\r')], env_extra={'FAKE_SCAN_WRITES': '1'})
         self.assertEqual(code, 0, text)
         self.assertIn('前回: 2026-09-10 14:05', text)
         self.assertIsNotNone(self.agent_run())
@@ -506,7 +516,7 @@ class Scan(ScanCase):
         self.assertIsNone(self.agent_run())
         forced = self.run_cli('scan', '--force', FAKE_SCAN_WRITES='1')
         self.assertEqual(forced.returncode, 0, forced.stdout + forced.stderr)
-        self.assertNotIn('やり直しますか', forced.stdout)
+        self.assertNotIn('続けますか', forced.stdout)
         self.assertIsNotNone(self.agent_run())
 
     def test_failure_records_nothing_and_names_the_retry(self):
@@ -531,8 +541,11 @@ class Scan(ScanCase):
         self.authed('claude')
         self.run_cli('scan', FAKE_SCAN_WRITES='1')
         self.assertEqual(sorted(p.name for p in self.target.iterdir()), ['code', 'environment.json', 'out'])
-        self.assertTrue((self.target / 'out/01_基礎調査/raw').is_dir())
-        self.assertFalse((self.target / 'out/_環境/scan.log').exists())
+        self.assertTrue((self.target / 'out/.survey/raw').is_dir())
+        self.assertTrue((self.target / 'out/report').is_dir())
+        self.assertTrue((self.target / 'out/.survey/env').is_dir())
+        self.assertFalse((self.target / 'out/.survey/env/scan.log').exists())
+        self.assertFalse((self.target / 'out/_環境').exists())
 
 
 class Login(ScanCase):

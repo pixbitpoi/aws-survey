@@ -36,6 +36,6 @@ sui_cmd "codex"               "Codex で始める（初回は codex login --devi
 sui_cmd "codex resume --last" "Codex の直前の会話を再開"
 sui_cmd "survey-status"       "資格情報の残り時間を確認"
 echo
-sui_line "調査結果は out/ に書きます。台帳は out/00_進捗.md です。"
+sui_line "調査結果は out/ に書きます。報告は out/report/、台帳は out/.survey/state.md です。"
 sui_text "短縮: c=claude  cc=claude -c  cx=codex  cxx=codex resume --last  ll=ls -la"
 echo

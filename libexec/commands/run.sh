@@ -30,7 +30,6 @@ ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
 ui_kv "本体" "$AWS_SURVEY_HOME"
 ui_kv "アカウント" "$ACCOUNT_ID"
 ui_kv "リージョン" "$REGION"
-ui_kv "フェーズ" "$SURVEY_PHASE_DIR"
 echo ""
 # マウントする 3 か所（本体の指示書と method/、対象フォルダの out/、一時キー）が Docker Desktop から見えるか（load-env.sh）
 docker_check_shared "$AWS_SURVEY_HOME" "$AWS_SURVEY_DIR" "$AWS_DIR" || exit 1

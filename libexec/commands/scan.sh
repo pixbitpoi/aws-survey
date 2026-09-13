@@ -42,14 +42,16 @@ case "$AGENT_OPT" in ""|claude|codex) ;; *) ui_die "--agent は claude か codex
 SCAN_PROMPT='この回はユーザーが応答できません。質問や、答えを待つことは行わないでください。
 AGENTS.md と method/00「ユーザーが応答できない回」の順で、環境の確認（初回なら method/03）と、method/04 の基礎調査を行ってください。
 生データを集めて（白紙の棚卸し）終わりではなく、報告（report/構成報告.md と report/ユーザー確認事項.md）まで書き切ってください。
+報告が既にあれば method/05 で検証し、survey-status に出ている経路（中を調べられるもの）は聞かずに読んで、報告の本文を更新してください。
+report/ユーザー確認事項.md の回答欄に書かれていれば、それを答えとして扱ってください。
 この回のあいだ一時キーは自動で入れ替わるので、残り時間で切り上げないでください。
-ユーザーに聞きたいことと、中を見れば分かることは report/ユーザー確認事項.md に書き、次の回にユーザーと話せるようにしておいてください。'
+ユーザーに聞きたいことと、経路が無くて中を見られないものは report/ユーザー確認事項.md に書き、次の回にユーザーと話せるようにしておいてください。'
 
 on_terminal() { [ -t 0 ] && [ -t 1 ]; }
 
 # ---- 調査の量の見積もり ----
 # 端末で進捗を出すときだけ。ls と同じ列挙（libexec/inventory.sh）を Cost Explorer 込みで一時キーに読ませ、課金のあるサービスと
-# リソースの数から、生データ（raw/raw-*）の見込み数 EST_FILES と所要時間の目安 EST_SECONDS を決める。読めなければ一般的な目安。
+# リソースの数から、生データ（.survey/raw/raw-*）の見込み数 EST_FILES と所要時間の目安 EST_SECONDS を決める。読めなければ一般的な目安。
 # 係数は実測に合わせて直す値で、ここにだけ置く: 生データは「4 + サービスごとに 2 + リソース 5 件ごとに 1」（6〜60 件）、
 # 時間は「150 秒 + 生データ 1 件あたり 50 秒 + 報告を書く 600 秒」、環境の確認（初回）があれば 120 秒足す。
 EST_REPORT_SECONDS=600
@@ -70,7 +72,7 @@ scan_estimate() {
     if [ "$cost_ok" -gt 0 ]; then note="課金のあるサービス ${billed}、リソース ${items} 件"; else note="リソース ${items} 件（Cost Explorer は読めず）"; fi
     [ "$denied" -eq 0 ] || note="${note}、読めないサービス ${denied}"
     EST_SECONDS=$((150 + 50 * EST_FILES + EST_REPORT_SECONDS))
-    [ -f "$OUT_DIR/_環境/00_動作確認.md" ] || EST_SECONDS=$((EST_SECONDS + 120))
+    [ -f "$OUT_DIR/.survey/env/check.md" ] || EST_SECONDS=$((EST_SECONDS + 120))
     ui_ok "見積もり: ${note}。目安は $(ui_duration "$EST_SECONDS")ほど（進捗は推定です）"
   fi
 }
@@ -110,7 +112,7 @@ scan_percent() {
   PREV=$p; PCT=$p
 }
 scan_progress() {
-  local dir="$1" raw="$OUT_DIR/$SURVEY_PHASE_DIR/raw" log="$OUT_DIR/$SURVEY_PHASE_DIR/report/構成報告.md"
+  local dir="$1" raw="$OUT_DIR/.survey/raw" log="$OUT_DIR/report/構成報告.md"
   local start now el n m last msg PCT=0 PREV=0 B_N=0 B_EL=-1 B_BASE=0
   set +e; set +o pipefail          # 背景の 1 ループ。find が無い・読めないときも黙って回り続ける
   start=$(date +%s)
@@ -174,33 +176,35 @@ scan_keys_loop() {
 #   scan_summary <開始の目印>
 scan_summary() (   # サブシェル。無いフォルダや空の grep で止まらないよう、set -e と pipefail を外す
   set +e; set +o pipefail
-  local mark="$1" phase="$OUT_DIR/$SURVEY_PHASE_DIR" report="$OUT_DIR/$SURVEY_PHASE_DIR/report/構成報告.md" \
-        asks="$OUT_DIR/$SURVEY_PHASE_DIR/report/ユーザー確認事項.md" raw_n names line
-  raw_n=$(find "$phase/raw" -type f -newer "$mark" 2>/dev/null | wc -l | tr -d ' ')
-  names=$(find "$phase/raw" -type f -newer "$mark" 2>/dev/null | sed 's|.*/||' | sort | head -n 5 | tr '\n' ' ')
+  local mark="$1" raw="$OUT_DIR/.survey/raw" report="$OUT_DIR/report/構成報告.md" \
+        asks="$OUT_DIR/report/ユーザー確認事項.md" raw_n names line
+  raw_n=$(find "$raw" -type f -newer "$mark" 2>/dev/null | wc -l | tr -d ' ')
+  names=$(find "$raw" -type f -newer "$mark" 2>/dev/null | sed 's|.*/||' | sort | head -n 5 | tr '\n' ' ')
   ui_head "out/ に残したもの"
   if [ "${raw_n:-0}" -gt 0 ]; then
-    ui_ok "生データ ${raw_n} 件  $SURVEY_PHASE_DIR/raw/"
+    ui_ok "生データ ${raw_n} 件  .survey/raw/"
     ui_text "AWS の API の出力そのまま（${names% }$([ "$raw_n" -le 5 ] || echo " …")）。あとから jq で引き直せます。"
   else
-    ui_skip "生データ（$SURVEY_PHASE_DIR/raw/）は書かれていません"
+    ui_skip "生データ（.survey/raw/）は書かれていません"
   fi
   if [ -f "$report" ] && [ "$report" -nt "$mark" ]; then
-    ui_ok "報告  $SURVEY_PHASE_DIR/report/構成報告.md"
+    ui_ok "報告  report/構成報告.md"
     grep -E '^## ' "$report" | head -n 14 | sed 's/^#* *//' | while IFS= read -r line; do ui_text "  ・$line"; done
   else
-    ui_skip "報告（$SURVEY_PHASE_DIR/report/構成報告.md）は書かれていません。生データだけで終わったか、途中で終わった可能性があります"
+    ui_skip "報告（report/構成報告.md）は書かれていません。生データだけで終わったか、途中で終わった可能性があります"
   fi
   if [ -f "$asks" ] && [ "$asks" -nt "$mark" ]; then
-    ui_ok "確認事項  $SURVEY_PHASE_DIR/report/ユーザー確認事項.md"
+    ui_ok "確認事項  report/ユーザー確認事項.md"
     grep -E '^#{1,3} ' "$asks" | head -n 12 | sed 's/^#* *//' | while IFS= read -r line; do ui_text "  ・$line"; done
   else
-    ui_skip "確認事項（$SURVEY_PHASE_DIR/report/ユーザー確認事項.md）は書かれていません"
+    ui_skip "確認事項（report/ユーザー確認事項.md）は書かれていません"
   fi
-  find "$OUT_DIR" -type f -newer "$mark" 2>/dev/null | grep -v "^$phase/raw/" | grep -vx "$report" | grep -vx "$asks" | sed "s|^$OUT_DIR/||" | sort \
+  find "$OUT_DIR" -type f -newer "$mark" 2>/dev/null | grep -v "^$raw/" | grep -vx "$report" | grep -vx "$asks" | sed "s|^$OUT_DIR/||" | sort \
     | while IFS= read -r line; do
         case "$line" in
-          _環境/00_動作確認.md) ui_ok "環境の確認の記録  $line" ;;
+          .survey/env/check.md) ui_ok "環境の確認の記録  $line" ;;
+          .survey/env/aws-audit.log) ;;
+          .survey/*) ui_ok "エージェントの記録  $line" ;;
           *) ui_ok "$line" ;;
         esac
       done
@@ -211,10 +215,11 @@ scan_summary() (   # サブシェル。無いフォルダや空の grep で止�
 scan_next() {
   local agent="$1"
   ui_head "次にやること"
-  ui_text "報告（$(ui_path "$OUT_DIR/$SURVEY_PHASE_DIR/report/構成報告.md")）を読みます。確認事項には、中を見れば分かることと、ユーザーにしか分からないことが分けて書いてあります。"
+  ui_text "報告（$(ui_path "$OUT_DIR/report/構成報告.md")）を読みます。確認事項（$(ui_path "$OUT_DIR/report/ユーザー確認事項.md")）には回答欄があり、そこに書けば次の回が読みます。"
   ui_text "AWS の API で見えるのはリソースの外側までです。中まで調べるなら、先に経路を足します（要らなければ飛ばせます）。"
   also_cmd "$AWS_SURVEY_CMD ec2" "EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
   also_cmd "$AWS_SURVEY_CMD lambda" "Lambda のコードを取り出して読めるようにします。一覧から選びます"
+  also_cmd "$AWS_SURVEY_CMD scan" "経路を足したあと、もう一度実行すると、中を読んで報告を非対話で更新します"
   echo ""
   next_cmd "$AWS_SURVEY_CMD $agent" "報告を手に対話で続けます。質問への回答・中を読む・確認事項の答えを伝える、のどれからでも"
 }
@@ -223,27 +228,27 @@ ui_title "aws-survey scan"
 ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
 ui_kv "アカウント" "$ACCOUNT_ID"
 ui_kv "リージョン" "$REGION"
-ui_kv "フェーズ" "$SURVEY_PHASE_DIR"
 echo ""
 
 # ---- 0. すでに初期調査が済んでいないか ----
-# setup.scanned（成功時に分までの日時で書く）があれば、一時キーを発行し直す前に、前回の日時を出してやり直すかを聞く。
-# 打ち直しただけで数十分の調査を始めないため。Enter は「やり直さない」。端末でなければ read_line が諦めるので --force が要る。
-# やり直しても out/ は消さない（記録が足されるだけ。out/ は調査エージェントの領分）。
+# setup.scanned（成功時に分までの日時で書く）があれば、一時キーを発行し直す前に、前回の日時を出して続けるかを聞く。
+# 打ち直しただけで数十分の調査を始めないため。Enter は「続けない」。端末でなければ read_line が諦めるので --force が要る。
+# 2 回目は白紙からのやり直しではない。エージェントが報告を検証し、そのあと足した経路（EC2 の中・Lambda のコード）を読んで
+# 報告を更新する（method/00）。out/ は消さない（記録が足されるだけ。out/ は調査エージェントの領分）。
 SCANNED=$(jq -r '.setup.scanned // empty' "$ENV_FILE")
 if [ -n "$SCANNED" ] && [ "$FORCE" -eq 0 ]; then
   ui_warn "初期調査はすでに済んでいます（前回: $(sed 's/T/ /; s/[+-][0-9]\{4\}$//' <<< "$SCANNED")）"
-  ui_text "もう一度行うと、out/ の記録は消さずに、初期調査をやり直します（数十分かかります）。"
-  printf '  %s❯%s 初期調査をやり直しますか？ %s(y/N)%s: ' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET"
+  ui_text "もう一度行うと、報告を検証し、そのあと足した経路（EC2 の中・Lambda のコード）と確認事項の回答欄を読んで、報告を更新します（数十分かかります。out/ の記録は消しません）。"
+  printf '  %s❯%s 初期調査を続けますか？ %s(y/N)%s: ' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET"
   if ! read_line ans; then
     echo ""
-    ui_text "答えを読めませんでした。やり直すなら $(ui_cmd "$AWS_SURVEY_CMD scan --force") を実行してください。"
+    ui_text "答えを読めませんでした。続けるなら $(ui_cmd "$AWS_SURVEY_CMD scan --force") を実行してください。"
     exit 1
   fi
   case "$ans" in
     y|Y|yes|YES) echo "" ;;
     *)
-      ui_text "やり直しません。前回の結果はそのまま out/ にあります。"
+      ui_text "続けません。前回の結果はそのまま out/ にあります。"
       if [ -n "${AGENT_OPT:-$SURVEY_AGENT}" ]; then
         next_cmd "$AWS_SURVEY_CMD ${AGENT_OPT:-$SURVEY_AGENT}" "前回の初期調査の結果を手に、何を明らかにしたいかを中で決めて調査を進めます"
       else
@@ -361,7 +366,7 @@ echo ""
 scan_summary "$START_MARK"
 echo ""
 # 報告があって初めて「済み」。無ければ次も scan を案内する（前回の生データを使って続きから始める。やり直しではない）
-if [ -f "$OUT_DIR/$SURVEY_PHASE_DIR/report/構成報告.md" ]; then
+if [ -f "$OUT_DIR/report/構成報告.md" ]; then
   env_mark_setup scanned "初期調査を済ませた" "$(date '+%FT%H:%M%z')"
   echo ""
   scan_next "$AGENT"

@@ -18,7 +18,7 @@ cat > "$WORK/target/environment.json" <<'EOF'
 {"name":"smoke","account_id":"000000000000","region":"test-region",
  "auth":{"route":"own_role","source_profile":"x","principal_arn":"arn:aws:iam::000000000000:user/x",
          "mfa_required":false,"role_name":"r","refresh_command":null,"duration_seconds":3600},
- "phase_dir":"01_基礎調査","setup":{}}
+ "setup":{}}
 EOF
 ssh-keygen -q -t ed25519 -N '' -C smoke -f "$WORK/home/.aws-survey/smoke/ssh/id_ed25519"
 HOME="$WORK/home" "$ROOT/bin/aws-survey" --dir "$WORK/target" ssh setup --print \

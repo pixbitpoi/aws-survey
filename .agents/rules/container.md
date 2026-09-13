@@ -21,7 +21,7 @@
 `method/` はどの AWS アカウントを調べるときでも同じでなければならない。
 対象のことを書いた時点で、この一式は 1 つの環境専用になる。
 
-対象システムの知識は調査エージェントが `out/01_システム概要.md` に書く。ホストは用意しない。
+対象システムの知識は調査エージェントが `out/report/前提.md` に書く。ホストは用意しない。
 前提を先渡ししないこと。基礎調査は白紙で調べて報告を書き、それを手にユーザーと話す設計で、
 先に教えると発見ではなく確認をするようになる。
 
@@ -33,11 +33,11 @@
 
 | 書きたいこと | 置き場 |
 | --- | --- |
-| 対象システムの知識 | ホストでは作らない（調査エージェントが `out/01_システム概要.md` に書く） |
+| 対象システムの知識 | ホストでは作らない（調査エージェントが `out/report/前提.md` に書く） |
 | 基礎調査で集めるもの・報告の形・書かないもの | `method/04_基礎調査の型.md` |
 | 報告のあと、ユーザーとどう進めるか（中を読む・外は聞く・別の仕事を頼まれたら） | `method/02_基礎調査のあと.md` |
 | どの仕事でも変わらない調査の作法 | `method/01_進め方.md` |
-| 現場で見つかった、どの対象でも効くノウハウ | `method/01_進め方.md`（`out/02_調査ノウハウ.md` から昇格させる） |
+| 現場で見つかった、どの対象でも効くノウハウ | `method/01_進め方.md`（`out/.survey/notes.md` から昇格させる） |
 | 常に意識させたいこと（読み取りのみ・出力先・マスク） | `container/instructions/survey-agents.md`。薄く保つ |
 
 `container/instructions/survey-agents.md` は毎回すべて読まれる。厚くすると、その回に関係ない指示が
@@ -52,8 +52,8 @@
 | `container/settings.json` / `codex/` / `hooks/` / `bashrc` / `survey-status` / `survey-ui.sh` / `ec2` | イメージに焼き込み | 再ビルドが要る（`aws-survey scan` / `claude` / `codex` / `run` が毎回ビルドする） |
 
 コンテナへ渡るものは `container/` だけではない。対象フォルダの `out/` はディレクトリのマウントなので
-双方向にその場で効き（報告・システム概要を直せば調査エージェントがすぐ読む）、`environment.json` の
-`phase_dir` / `region` / `name` は起動時に読むので次回の起動（`aws-survey scan` / `claude` / `codex` / `run`）から効く。
+双方向にその場で効き（報告・前提・確認事項の回答欄を直せば調査エージェントがすぐ読む）、`environment.json` の
+`region` / `name` は起動時に読むので次回の起動（`aws-survey scan` / `claude` / `codex` / `run`）から効く。
 同じ `out/` に対して 2 つのエージェントを同時に走らせない。台帳と監査ログの書き手が競合する。
 `aws-survey scan` は起動前に `docker ps` で対話コンテナと自分の名前を見て、動いていれば止まる。
 
@@ -86,7 +86,7 @@
 
 | エージェント | 通常の編集・コマンド経由の監査ログ改変を防ぐもの |
 | --- | --- |
-| Claude Code | `settings.json` の `Edit(//home/node/aws-survey/out/_環境/aws-audit.log)` deny と、共通 Bash ガードの `has 'aws-audit'`。両方必要 |
+| Claude Code | `settings.json` の `Edit(//home/node/aws-survey/out/.survey/env/aws-audit.log)` deny と、共通 Bash ガードの `has 'aws-audit'`。両方必要 |
 | Codex | `codex/requirements.toml` が強制する管理対象 PreToolUse の `hooks/codex-guard.py`。コマンドとパッチ先を検査する |
 
 Claude 側の 2 経路が揃っていることは `tests/test_guards.py` の `AuditLogPermissions` が確認する。
@@ -109,20 +109,49 @@ Claude 側の 2 経路が揃っていることは `tests/test_guards.py` の `Au
 
 恒久的な許可の変更は、対象エージェントのガードとそのテストを同時に直す。
 `hooks/` や `settings.json` / `codex/` を変えたら、コンテナ内の環境の確認をやり直させる。
-既存の `out/_環境/00_動作確認.md` は消さず、そのエージェントに再確認と追記を頼む。
+既存の `out/.survey/env/check.md` は消さず、そのエージェントに再確認と追記を頼む。
 `libexec/session-guard.json` やロールのポリシーを変えたときは、代わりにホストで `aws-survey verify`
 （`.agents/rules/credentials.md`）。調査対象のアカウントを変えたときは両方。
 
-## `_環境/` を成果物と別区画に置く理由
+## `out/` の 2 区画と、`.survey/` を隠す理由
 
-`out/_環境/` に入るのは `00_動作確認.md`（初回に調査エージェントが書く）と `aws-audit.log`（フックが書く）。
-どちらもこの環境が期待どおり動いているかの記録で、調査の成果物ではない。だから仕事のフォルダと分ける。
+`out/` は `report/`（人が読む成果物）と `.survey/`（生データ・台帳・ノウハウ・調査ログ・環境の記録）の 2 つだけ。
+仕事ごとのフォルダは作らない。別の種類の仕事の成果物は `report/<仕事の名前>.md` として増え、生データは同じ `.survey/raw/` に足す
+（基礎調査の `raw/` を土台にするので、分ける理由がない）。台帳は `.survey/state.md` の 1 本で、全体と作業の 2 段にしない
+（仕事が 1 つのうちは同じ 1 行を 2 か所に書くだけだった）。番号付きのファイル名も使わない（読む順・仕事の番号・時系列が混ざる）。
+
+`.survey/` をドットで始めるのは、利用者が `out/` を開いたとき `report/` だけが見えるようにするため。生データは人が読むものではないので `.survey/raw/`。
+エージェントには `ls -A` で見せる（`survey-agents.md`・`method/00`）。Claude Code の権限の glob（`out/**`）がドットで始まるフォルダを
+含まない実装があるので、`settings.json` は `out/.survey/**` を Read / Edit の allow に明示している。外さないこと。
+
+調査ログ（`.survey/log/`）に叩いたコマンドの列挙を書かせない。監査ログ（`.survey/env/aws-audit.log`）が全件を持つので重複になる。
+ログに残すのは判断と訂正の経緯だけ。`.survey/` の中のファイル名は英語（`NN-<topic>.md`）。人が読まない区画なので日本語名にしない。
+
+`out/.survey/env/` に入るのは `check.md`（初回に調査エージェントが書く）と `aws-audit.log`（フックが書く）。
+どちらもこの環境が期待どおり動いているかの記録で、調査の成果物ではない。だから `report/` と分ける。
 
 この 2 つは対で読む。離して置かないこと。監査ログはフックが `out/` 配下にしか書けないので、
 動作確認だけ別の場所へ移すと証跡が対で読めなくなる。
 
-環境の自己点検を調査の仕事にしないこと。仕事のフォルダは調査の単位であり、
+環境の自己点検を調査の仕事にしないこと。`report/` は調査の成果物の置き場であり、
 「自分を縛る仕組みを検証せよ」という指示は、調査エージェントに知らせない前提を持ち込む。
+
+## 報告は経路で書かせ、一覧は付録に降ろす
+
+`method/04` の報告の型は「概要 → システムごとの経路 → どこにも繋がらないもの → 外からは分からないこと → 付録: リソース一覧」。
+A〜I の調査項目は網羅性の担保であって、読み手の順序ではない。本文をカテゴリ順にすると、権限・ネットワーク・稼働の事実が
+別々の節に散り、繋げれば言えること（設定が指す先が無く、権限も無く、動いた形跡も無い）が書かれなくなる。
+A〜I を本文の節に戻さない。件数は付録の表にだけ書かせる。
+
+`ユーザー確認事項.md` は「質問（見出し）→ 背景 2〜3 文 → 回答欄」の 3 つで書かせる。問いを吟味する観点（なぜ聞くのか・
+なぜ AWS から分からないのか・答えの使い道）を項目として並べると、質問が 5 つに見える。回答欄はユーザーが書く入口で、
+エージェントは回の始めに読み、書かれていれば答えとして扱う（`method/00`・`02`）。
+
+## `scan` の 2 回目は続きであって、やり直しではない
+
+「ユーザーが応答できない回」でも、`survey-status` に出ている経路（登録済みホスト・取り出してあるコード）は読ませる。
+以前は外側までに限っていたが、`scan` → `ec2` / `lambda` → `scan` の非対話の流れで中まで読んだ報告が出る方が、
+利用者にとって価値がある。報告が既にある回は `method/05` の検証から始め、経路と回答欄を読んで報告を更新する（`method/00`）。
 
 `Dockerfile` のビルド文脈は `container/`（`libexec/docker.sh` が `docker build -f <本体>/Dockerfile <本体>/container`）。
 `COPY` のパスは `container/` からの相対で書く。文脈の外は `COPY` できない。
@@ -142,7 +171,7 @@ echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs"}}' | b
 echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 terminate-instances --instance-ids i-0"}}' | bash $H; echo "exit=$?"
 #   → exit=2
 
-echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs > out/<作業>/raw/raw-x.json"}}' | bash $H; echo "exit=$?"
+echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs > out/.survey/raw/raw-x.json"}}' | bash $H; echo "exit=$?"
 #   → exit=0
 
 echo '{"tool_name":"Bash","tool_input":{"command":"aws ec2 describe-vpcs > out/../.claude/hooks/x.json"}}' | bash $H; echo "exit=$?"

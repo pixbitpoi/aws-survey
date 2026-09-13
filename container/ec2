@@ -12,7 +12,7 @@
 #
 # オプションは受け取らない。<host> は接続設定の Host 名と照合し、それ以外は ssh に渡さない。
 # 動詞と引数は 1 本の文字列にして送る（%q で量子化し、ゲートウェイが shlex で戻す）。
-# 出力は保存できる:  ec2 <host> tail /var/log/messages > out/<フェーズ>/raw/web1-messages.txt
+# 出力は保存できる:  ec2 <host> tail /var/log/messages > out/.survey/raw/web1-messages.txt
 #
 # SSM のセッションは、ゲートウェイが終わって EC2 側の sshd が接続を閉じることで終わる。
 # ssh が接続の段階で異常終了したとき（終了コード 255。転送の拒否・鍵の不一致・切断など）は

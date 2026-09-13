@@ -51,9 +51,6 @@ ROLE_NAME="${ROLE_NAME:-$(_get .auth.role_name)}"
 # 未設定なら空。
 REFRESH_CMD="${REFRESH_CMD:-$(_get .auth.refresh_command)}"
 DURATION="${DURATION:-$(_get .auth.duration_seconds)}"
-# 最初の仕事は基礎調査（scan が報告まで書く）。その器の名前。別の種類の仕事のフォルダは調査エージェントが out/ に自分で作る。
-SURVEY_PHASE_DIR="${SURVEY_PHASE_DIR:-$(_get .phase_dir)}"
-SURVEY_PHASE_DIR="${SURVEY_PHASE_DIR:-01_基礎調査}"
 # 調査に使うエージェント（claude / codex）とそのモデル・effort（libexec/agents.sh）。init が聞いて書き、最後に使ったものを
 # scan と claude / codex の入口が記録する。未定なら空で、scan が矢印キーで聞く。案内文の「次に打つコマンド」もこれで組み立てる。
 # 古い形（"agent": "claude"）も名前だけの指定として読む
@@ -71,7 +68,7 @@ if [ -n "$SURVEY_AGENT" ]; then
     || _die "environment.json の agent.effort が不正です: ${SURVEY_AGENT_EFFORT}（$(agent_label "$SURVEY_AGENT") は $(agent_effort_choices "$SURVEY_AGENT" | tr ' ' '/')）"
 fi
 
-for _v in SURVEY_NAME ACCOUNT_ID REGION PROFILE_SRC ROLE_NAME DURATION SURVEY_PHASE_DIR; do
+for _v in SURVEY_NAME ACCOUNT_ID REGION PROFILE_SRC ROLE_NAME DURATION; do
   [ -n "${!_v}" ] || _die "environment.json に $_v にあたる項目がありません。templates/environment.json と見比べてください。"
 done
 case "$SURVEY_NAME$ACCOUNT_ID$REGION" in

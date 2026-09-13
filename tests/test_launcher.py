@@ -74,7 +74,8 @@ class Launcher(unittest.TestCase):
         self.assert_distribution_mounts(launch, self.root)
         self.assertIn(f'{keys}:/home/node/.aws-claude:ro', launch)
         self.assertIn(f'{self.root}/out:/home/node/aws-survey/out', launch)
-        self.assertTrue((self.root / 'out/01_基礎調査/raw').is_dir())
+        for d in ('out/report', 'out/.survey/raw', 'out/.survey/log', 'out/.survey/env'):
+            self.assertTrue((self.root / d).is_dir(), d)
         build = next(call for call in calls if call[0] == 'build')
         self.assertEqual(build[-3:], ['-f', f'{self.root}/Dockerfile', f'{self.root}/container'])
 
@@ -136,7 +137,7 @@ class Launcher(unittest.TestCase):
         self.assert_distribution_mounts(launch, self.root)
         self.assertIn(f'{keys}:/home/node/.aws-claude:ro', launch)
         self.assertIn(f'{target}/out:/home/node/aws-survey/out', launch)
-        self.assertTrue((target / 'out/_環境').is_dir())
+        self.assertTrue((target / 'out/.survey/env').is_dir())
         self.assertFalse((self.root / 'out').exists())
         self.assertFalse((elsewhere / 'out').exists())
 
@@ -272,13 +273,13 @@ class ContainerVerifiedMilestone(unittest.TestCase):
 
     def test_empty_check_records_nothing(self):
         self.launch()
-        (self.root / 'out/_環境/00_動作確認.md').write_text('')
+        (self.root / 'out/.survey/env/check.md').write_text('')
         self.launch()
         self.assertIsNone(self.recorded())
 
     def test_written_check_is_recorded_once(self):
         self.launch()
-        (self.root / 'out/_環境/00_動作確認.md').write_text('確認しました\n')
+        (self.root / 'out/.survey/env/check.md').write_text('確認しました\n')
         self.launch()
         first = self.recorded()
         self.assertRegex(first, r'^\d{4}-\d{2}-\d{2}$')
