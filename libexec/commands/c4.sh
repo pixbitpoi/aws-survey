@@ -83,10 +83,40 @@ rm -rf "$C4_NEW"
 mkdir -p "$C4_NEW" || ui_die "書き込めません: $C4_NEW"
 LOG=$(mktemp) || ui_die "一時ファイルを作れません。"
 trap 'rm -f "$LOG"; rm -rf "$C4_NEW"' EXIT
+# 見本を 1 行に詰めた `... { tags "外部" }` や `{ include * autoLayout lr }` は Structurizr が「Too many tokens」で拒む
+# （{ の後は改行が要る。2026-09-13 に実環境で発生）。この形だけは、DSL 本体を触らずに .new/ の写しで行を分けて描く
+# （写しは .new/ ごと消える）。分けるのは行末が `{ ... }` の行だけで、中を引用符の外にある文の先頭語（tags / include /
+# autoLayout / background …）の前で切る。見本どおりの DSL には何もしない
+c4_split_one_liners() {
+  awk '
+    BEGIN { n = split("tags include exclude autoLayout autolayout description technology url properties perspectives dashed background color colour shape border opacity fontSize width height thickness routing position stroke strokeWidth icon metadata instances", kw, " "); for (i = 1; i <= n; i++) KW[kw[i]] = 1 }
+    {
+      if (!match($0, /\{[^{}]*\}[ \t]*$/)) { print; next }
+      pre = substr($0, 1, RSTART - 1); inner = substr($0, RSTART + 1, RLENGTH - 2); sub(/[ \t]*\}[ \t]*$/, "", inner)
+      out = ""; line = ""; tok = ""; q = 0; m = length(inner)
+      for (i = 1; i <= m + 1; i++) {
+        c = (i <= m) ? substr(inner, i, 1) : " "
+        if (c == "\"") q = !q
+        if (c == " " && !q) {
+          if (tok != "") {
+            bare = tok; gsub(/"/, "", bare)
+            if ((bare in KW) && line != "" && !(bare == "dashed" && line == "border")) { out = out "    " line "\n"; line = "" }
+            line = (line == "") ? tok : line " " tok; tok = ""
+          }
+        } else tok = tok c
+      }
+      if (line != "") out = out "    " line "\n"
+      printf "%s{\n%s}\n", pre, out
+    }' "$1"
+}
+WORKSPACE=workspace.dsl
+if grep -Eq '\{[^{}]+\}[[:space:]]*$' "$C4_DSL"; then
+  c4_split_one_liners "$C4_DSL" > "$C4_NEW/workspace.dsl" && WORKSPACE=.new/workspace.dsl
+fi
 ui_status "C4 図を描いています"
 docker run --rm --network none --user "$(id -u):$(id -g)" \
   -v "$C4_DIR:/usr/local/structurizr" \
-  "$C4_IMAGE" export -workspace workspace.dsl -format png -output /usr/local/structurizr/.new > "$LOG" 2>&1
+  "$C4_IMAGE" export -workspace "$WORKSPACE" -format png -output /usr/local/structurizr/.new > "$LOG" 2>&1
 rc=$?
 ui_status_done
 

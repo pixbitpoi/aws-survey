@@ -207,7 +207,9 @@ AWS は叩かない）を添える。Organizations の一覧（`organizations li
 コンテナでは DSL の文法を確かめられないので、これが唯一の戻り道）。描くのは Structurizr の公式イメージ（`-playwright` タグ。
 版は `c4.sh` にだけ置く）で、渡すのは `out/report/c4/` のマウントだけ。`--network none` で動かすので、DSL の `theme` や `!include` の URL は
 効かない（`method/report.md` が `styles` の直書きを求めるのはそのため）。一時キーも `container.sh` も使わない（読むのは AWS ではなく DSL）。
-出力は `c4/.new/` に書いてから入れ替える（ビューを消したときに古い PNG を残さない）。`out/` に書くホストの部品はこれだけで、
+出力は `c4/.new/` に書いてから入れ替える（ビューを消したときに古い PNG を残さない）。エージェントが見本を `{ tags "外部" }` /
+`{ include * autoLayout lr }` のように 1 行に詰めると Structurizr が「Too many tokens」で拒む（2026-09-13 に実環境で発生。`method/report.md` に
+「`{` の後は改行」の決まりがある）。この形だけは `c4_split_one_liners` が `.new/` の写しで文の先頭語の前で行を分けて描く。本体の DSL は触らない。`out/` に書くホストの部品はこれだけで、
 書くのは PNG と `_render-error.txt` に限る（DSL と報告は触らない）。引数なしの `aws-survey` は PNG が DSL より古いときだけ `c4` を並べ、
 `status` は状態を 1 行出す（`c4_state`）。偽の `docker` での検証は `tests/test_c4.py`、`scan` からの呼び出しは `tests/test_scan.py` の `C4`。
 

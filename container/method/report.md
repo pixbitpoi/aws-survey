@@ -70,6 +70,7 @@ PNG はこの環境では作れません。この回の終わりに外で作ら�
 
 - 系統 1 つが `softwareSystem`、その中の AWS リソースが `container`。技術の欄に種類と版（`ECS Fargate x2`、`Aurora MySQL 8`）
 - 利用者は `person`。AWS の外は `softwareSystem` に `tags "外部"`
+- `{` の後は改行し、`tags` は自分の行に書きます。`softwareSystem "Slack" "通知" { tags "外部" }` のように 1 行に詰めると描けません
 - キーは英数字とハイフンだけ（ファイル名になる）。どのビューにも `include *` と `autoLayout lr`
 - `theme`・`!include`・URL は使いません（外に出ない環境なので効かない）。`styles` は見本のものをそのまま写します
 - 秘密の値・アカウント ID・IP アドレス（CIDR は可）を図に入れません

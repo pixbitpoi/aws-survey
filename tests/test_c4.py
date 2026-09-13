@@ -29,6 +29,9 @@ for i, a in enumerate(argv):
         src, dst = argv[i + 1].split(":")[:2]; mounts[dst] = src
 out = argv[argv.index("-output") + 1]
 root = mounts["/usr/local/structurizr"]
+# 渡された DSL（本体か .new/ の写し）を残す。1 行の tags を分けたかをテストが見る
+with open(os.path.join(root, argv[argv.index("-workspace") + 1])) as f:
+    open(os.environ["FAKE_LOG"] + ".dsl", "w").write(f.read())
 out_host = os.path.join(root, os.path.relpath(out, "/usr/local/structurizr"))
 if os.environ.get("FAKE_C4_FAIL"):
     print("12:00:00.000 [main] ERROR com.structurizr.command.ExportCommand -- Unexpected end of DSL content - are one or more closing curly braces missing?", file=sys.stderr)
@@ -95,6 +98,35 @@ class Render(C4Case):
         self.assertFalse((self.c4 / '.new').exists())
         self.assertFalse((self.c4 / '_render-error.txt').exists())
         self.assertIn('C4 図を描きました（2 枚', result.stdout)                     # legends are not counted
+
+    def test_one_line_tags_are_split_in_a_copy_before_rendering(self):
+        # `... { tags "外部" }` や `{ include * autoLayout lr }` を 1 行に詰めた DSL は Structurizr が拒む。
+        # 本体は触らず、.new/ の写しで文の先頭語の前で行を分けて描く（引用符の中の語や `border dashed` は切らない）
+        self.write_dsl()
+        dsl = DSL.replace('u = person "u"', 'u = person "u" "利用者 tags" { tags "外部" "推測" }\n        s = softwareSystem "s" { tags "外部" }')
+        dsl = dsl.replace('            include *\n            autoLayout lr\n        }', '            include *\n            autoLayout lr\n        }\n'
+                          '        styles {\n            element "x" { background #ffffff color #cc0000 border dashed }\n'
+                          '            relationship "推測" { thickness 2 dashed true }\n        }')
+        dsl = dsl.replace('systemLandscape "landscape" {\n            include *\n            autoLayout lr\n        }',
+                          'systemLandscape "landscape" { include * autoLayout lr }')
+        (self.c4 / 'workspace.dsl').write_text(dsl)
+        result = self.run_cli('c4')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        run = self.runs()[-1]
+        self.assertEqual(run[run.index('-workspace') + 1], '.new/workspace.dsl')
+        self.assertEqual((self.c4 / 'workspace.dsl').read_text(), dsl)               # 本体はそのまま
+        self.assertFalse((self.c4 / '.new').exists())                              # 写しは残らない
+        self.assertTrue((self.c4 / 'landscape.png').exists())
+        copy = (self.log.parent / (self.log.name + '.dsl')).read_text()      # 偽 docker が受け取った写し
+        self.assertIn('u = person "u" "利用者 tags" {\n    tags "外部" "推測"\n}\n', copy)
+        self.assertIn('s = softwareSystem "s" {\n    tags "外部"\n}\n', copy)
+        self.assertIn('systemLandscape "landscape" {\n    include *\n    autoLayout lr\n}\n', copy)
+        self.assertIn('element "x" {\n    background #ffffff\n    color #cc0000\n    border dashed\n}\n', copy)
+        self.assertIn('relationship "推測" {\n    thickness 2\n    dashed true\n}\n', copy)
+        # 見本どおりに書かれていれば、本体をそのまま渡す
+        self.write_dsl()
+        self.run_cli('c4', '--force')
+        self.assertEqual(self.runs()[-1][self.runs()[-1].index('-workspace') + 1], 'workspace.dsl')
 
     def test_a_dsl_error_leaves_the_cause_for_the_agent_and_keeps_the_old_pngs(self):
         self.write_dsl()
