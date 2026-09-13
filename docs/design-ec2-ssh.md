@@ -556,7 +556,7 @@ SSM 側の後片付けは `ec2` ラッパーの `terminate-session` だけが持
 | `session-manager-plugin` と `openssh-client` | `Dockerfile` | `aws ssm start-session` の実体。AWS の deb を arch 別に入れる（`AWSCLI_ARCH` の `aarch64` → `ubuntu_arm64`、`x86_64` → `ubuntu_64bit`。deb に依存パッケージは無く `dpkg -i` で入る） |
 | `ec2` ラッパー | `container/ec2` → `/usr/local/bin/ec2`（root 所有） | `ssh -F ~/.aws-claude/ssh/config -- <host> <argv>` を組む。オプションは一切受け取らず、`<host>` は config の `Host` と照合。`--list`（ホスト一覧）と `--selftest <host>`（§7）だけが例外。SSM セッションの後片付けを二層で持つ（接続の前に前回までの残りを、異常終了時にその接続の残りを終了する。§7） |
 | フックの追加 | `container/hooks/aws-readonly-guard.sh`・`codex-guard.py`・`settings.json` | `ssh` / `scp` / `sftp` / `session-manager-plugin` の直接実行を拒否。`ec2 ` で始まる単独コマンドは、`aws` と同じ「`> out/…` だけ許す」規則で通す。監査ログに記録。Codex 側は `ec2` を `aws` と同じく Bash ガードへ委ねる。`settings.json` は `Bash(ec2:*)` を allow、`ssh` / `scp` / `sftp` / `session-manager-plugin` を deny に足す（フックと二重） |
-| `method/06_EC2の中を調べる.md` | `container/method/` | 動詞の使い方。`ls` / `find` で場所を突き止めてから `tail` / `grep`、大きい出力は `raw/` に落とす、の作法 |
+| `method/経路.md` | `container/method/` | 動詞の使い方。`ls` / `find` で場所を突き止めてから `tail` / `grep`、大きい出力は `raw/` に落とす、の作法 |
 | `survey-status` | `container/survey-status` | 登録済みホストを表示 |
 
 鍵の置き場は `~/.aws-claude/ssh/`（ホストの `$AWS_DIR/ssh/` の ro マウント）。**コンテナの中から使えるが、

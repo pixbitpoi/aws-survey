@@ -89,7 +89,7 @@ class Guards(unittest.TestCase):
             # Lambda: code URLs are refused by service and verb together; cloudfront get-function is a different API
             ('aws lambda get-function-configuration --function-name f', True),
             ('aws lambda list-functions --max-items 10', True),
-            # method/07: configuration saved with the variable names and only the chosen non-secret values
+            # method/経路.md: configuration saved with the variable names and only the chosen non-secret values
             ("aws lambda get-function-configuration --function-name f --query '{Runtime:Runtime,Handler:Handler,Role:Role,"
              "CodeSha256:CodeSha256,EnvNames:keys(Environment.Variables),EnvValues:{TABLE_NAME:Environment.Variables.TABLE_NAME}}'"
              " > out/.survey/raw/raw-lambda-cfg-f.json", True),

@@ -21,7 +21,7 @@ show_context() {
 }
 
 # 取り出してある Lambda のコード（ro マウント）。関数ごとの _manifest.json を数えるだけで、AWS は叩かない。
-# 取り出したあとに更新されたかは、読むときに CodeSha256 を比べる（method/07）。無い対象では何も出さない。
+# 取り出したあとに更新されたかは、読むときに CodeSha256 を比べる（method/経路.md）。無い対象では何も出さない。
 show_code() {
   local manifests n last at=""
   [ -d "$CODE_DIR/lambda" ] || return 0
@@ -33,7 +33,7 @@ show_code() {
     [ -z "$last" ] || at=$(date -d "$last" '+%m/%d %H:%M' 2>/dev/null)
   fi
   sui_line "取り出してある Lambda のコード: 関数 ${n} 件${at:+（最後の取り出し $at）}"
-  sui_note "code/ に読み取り専用。作法は method/07_Lambdaのコードを読む.md"
+  sui_note "code/ に読み取り専用。作法は method/経路.md"
 }
 
 # EC2 の中を調べられるホスト。接続設定（ro マウント）に Host があるときだけ出す。無い対象では何も出さない。
@@ -44,7 +44,7 @@ show_hosts() {
   hosts="${hosts% }"
   [ -n "$hosts" ] || return 0
   sui_line "EC2 の中を調べられるホスト: $hosts"
-  sui_note "ec2 <host> help で動詞の一覧。作法は method/06_EC2の中を調べる.md"
+  sui_note "ec2 <host> help で動詞の一覧。作法は method/経路.md"
 }
 
 echo

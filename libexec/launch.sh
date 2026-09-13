@@ -18,7 +18,7 @@ OUT_DIR="$AWS_SURVEY_DIR/out"
 # out/.survey/env/ は「この環境自体の記録」＝ 動作確認の結果と監査ログ（ホスト側で回収する証跡）。
 # コンテナ内からは mkdir できてもよいが、器はホスト側で用意しておく。
 # code/（aws-survey lambda pull の取り出し先）は空でも作って常に読み取り専用で渡す。コンテナを動かしたまま
-# lambda pull したものが起動し直さずに見える（method/07 の依頼文の前提）
+# lambda pull したものが起動し直さずに見える（method/経路.md の依頼文の前提）
 launch_prepare_dirs() {
   mkdir -p "$OUT_DIR/report" "$OUT_DIR/.survey/raw" "$OUT_DIR/.survey/log" "$OUT_DIR/.survey/env"
   mkdir -p "$AWS_SURVEY_DIR/code"

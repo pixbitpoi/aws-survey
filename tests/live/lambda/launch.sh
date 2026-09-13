@@ -241,6 +241,6 @@ cat <<EOF
 次の手順（対象フォルダで。リージョンが environment.json と違うなら --region ${AWS_REGION}）:
   aws-survey lambda pull $py $node
   $(pwd)/check.sh <対象フォルダ> $name     # 取り出したものが期待どおりか（AWS は叩かない）
-  aws-survey run                            # 中で method/07 に沿って読ませる
+  aws-survey run                            # 中で method/経路.md に沿って読ませる
   ./cleanup.sh $name                        # 片付け（対象フォルダの code/ は aws-survey lambda remove --all）
 EOF

@@ -143,7 +143,7 @@ class Launcher(unittest.TestCase):
 
     def test_code_dir_is_always_mounted_read_only(self):
         """code/ (aws-survey lambda pull) reaches the container read-only. It is created empty so that a pull
-        made while the container runs shows up without a restart (the request sentence in method/07 relies on it)."""
+        made while the container runs shows up without a restart (the request sentence in method/経路.md relies on it)."""
         write_environment(self.root)
         keys = self.root / 'keys'
         keys.mkdir()
