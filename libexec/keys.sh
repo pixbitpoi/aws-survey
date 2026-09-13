@@ -43,6 +43,25 @@ key_state() {
   if [ "$exp_epoch" -le "$now" ]; then KEY_STATE=expired; else KEY_STATE=valid; fi
 }
 
+# ---- 元プロファイルの種類 ----
+# aws-login の MFA 運用: 長期キーの <名> に mfa_serial を持ち、MFA を通した一時キーを <名>-mfa に保存する。
+# 信頼ポリシーに MFA の条件があるロールは、長期キーのままでは借りられないので、借りる元は <名>-mfa。
+# ここでは ~/.aws の設定だけ読み、AWS は叩かない。
+profile_conf() { aws configure get "$1" --profile "$2" 2>/dev/null; }
+# 長期キー（aws_access_key_id があり aws_session_token が無く、SSO / role_arn / credential_process でもない）なら 0
+profile_is_long_term_key() {
+  local p="$1"
+  [ -n "$(profile_conf aws_access_key_id "$p")" ] || return 1
+  [ -z "$(profile_conf aws_session_token "$p")" ] || return 1
+  [ -z "$(profile_conf sso_session "$p")$(profile_conf sso_start_url "$p")$(profile_conf role_arn "$p")$(profile_conf credential_process "$p")" ]
+}
+# MFA を求めるときにロールを借りる元。長期キーの <名> なら aws-login の保存先 <名>-mfa、それ以外はそのまま
+mfa_source_profile() {
+  local p="$1"
+  case "$p" in *-mfa) echo "$p"; return 0 ;; esac
+  if profile_is_long_term_key "$p"; then echo "${p}-mfa"; else echo "$p"; fi
+}
+
 # ---- 足りなければ発行し直す ----
 # 一時キーを使うコマンドは、利用者に credentials を打たせず、入口でここを通る。発行し直すのは次のどれか:
 # 無い・期限切れ・期限を読めない・残りが要る分数に足りない・登録済みホスト（ssh.hosts）と発行時の記録（session.json の

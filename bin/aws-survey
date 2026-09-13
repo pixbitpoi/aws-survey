@@ -751,7 +751,7 @@ init_interactive() {
 
   init_begin "source_profile" \
     "ロールを借りる元になるホスト側のプロファイル（aws configure list-profiles）。調べるアカウントは、このプロファイルでログインするアカウントになります。" \
-    "いま有効なキーを持つ方を選びます。MFA の一時キーを別プロファイル（<名>-mfa など）に保存する運用なら、その保存先の方です。"
+    "いま有効なキーを持つ方を選びます。長期キーのプロファイルなら、MFA の一時キーの保存先 <名>-mfa（aws-login が作ります）から借ります。"
   profiles=$(profile_candidates)
   if [ -z "$profiles" ]; then
     ui_err "プロファイルが 1 つもありません（~/.aws/config）。先に aws configure か aws configure sso で作ってください。"
@@ -882,6 +882,23 @@ init_noninteractive() {
   done
 }
 
+# MFA 済みを求めるとき、長期キーの <名> ではロールを借りられない（信頼ポリシーの条件）。借りる元を aws-login の保存先 <名>-mfa にする
+# （keys.sh の mfa_source_profile。~/.aws の設定だけ読む）。対話では、元プロファイルに mfa_serial が無ければ登録済みのデバイスを
+# 引いて（1 つのときだけ）保存し、aws-login が聞かずに済むようにする。非対話では AWS を叩かない
+init_resolve_source() {
+  local orig="$I_PROFILE" serial
+  [ "$I_MFA" = true ] || return 0
+  I_PROFILE=$(mfa_source_profile "$orig")
+  [ "$I_PROFILE" != "$orig" ] || return 0
+  init_fixed "ロールを借りる元" "$I_PROFILE" "（aws-login が MFA の一時キーを保存する先。無ければ credentials のときに aws-login が作ります）"
+  [ "$INIT_MODE" = interactive ] || return 0
+  [ -z "$(profile_conf mfa_serial "$orig")" ] || return 0
+  serial=$(aws iam list-mfa-devices --profile "$orig" --query 'MFADevices[].SerialNumber' --output text 2>/dev/null | tr -s '\t' '\n')
+  case "$serial" in ""|None|*$'\n'*) return 0 ;; esac
+  aws configure set mfa_serial "$serial" --profile "$orig" 2>/dev/null || return 0
+  init_fixed "MFA デバイス" "$serial" "（~/.aws/config の [profile ${orig}] に mfa_serial として保存。aws-login が使います）"
+}
+
 # 対話・非対話で共通の検証
 init_validate() {
   valid_name "$I_NAME"         || init_die "name が不正です: ${I_NAME}（[A-Za-z0-9_-]+）"
@@ -897,7 +914,9 @@ init_validate() {
     init_die "duration_seconds ${I_DURATION} は長すぎます。貸す相手（${I_ARN}）はロールを借りてのログインなので、AWS の決まり（ロールチェーン）で 1 時間（3600）が上限です。ロール側の上限では延ばせません。"
   fi
   valid_role "$I_ROLE"         || init_die "role_name が不正です: $I_ROLE"
-  profile_exists "$I_PROFILE"  || init_die "source_profile がプロファイル一覧にありません: ${I_PROFILE}（aws configure list-profiles）"
+  # <名>-mfa は aws-login が最初の credentials のときに作るので、元の <名> があればよい
+  profile_exists "$I_PROFILE" || { [ "$I_MFA" = true ] && [ "${I_PROFILE%-mfa}" != "$I_PROFILE" ] && profile_exists "${I_PROFILE%-mfa}"; } \
+    || init_die "source_profile がプロファイル一覧にありません: ${I_PROFILE}（aws configure list-profiles）"
   # エージェントは未定でもよい（scan が聞く）。決めるならモデル・effort は既定で埋め、値を確かめる
   if [ -n "$I_AGENT" ]; then
     agent_valid "$I_AGENT"     || init_die "agent が不正です: ${I_AGENT}（claude か codex）"
@@ -1042,6 +1061,7 @@ cmd_init() {
   print_places
   init_confirm_replace
   if [ "$INIT_MODE" = noninteractive ]; then init_noninteractive; else init_interactive; fi
+  init_resolve_source
   init_validate
   init_write
   init_scaffold

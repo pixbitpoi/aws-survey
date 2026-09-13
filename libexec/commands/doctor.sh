@@ -4,6 +4,7 @@
 set -uo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/keys.sh"
 
 route_label() {
   case "$1" in
@@ -29,6 +30,10 @@ step() { local n="$1" title="$2"; shift 2; ui_head "$n $title"; if out=$("$@" 2>
 step "1/4" "プロファイル $PROFILE_SRC でログインできているか" \
   aws sts get-caller-identity --profile "$PROFILE_SRC" --output json \
   || ui_text "ログインし直してから、もう一度実行してください。"
+if [ "$MFA_REQUIRED" = true ] && profile_is_long_term_key "$PROFILE_SRC"; then
+  ui_warn "$PROFILE_SRC は MFA を通していない長期キーです。MFA 済みを求めるロールは借りられません（3 で AccessDenied になります）"
+  ui_text "aws-login が MFA の一時キーを保存する ${PROFILE_SRC}-mfa を auth.source_profile にします。$AWS_SURVEY_CMD credentials がその場で直せます。"
+fi
 echo ""
 step "2/4" "ロール $ROLE_NAME の状態" \
   aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME" \

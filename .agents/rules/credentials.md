@@ -177,6 +177,18 @@ AWS は叩かない）を添える。Organizations の一覧（`organizations li
 ファイルやコマンドに書く値には使わない）。
 `refresh_command` の既定は `aws-login --profile <元プロファイル>`（`refresh_default`）。`<名>-mfa` は aws-login が作る
 一時キーの保存先なので、渡すのは `-mfa` を外した元の名前。aws-login は formula の依存なので、在る前提で既定に出す。
+`mfa_required` が true なら、ロールを借りる元（`source_profile`）は MFA を通した一時キーでなければならない（信頼ポリシーの
+`aws:MultiFactorAuthPresent` の条件）。選んだのが長期キーのプロファイル（`aws_access_key_id` があり `aws_session_token` が無く、SSO /
+`role_arn` / `credential_process` でもない。`keys.sh` の `profile_is_long_term_key`。`~/.aws` の設定だけ読む）なら、`init` は
+`source_profile` を `<名>-mfa` に置き換えて `◆ ロールを借りる元` に出す（`init_resolve_source`。`mfa_source_profile`）。`<名>-mfa` は最初の
+`credentials` のときに aws-login が作るので、`init` の検証は元の `<名>` があれば通す。対話では、元プロファイルに `mfa_serial` が無く
+登録済みの MFA デバイスが 1 つなら `aws configure set mfa_serial` で保存して `◆ MFA デバイス` に出す（aws-login が聞かずに済む）。
+非対話では AWS を叩かない。`credentials.sh` の 1/3 は、`mfa_required` が true で `source_profile` が長期キーのままなら（この改修より前の
+`init` で作った対象や手で書いた対象）、`auth.duration_seconds` と同じ型で「`<名>` → `<名>-mfa` に直して続けますか？ (Y/n)」と聞き、
+はいなら `source_profile` と（無ければ）`refresh_command` を書き換えて続ける（`fix_source_or_die`。読めなければ案内だけで止まる）。
+直したあとは `<名>-mfa` が無い・切れているときの通常の流れ（`refresh_command` を 1 度走らせる）に乗るので、aws-login が MFA コードを
+聞いて `<名>-mfa` を作り、それで借りる。`doctor` の 1/4 も同じ判定で ⚠ を出す。偽の `aws` / `aws-login` での検証は `tests/test_cli.py`
+（`FAKE_LONG_TERM` / `FAKE_MFA_DEVICES` / `FAKE_MFA_LOGIN_FILE`）。
 全角括弧が変数の直後に来るときは `$VAR（` ではなく `${VAR}（` と波括弧で囲む。
 本体の場所を `$PWD` で、対象フォルダの場所をスクリプトの位置で決めない。`cd` してから相対パスで
 参照するのもやめる。対象を切り替えても一時キーが上書きされないよう、`AWS_DIR` は `name` ごとに分ける。

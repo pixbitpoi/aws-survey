@@ -8,6 +8,7 @@
 set -uo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/keys.sh"
 
 GUARD="$LIBEXEC_DIR/session-guard.json"
 OUT="$AWS_DIR"
@@ -28,6 +29,35 @@ check_source() {
   who=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --output text 2>&1)
 }
 
+# MFA 済みを求めるロールを、MFA を通していない長期キーで借りようとしている（environment.json の auth.source_profile が
+# aws-login の元プロファイルのまま）。借りる元を aws-login の保存先 <名>-mfa に直して続ける（聞いて「はい」のときだけ。
+# 読めなければ案内だけで止まる）。refresh_command が無ければ aws-login にする。直したあとは <名>-mfa が無い・切れている
+# ときの通常の流れ（refresh_command を 1 度走らせる）に乗る
+fix_source_or_die() {
+  local orig="$PROFILE_SRC" dest="${PROFILE_SRC}-mfa" ans tmp refresh
+  refresh="$REFRESH_CMD"; [ -n "$refresh" ] && [ "$refresh" != null ] || refresh="aws-login --profile $orig"
+  ui_text "MFA を通した一時キーは aws-login が $dest に保存します。ロールを借りる元はそちらです。"
+  ui_pause
+  ui_tty "$(printf '  %s❯%s environment.json の auth.source_profile を %s → %s に直して、そのまま続けますか？ %s(Y/n)%s: ' \
+    "$C_CYAN" "$C_RESET" "$orig" "$dest" "$C_DIM" "$C_RESET")"
+  if read_line ans; then
+    ui_resume
+    [ -t 0 ] || echo ""
+    case "$ans" in
+      ""|y|Y|yes|YES)
+        tmp=$(mktemp) && jq --arg p "$dest" --arg r "$refresh" '.auth.source_profile = $p | .auth.refresh_command = $r' "$ENV_FILE" > "$tmp" \
+          && mv "$tmp" "$ENV_FILE" || die "environment.json を書き換えられませんでした: $ENV_FILE"
+        PROFILE_SRC="$dest"; REFRESH_CMD="$refresh"
+        ui_ok "environment.json の auth.source_profile を $dest にしました"
+        return 0 ;;
+    esac
+  fi
+  ui_resume
+  echo ""
+  ui_text "environment.json の auth.source_profile を $dest にしてから、もう一度実行してください: $ENV_FILE"
+  die "一時キーを発行できませんでした。$OUT は変更していません。"
+}
+
 ui_title "aws-survey credentials"
 ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
 ui_kv "アカウント" "$ACCOUNT_ID"
@@ -36,6 +66,10 @@ ui_kv "ロール" "$ROLE_NAME"
 echo ""
 
 ui_head "1/3 ホストのプロファイル $PROFILE_SRC でログインできているか"
+if [ "$MFA_REQUIRED" = true ] && profile_is_long_term_key "$PROFILE_SRC"; then
+  ui_warn "$PROFILE_SRC は MFA を通していない長期キーなので、MFA 済みを求めるロール $ROLE_NAME を借りられません"
+  fix_source_or_die
+fi
 if ! check_source; then
   ui_warn "使えません"
   ui_raw "$who"

@@ -199,7 +199,8 @@ class Ls(ResourcesCase, PtyMixin):
         self.assertIn('一時キーがありません。一時キーを発行し直します', result.stdout)
         self.assertIn('一時キーを発行しました', result.stdout)
         self.assertNotIn('次に打つコマンド: aws-survey credentials', result.stdout)
-        host = [c for c in self.aws_calls() if not c['in_container']]
+        # configure get は ~/.aws を読むだけ（元プロファイルが長期キーかの判定）なので、AWS を叩く呼び出しだけ見る
+        host = [c for c in self.aws_calls() if not c['in_container'] and c['op'] != 'get']
         self.assertEqual([c['op'] for c in host], ['get-caller-identity', 'get-role', 'assume-role'])
         self.assertTrue((self.key_dir() / 'session.json').exists())
         self.assertEqual(len(self.docker_runs()), 1)

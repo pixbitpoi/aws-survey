@@ -38,11 +38,22 @@ elif argv[:2] == ["configure", "get"]:
         print("fake-sso")
     elif key == "sso_account_id" and prof == "sso-prof":
         print(os.environ.get("FAKE_SSO_ACCOUNT", "000000000000"))
+    elif key == "aws_access_key_id" and prof in os.environ.get("FAKE_LONG_TERM", "").split(","):
+        print("AKIALONGTERM")
+    elif key == "mfa_serial" and os.environ.get("FAKE_MFA_SERIAL"):
+        print(os.environ["FAKE_MFA_SERIAL"])
     else:
         sys.exit(1)
+elif argv[:2] == ["configure", "set"]:
+    pass
+elif argv[:2] == ["iam", "list-mfa-devices"]:
+    print(os.environ.get("FAKE_MFA_DEVICES", ""))
 elif "get-caller-identity" in argv:
     if os.environ.get("FAKE_CALLER_FAIL"):
         sys.stderr.write("Error when retrieving token from sso: Token has expired\\n"); sys.exit(255)
+    prof = argv[argv.index("--profile") + 1] if "--profile" in argv else ""
+    if prof.endswith("-mfa") and os.environ.get("FAKE_MFA_LOGIN_FILE") and not os.path.exists(os.environ["FAKE_MFA_LOGIN_FILE"]):
+        sys.stderr.write("The config profile (%s) could not be found\\n" % prof); sys.exit(255)
     arn = os.environ.get("FAKE_CALLER_ARN", "arn:aws:iam::000000000000:user/fake")
     print(arn if "--query" in argv else json.dumps({"Arn": arn, "Account": "000000000000"}))
 elif "get-role" in argv:
@@ -75,6 +86,14 @@ elif "assume-role" in argv:
                       "PackedPolicySize": 42}))
 else:
     print("{}")
+'''
+
+# aws-login の偽物。MFA の一時キーを <名>-mfa に保存した印（FAKE_MFA_LOGIN_FILE）を置くだけ
+FAKE_AWS_LOGIN = '''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(json.dumps(["aws-login"] + sys.argv[1:]) + "\\n")
+open(os.environ["FAKE_MFA_LOGIN_FILE"], "w").close()
 '''
 
 FAKE_DOCKER = '''#!/usr/bin/env python3
@@ -526,6 +545,53 @@ class Dispatch(CliCase):
         self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['duration_seconds'], 3600)
         self.assertEqual(len([c for c in self.calls() if 'assume-role' in c]), 2)
 
+    def long_term_mfa_setup(self):
+        # 信頼ポリシーは MFA 済みを求めるのに、借りる元が aws-login の元プロファイル（長期キー）のまま
+        self.write_environment(setup={'route_decided': '2026-09-08', 'role_created': '2026-09-08'})
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['auth'].update(mfa_required=True)
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        self.add_tool('aws-login', FAKE_AWS_LOGIN)
+        return {'FAKE_LONG_TERM': 'fake-src', 'FAKE_MFA_LOGIN_FILE': str(self.base / 'mfa-login')}
+
+    def test_credentials_moves_a_long_term_source_to_the_mfa_profile_and_runs_aws_login(self):
+        env = self.long_term_mfa_setup()
+        # 読めなければ案内だけで止まり、environment.json も AWS も触らない
+        result = self.run_cli('credentials', **env)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('MFA を通していない長期キー', result.stdout)
+        self.assertIn('auth.source_profile を fake-src-mfa にしてから', result.stdout)
+        self.assertFalse(any('assume-role' in c or c[0] == 'aws-login' for c in self.calls()))
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['source_profile'], 'fake-src')
+        # 「はい」なら environment.json を直し、無い fake-src-mfa を aws-login に作らせてから、そちらで発行する
+        result = self.run_cli('credentials', input='y\n', **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('auth.source_profile を fake-src-mfa にしました', result.stdout)
+        self.assertIn('発行しました', result.stdout)
+        config = json.loads((self.target / 'environment.json').read_text())
+        self.assertEqual(config['auth']['source_profile'], 'fake-src-mfa')
+        self.assertEqual(config['auth']['refresh_command'], 'aws-login --profile fake-src')
+        calls = self.calls()
+        self.assertIn(['aws-login', '--profile', 'fake-src'], calls)
+        assume = next(c for c in calls if 'assume-role' in c)
+        self.assertEqual(assume[assume.index('--profile') + 1], 'fake-src-mfa')
+        self.assertLess(calls.index(['aws-login', '--profile', 'fake-src']), calls.index(assume))
+        # 直した後は聞かれず、切れていなければ aws-login も呼ばない
+        result = self.run_cli('credentials', **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('長期キー', result.stdout)
+        self.assertEqual(len([c for c in self.calls() if c[0] == 'aws-login']), 1)
+
+    def test_run_moves_a_long_term_source_before_the_container(self):
+        # 入口の key_ensure（畳んだ表示）からでも同じ流れで直る
+        env = self.long_term_mfa_setup()
+        result = self.run_cli('run', input='y\n', **env)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['source_profile'], 'fake-src-mfa')
+        calls = self.calls()
+        self.assertLess(calls.index(['aws-login', '--profile', 'fake-src']),
+                        next(i for i, c in enumerate(calls) if c[0] == 'docker'))
+
     def test_guidance_always_uses_short_name(self):
         self.write_environment()
         result = self.run_cli()
@@ -618,6 +684,13 @@ class Doctor(CliCase):
         self.assertIn('切り分け', result.stdout)
         self.assertIn('1/4', result.stdout)
         self.assertTrue(any(call[0] == 'aws' for call in self.calls()))
+
+    def test_doctor_points_at_the_long_term_key_behind_an_mfa_role(self):
+        self.write_environment()
+        result = self.run_cli('doctor', FAKE_LONG_TERM='fake-src')
+        self.assertIn('fake-src は MFA を通していない長期キーです', result.stdout)
+        self.assertIn('fake-src-mfa を auth.source_profile に', result.stdout)
+        self.assertNotIn('長期キー', self.run_cli('doctor').stdout)
 
     def test_doctor_reports_unshared_docker_paths(self):
         self.write_environment()
@@ -882,6 +955,46 @@ class Init(CliCase):
         config = json.loads((self.target / 'environment.json').read_text())
         self.assertEqual(config['auth']['principal_arn'], SSO_ROLE)
         self.assertEqual(config['auth']['duration_seconds'], 3600)
+
+    def test_interactive_long_term_key_borrows_from_the_mfa_profile(self):
+        # 長期キーの fake-src を選んで MFA を求めると、借りる元は aws-login の保存先 fake-src-mfa（まだ無くてよい）。
+        # mfa_serial が無く、登録済みのデバイスが 1 つなら元プロファイルに保存する
+        answers = ['', '1', '', '', '3600', '', '', '', '']
+        serial = 'arn:aws:iam::000000000000:mfa/dev'
+        result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_LONG_TERM='fake-src', FAKE_MFA_DEVICES=serial)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        config = json.loads((self.target / 'environment.json').read_text())
+        self.assertEqual(config['auth']['source_profile'], 'fake-src-mfa')
+        self.assertEqual(config['auth']['refresh_command'], 'aws-login --profile fake-src')
+        self.assertEqual(config['auth']['mfa_required'], True)
+        self.assertIn('◆ ロールを借りる元: fake-src-mfa', result.stdout)
+        self.assertIn(f'◆ MFA デバイス: {serial}', result.stdout)
+        self.assertIn(['aws', 'configure', 'set', 'mfa_serial', serial, '--profile', 'fake-src'], self.calls())
+        # デバイスが 2 つ以上・設定済み・MFA を求めないなら、設定に触らない（2 回目からは差し替えの y が先）
+        for extra in ({'FAKE_MFA_DEVICES': serial + '\t' + serial + '2'}, {'FAKE_MFA_SERIAL': serial}):
+            result = self.run_cli('init', input='y\n' + '\n'.join(answers) + '\n', FAKE_LONG_TERM='fake-src', **extra)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn('◆ MFA デバイス', result.stdout)
+            self.assertEqual(len([c for c in self.calls() if c[:3] == ['aws', 'configure', 'set']]), 1)   # 最初の 1 回だけ
+        answers_no_mfa = ['', '1', 'n', '', '3600', '', '', '', '']
+        result = self.run_cli('init', input='y\n' + '\n'.join(answers_no_mfa) + '\n', FAKE_LONG_TERM='fake-src')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['source_profile'], 'fake-src')
+        self.assertEqual(len([c for c in self.calls() if c[:2] == ["aws", "iam"]]), 2)   # 設定済みのときは引かないので、上の 2 回だけ
+
+    def test_noninteractive_long_term_key_borrows_from_the_mfa_profile_without_aws(self):
+        # 非対話でも借りる元は fake-src-mfa になり、AWS は叩かない（iam も sts も呼ばない）。
+        # fake-src-mfa を直接渡しても、元の fake-src があれば通る
+        result = self.run_cli('init', **INIT_ENV, FAKE_LONG_TERM='fake-src')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['source_profile'], 'fake-src-mfa')
+        self.assertTrue(all(c[1] == 'configure' for c in self.calls()), self.calls())
+        result = self.run_cli('init', '--force', **{**INIT_ENV, 'AWS_SURVEY_INIT_SOURCE_PROFILE': 'fake-src-mfa'})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['source_profile'], 'fake-src-mfa')
+        result = self.run_cli('init', '--force', **{**INIT_ENV, 'AWS_SURVEY_INIT_SOURCE_PROFILE': 'nobody-mfa'})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('source_profile がプロファイル一覧にありません', result.stderr)
 
     def test_interactive_hides_base_profile_when_mfa_destination_exists(self):
         # 一覧に <名>-mfa があるとき、元の <名> は候補に出ず、番号は残った候補で振り直される
