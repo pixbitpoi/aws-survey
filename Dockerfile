@@ -30,12 +30,9 @@ RUN apt-get update \
  && session-manager-plugin --version \
  && ssh -V
 
-# Codex はバージョンを固定する。ガードは Codex 固有の機能契約（allow_managed_hooks_only・
-# managed_dir・unified_exec）に乗っているため、勝手に上がるとフックが静かに外れうる。
-# 上げるときは既定値を変え、tests/container_smoke.py でガードが効くことを確かめる。
-ARG CODEX_VERSION=0.153.4
 # claude-code は次段でネイティブ版に入れ替えるための踏み台。npm 版は最後に消す。
-RUN npm install -g @anthropic-ai/claude-code @openai/codex@${CODEX_VERSION} \
+# Codex はここでは入れない（root 所有の /usr/local に置くと自分で更新できない。下の node の段で入れる）。
+RUN npm install -g @anthropic-ai/claude-code \
  && npm cache clean --force
 
 # Claude Code は npm ではなくネイティブ導入にする。npm prefix（/usr/local）は root 所有のまま
@@ -94,7 +91,24 @@ RUN claude install latest
 USER root
 RUN npm uninstall -g @anthropic-ai/claude-code
 
+# Codex は npm 版のまま、npm prefix を node ユーザー所有の ~/.npm-global に向けて入れる。
+# Codex の「Update now」は `npm install -g @openai/codex` を叩くので、prefix がそこを向いていれば
+# node ユーザーが自分で更新できる。/usr/local は root 所有のまま保つ。ガードは /etc/codex（root 所有）にあり、
+# Codex 本体の置き場とは別なので、更新しても触れない。
+# ~/.npm-global は run.sh が名前付きボリュームにするので、更新はコンテナを作り直しても残る。
+# CODEX_VERSION は初回に入る版。ガードは Codex の機能契約（allow_managed_hooks_only・managed_dir・
+# unified_exec）に乗っているため、既定値を上げたら tests/container_smoke.py でガードが効くことを確かめる。
+ARG CODEX_VERSION=0.154.0
+ENV NPM_CONFIG_PREFIX=/home/node/.npm-global
+ENV PATH=/home/node/.npm-global/bin:$PATH
+
 USER node
+RUN mkdir -p /home/node/.npm-global \
+ && npm install -g @openai/codex@${CODEX_VERSION} \
+ && npm cache clean --force \
+ && [ "$(npm prefix -g)" = /home/node/.npm-global ] \
+ && [ "$(command -v codex)" = /home/node/.npm-global/bin/codex ] \
+ && codex --version
 RUN claude --version \
  && claude doctor 2>&1 | grep -q 'Auto-updates: enabled' \
  && claude doctor 2>&1 | grep -q 'Config install method: native'

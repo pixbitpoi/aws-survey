@@ -157,7 +157,8 @@ class Scan(ScanCase):
                       f'{ROOT}/container/method:/home/node/aws-survey/method:ro',
                       f'{self.target}/out:/home/node/aws-survey/out',
                       f'{self.target}/code:/home/node/aws-survey/code:ro',
-                      'smoke-codex:/home/node/.codex', 'smoke-claude:/home/node/.claude', 'smoke-cli:/home/node/.local']:
+                      'smoke-codex:/home/node/.codex', 'smoke-claude:/home/node/.claude', 'smoke-cli:/home/node/.local',
+                      'smoke-npm:/home/node/.npm-global']:
             self.assertIn(mount, launch)
         self.assertIn('SURVEY_PHASE_DIR=01_基礎調査', launch)
         image = launch.index('smoke:latest')

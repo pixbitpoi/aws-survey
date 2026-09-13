@@ -98,9 +98,10 @@ Claude 側の 2 経路が揃っていることは `tests/test_guards.py` の `Au
   インタプリタや MCP ツールの追加は対応範囲外。`unified_exec` は無効のまま（理由は `codex/*.toml` のコメント）。
 - 管理設定・フックはイメージへ root 所有で焼き込む。マウントに移していないことは
   `tests/test_launcher.py` の `BakedNotMounted` が確認する（理由もそちら）。
-- Claude Code は `~/.local` のネイティブ版で、自分で更新する。npm prefix（`/usr/local`）は
-  root 所有のまま。Codex は固定（ガードが Codex の機能契約に乗っているため）。
-  配置と理由は `tests/test_launcher.py` の `CliInstallLayout`。
+- Claude Code は `~/.local` のネイティブ版、Codex は npm prefix を `~/.npm-global` に向けた npm 版で、
+  どちらも node 所有の名前付きボリュームに置き、自分で更新する。`/usr/local` は root 所有のまま。
+  ガードは Codex の機能契約に乗っているため、`Dockerfile` の `CODEX_VERSION` を上げたら
+  `tests/container_smoke.py` を通す。配置と理由は `tests/test_launcher.py` の `CliInstallLayout`。
 - コンテナ専用の Codex 設定は `sandbox_mode = "danger-full-access"`（隔離は Docker が担う）。
   ホストの Codex にコピーしない。Docker の privileged・追加 capability・seccomp 無効化も使わない。
 - この仕組みで防げない範囲は `docs/security.md`「これで保証されないこと」が正本。

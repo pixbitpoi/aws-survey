@@ -342,18 +342,19 @@ class WebToolsDenied(unittest.TestCase):
 
 
 class CliInstallLayout(unittest.TestCase):
-    """Claude Code updates itself; Codex is pinned. Neither can touch the npm prefix.
+    """Both CLIs update themselves. Neither can touch the npm prefix at /usr/local.
 
     Auto-update needs somewhere writable. Installing Claude Code natively puts it under the
     node user's ~/.local, so it can replace its own binary without /usr/local ever becoming
-    writable - the guard's settings.json and hooks stay root-owned either way. launch.sh keeps
-    ~/.local in a named volume, otherwise every update would be thrown away with the --rm
+    writable - the guard's settings.json and hooks stay root-owned either way. Codex stays an
+    npm package, but its npm prefix is pointed at the node user's ~/.npm-global, so the
+    `npm install -g @openai/codex` its updater runs writes there. launch.sh keeps both
+    directories in named volumes, otherwise every update would be thrown away with the --rm
     container and re-downloaded next launch.
 
-    Codex stays pinned because the guard rides on its feature contract
-    (allow_managed_hooks_only, managed_dir, unified_exec): a version moving under us could
-    drop the managed hook and nothing would report it. Raising the pin is deliberate, and
-    tests/container_smoke.py is what checks the guard still bites afterwards.
+    CODEX_VERSION is only the version the image starts from. The guard rides on Codex's
+    feature contract (allow_managed_hooks_only, managed_dir, unified_exec), so raising the
+    default is deliberate, and tests/container_smoke.py is what checks the guard still bites.
     """
 
     def setUp(self):
@@ -384,9 +385,21 @@ class CliInstallLayout(unittest.TestCase):
     def test_the_autoupdater_is_left_enabled(self):
         self.assertNotIn('DISABLE_AUTOUPDATER', self.dockerfile)
 
+    def test_codex_is_installed_by_node_under_its_own_prefix(self):
+        self.assertIn('ENV NPM_CONFIG_PREFIX=/home/node/.npm-global', self.dockerfile)
+        self.assertIn('ENV PATH=/home/node/.npm-global/bin:$PATH', self.dockerfile)
+        install = self.dockerfile.index('npm install -g @openai/codex@${CODEX_VERSION}')
+        prefix = self.dockerfile.index('ENV NPM_CONFIG_PREFIX=')
+        user = self.dockerfile.rindex('USER node', 0, install)
+        self.assertLess(prefix, install, 'the prefix must point at ~/.npm-global before Codex is installed')
+        self.assertLess(self.dockerfile.rindex('USER root', 0, install), user,
+                        'Codex must be installed as node, or the updater cannot replace it')
+
     def test_updates_survive_the_container(self):
         self.assertIn('-v "$CLI_VOLUME:/home/node/.local"', self.launcher,
                       '~/.local must be a named volume or updates are lost on exit')
+        self.assertIn('-v "$NPM_VOLUME:/home/node/.npm-global"', self.launcher,
+                      '~/.npm-global must be a named volume or Codex updates are lost on exit')
 
     def test_the_npm_prefix_is_not_handed_to_the_agent(self):
         self.assertNotRegex(self.dockerfile, r'chown[^\n]*node[^\n]*/usr/local',

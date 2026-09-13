@@ -10,6 +10,8 @@ VOLUME="${SURVEY_NAME}-claude"
 CODEX_VOLUME="${SURVEY_NAME}-codex"
 # Claude Code のネイティブ導入先（~/.local）。自分で更新するので、更新後の版を残す。
 CLI_VOLUME="${SURVEY_NAME}-cli"
+# Codex の npm の導入先（~/.npm-global）。Codex も自分で更新するので、更新後の版を残す。
+NPM_VOLUME="${SURVEY_NAME}-npm"
 OUT_DIR="$AWS_SURVEY_DIR/out"
 
 # 成果物の置き場。フェーズごとにフォルダを分ける（out/NN_フェーズ名/ と その raw/ log/ report/）。
@@ -51,6 +53,7 @@ launch_run() {
     -v "$CODEX_VOLUME:/home/node/.codex" \
     -v "$VOLUME:/home/node/.claude" \
     -v "$CLI_VOLUME:/home/node/.local" \
+    -v "$NPM_VOLUME:/home/node/.npm-global" \
     -e TZ=Asia/Tokyo \
     -e "AWS_DEFAULT_REGION=$REGION" \
     -e "SURVEY_PHASE_DIR=$SURVEY_PHASE_DIR" \
@@ -73,7 +76,7 @@ launch_container_running() {
   [ -n "$(docker ps -q --filter "name=^/$1\$" 2>/dev/null)" ]
 }
 
-# エージェントの CLI だけを動かす（状態のボリューム 3 本だけ。一時キーも out/ も指示書も付けない）。認証の確認と、信頼の記録に使う
+# エージェントの CLI だけを動かす（状態のボリューム 4 本だけ。一時キーも out/ も指示書も付けない）。認証の確認と、信頼の記録に使う
 #   launch_agent_cli [-it] -- claude auth status --json
 launch_agent_cli() {
   local -a flags=()
@@ -84,6 +87,7 @@ launch_agent_cli() {
     -v "$CODEX_VOLUME:/home/node/.codex" \
     -v "$VOLUME:/home/node/.claude" \
     -v "$CLI_VOLUME:/home/node/.local" \
+    -v "$NPM_VOLUME:/home/node/.npm-global" \
     "$IMAGE" "$@"
 }
 
