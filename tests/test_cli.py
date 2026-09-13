@@ -1332,10 +1332,11 @@ class Chain(CliCase):
         return os.waitstatus_to_exitcode(status), plain().decode(errors='replace')
 
     def test_on_a_terminal_the_chain_runs_through_to_ready_without_asking(self):
-        self.verified()                                   # 段階 4: 一時キーが無い → credentials → 準備完了で止まる
-        code, text = self.drive([], {})
+        self.verified()                                   # 段階 4: 一時キーが無い → credentials → 準備完了で、scan に入るかだけ聞く
+        code, text = self.drive([('初期調査', b'n\r')], {})
         self.assertEqual(code, 0, text)
         self.assertNotIn('実行しますか', text)
+        self.assertIn('続けて初期調査（aws-survey scan）を始めますか', text)
         lines = [l for l in text.replace('\r', '\n').splitlines() if l.strip()]
         # 段階の一覧は最初の 1 回だけ。credentials は 1 行に畳まれ、その中身（見出し・表）は画面に出ない
         self.assertEqual(sum('● 4 一時キー' in l for l in lines), 1)
@@ -1343,7 +1344,7 @@ class Chain(CliCase):
         self.assertNotIn('◆ aws-survey credentials', text)
         self.assertNotIn('1/3 ホストのプロファイル', text)
         self.assertIn('⠋', text)                          # 回転する印
-        # 準備完了で止まる。scan は時間がかかり、claude / codex は端末を渡すので、ここから先は自動で実行しない
+        # 準備完了のあと、scan は聞いてから（n で止まる）。claude / codex は端末を渡すので自動では実行しない
         self.assertIn('準備完了', text)
         self.assertIn('aws-survey scan', text)
         self.assertNotIn('aws-survey run', text)

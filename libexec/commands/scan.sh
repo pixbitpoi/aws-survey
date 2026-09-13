@@ -353,6 +353,7 @@ scan_next() {
     echo ""
   fi
   next_cmd "$AWS_SURVEY_CMD $agent" "報告を手に対話で続けます。質問への回答・中を読む・確認事項の答えを伝える、のどれからでも"
+  also_cmd "$AWS_SURVEY_CMD clean" "調査を終えたら。対象アカウントとこのホストに残したもの（ロール・EC2 の設定・鍵・コンテナ）を片付けます"
 }
 
 ui_title "aws-survey scan"

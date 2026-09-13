@@ -942,8 +942,26 @@ cmd_remove() {
   fi
 }
 
+# 登録済みホストが無いのに diag-ssh-<name> が残っているときの片付け（aws-survey clean が呼ぶ内部用。remove の 5/5 と同じ）
+cmd_clean_policy() {
+  command -v aws >/dev/null || die "aws コマンドが見つかりません。"
+  ui_title "aws-survey ssh clean-policy"
+  [ -z "$SSH_HOSTS" ] || die "登録済みホスト（${SSH_HOSTS}）があります。先に ssh remove で撤去してください。"
+  if [ "$AUTH_ROUTE" != own_role ] && [ -n "$AUTH_ROUTE" ]; then
+    ui_text "調査用ロールは借りたものなので、ポリシー ${DIAG_POLICY_NAME} は触りません。"
+    show_policy_cleanup_by_hand
+    return 0
+  fi
+  check_source_profile
+  cleanup_diag_policy || return 1
+  local tmp
+  tmp=$(mktemp) && jq '.setup.ssh_policy_attached = null' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
+  ui_ok "ポリシー ${DIAG_POLICY_NAME} を片付けました"
+}
+
 case "$SUB" in
   setup)  cmd_setup "$@" ;;
+  clean-policy) cmd_clean_policy "$@" ;;
   list)   cmd_list "$@" ;;
   verify) cmd_verify "$@" ;;
   rotate) cmd_rotate "$@" ;;

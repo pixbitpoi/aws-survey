@@ -2,8 +2,8 @@
 # aws-survey — AWS アカウントの構成を、コーディングエージェントに読み取り専用で調べさせる CLI のホスト側入口
 #
 # 利用者向けの一覧は `aws-survey help`、内部で使うコマンドも含めた一覧は `aws-survey help --all`（cmd_help）。
-# 利用者が打つのは `aws-survey`（準備）・`scan`・`claude` / `codex`・`ls` / `ec2` / `lambda`・`status` / `doctor` だけで、
-# init / role / credentials / verify / login / run / ssh / lambda pull|list|remove は引数なし実行や ec2 / lambda が内部で呼ぶ。
+# 利用者が打つのは `aws-survey`（準備から初期調査まで）・`claude` / `codex`・`clean`、任意で `ec2` / `lambda` / `scan` / `ls`、確認に `status` / `doctor` だけで、
+# init / role / credentials / verify / login / run / c4 / ssh / lambda pull|list|remove は引数なし実行や scan / ec2 / lambda / clean が内部で呼ぶ。
 # バージョンは本体直下の VERSION（docs/release.md）。
 #
 # 本体（AWS_SURVEY_HOME）はこのファイルの実体パス（シンボリックリンク解決後）の親。環境変数で上書き可。
@@ -380,7 +380,27 @@ guide_ready() {
   fi
   if ! scan_done; then
     also_cmd "$CMD_NAME ls" "任意。アカウントで使っているリソースの一覧を眺めます（読むだけで、out/ には書きません）"
+  else
+    also_cmd "$CMD_NAME clean" "調査を終えたら。対象アカウントとこのホストに残したもの（ロール・EC2 の設定・鍵・コンテナ）を片付けます"
   fi
+}
+
+# 準備が済んで初期調査がまだなら、端末では続けて scan に入るかを 1 回だけ聞く（Enter は「始める」）。
+# scan は数十分かかるので黙っては始めない。始めるなら scan.sh に exec し、経路の問い・進捗・終わったあとの案内は scan が持つ。
+# 端末でなければ聞かない（案内だけで終わる）
+guide_offer_scan() {
+  local ans
+  { [ -t 0 ] && [ -t 1 ]; } || return 0
+  ! scan_done || return 0
+  ! survey_started || return 0
+  echo ""
+  printf '  %s❯%s 続けて初期調査（%s）を始めますか？ %s(Y/n)%s: ' \
+    "$C_CYAN" "$C_RESET" "$(ui_cmd "$CMD_NAME scan")" "$C_DIM" "$C_RESET"
+  read_line ans || { echo ""; return 0; }
+  case "$ans" in
+    ""|y|Y|yes|YES) echo ""; exec "$LIBEXEC_DIR/commands/scan.sh" ;;
+    *) ui_text "ここで止めます。始めるときは $(ui_cmd "$CMD_NAME scan") を打ってください。" ;;
+  esac
 }
 
 # 端末なら何も聞かずに進める（どの 1 手も準備に必ず要るもので、role --create もその 1 つ）。
@@ -440,6 +460,7 @@ cmd_guide_loop() {
     [ -n "$GUIDE_NEXT" ] || {
       # 準備完了の案内は cmd_guide が出す。端末の 2 周目以降はその出力を捨てているので、ここで改めて出す
       [ "$compact" -eq 0 ] || [ "$first" -eq 1 ] || { echo ""; guide_ready; }
+      guide_offer_scan
       return 0
     }
     first=0
@@ -1101,6 +1122,10 @@ cmd_status() {
   esac
   echo ""
   show_extras
+  if scan_done && { [ -n "${SSH_HOSTS:-}" ] || [ -n "$(setup_value role_created)" ]; }; then
+    ui_text "調査を終えたら $(ui_cmd "$CMD_NAME clean") で、対象アカウントとこのホストに残したものを片付けます（$(ui_cmd "$CMD_NAME clean --list") で一覧だけ）。"
+    echo ""
+  fi
   if [ -n "${SSH_HOSTS:-}" ]; then
     ui_kv "ログインユーザー" "$SSH_USER"
     if [ "$KEY_STATE" = valid ] && ec2_pending; then
@@ -1187,34 +1212,35 @@ cmd_help() {
   cat <<HELP
 aws-survey $(version_string) — コーディングエージェントによる AWS 構成調査ツール
 
-  Claude Code / Codex によって AWS の構成調査を自動的に行います。
-  エージェントはコンテナに隔離され、厳格に制限された読み取り専用のポリシーで AWS を調査します。
-  EC2やLambdaも調査でき、自動で調査させることも、エージェントと対話して調査を深掘りすることも可能です。
-  調査が完了すると out/ フォルダにレポートが生成されます。
+  空のフォルダで aws-survey を打つと、接続先とエージェントを聞き、準備から初期調査まで進みます。
+  エージェントは隔離されたコンテナの中から、読み取り専用の一時キーで AWS を調べ、報告を out/report/ に書きます。
+  以後は aws-survey claude / codex で、その報告を手にエージェントと対話で深掘りします。
 
-使い方:
-  aws-survey                    準備を進める。初回は接続先とエージェントを聞き、準備が済むまで自動で進む。
-                                済んでいれば、次に打つコマンドを案内する。迷ったらこれを打つ
-  aws-survey scan               エージェントに初期調査（何があるか・どう繋がっているか）を任せる。待つだけ。数分〜数十分
-  aws-survey claude             Claude Code を起動して、対話で調査を進める（-c で直前の会話の続き）
-  aws-survey codex              Codex を起動して、対話で調査を進める（resume --last で直前の会話の続き）
+流れ:
+  aws-survey                    準備を進め、初期調査を始める。初回は接続先とエージェントを聞く。途中で止まっても、打ち直せば続きから
+  aws-survey claude             Claude Code と対話で調査を続ける（-c で直前の会話の続き）
+  aws-survey codex              Codex と対話で調査を続ける（resume --last で直前の会話の続き）
+  aws-survey clean              調査を終えたら。対象アカウントとこのホストに残したものを 1 つずつ聞いて消す（out/ は残す）
 
-  aws-survey ls [サービス名...] アカウントで使っているリソースの一覧を見る（任意。読むだけで out/ には書かない）
-  aws-survey ec2                EC2 を一覧から選び、その中まで調べられるようにする（任意）
-  aws-survey lambda             Lambda 関数を一覧から選び、コードを取り出して読めるようにする（任意）
+任意（初期調査の前に aws-survey が聞く。あとから足してもよい）:
+  aws-survey ec2                EC2 を一覧から選び、その中（ログ・サービスの状態）まで調べられるようにする
+  aws-survey lambda             Lambda 関数を一覧から選び、コードを取り出して読めるようにする
+  aws-survey scan               初期調査だけをもう一度。足した経路と確認事項の回答を読んで、報告を更新する
+  aws-survey ls [サービス名...] アカウントで使っているリソースの一覧を見る（読むだけで、何も書かない）
 
-  aws-survey status             準備の到達点・一時キーの残り時間・本体とデータの場所
+確認:
+  aws-survey status             準備の到達点・一時キーの残り時間・残しているもの
   aws-survey doctor             必要なツールと設定の確認。うまく動かないときに
 
 共通オプション:
   --dir <対象フォルダ>          対象フォルダを指定する（既定はカレントディレクトリ。AWS_SURVEY_DIR でも指定可）
   --version                     バージョンを表示する
-  --help --all                  内部で使うコマンドも含めた一覧を表示する
+  --help --all                  aws-survey が内部で呼ぶコマンドも含めた一覧を表示する
 HELP
   [ "$all" -eq 1 ] || return 0
   cat <<HELP
 
-内部で使うコマンド（引数なしの aws-survey や ec2 / lambda が呼ぶ。通常は打たない）:
+内部で使うコマンド（引数なしの aws-survey・scan・ec2・lambda・clean が呼ぶ。通常は打たない）:
   aws-survey init [--from <json>] [--force]
                                 対象フォルダに environment.json を作る（対話。--from か AWS_SURVEY_INIT_* で非対話）
   aws-survey role [--create]    AWS への経路の判定と、調査用ロールの作成
@@ -1223,23 +1249,23 @@ HELP
   aws-survey login [claude|codex]
                                 エージェントのログイン（対象ごとに初回だけ。init が最後に呼ぶ）
   aws-survey run [cmd]          調査コンテナの素のシェルに入る
+  aws-survey c4 [--force]       報告の C4 図（out/report/c4/workspace.dsl）を PNG にする（scan / claude / codex の終わりに自動で行う）
 
   aws-survey ssh setup <instance-id | Name タグ> [...]
-                                EC2 の中を調べるための診断ゲートウェイを SSM 経由で導入して登録する
+                                EC2 の中を調べるための診断ゲートウェイを SSM 経由で導入して登録する（ec2 が呼ぶ）
   aws-survey ssh setup --print [...]
                                 その導入スクリプトを書き出すだけ（手動実行用）
   aws-survey ssh list           登録済みホスト・鍵の作成日時・導入日時
   aws-survey ssh verify <host>  調査コンテナから実際に接続して、通るもの・塞がっているものを確かめる
   aws-survey ssh rotate         鍵を作り直して登録済みホスト全部に再導入する
-  aws-survey ssh remove <host>  EC2 から撤去し、タグと記録を消す（remove --print <host> は撤去スクリプトを出すだけ）
+  aws-survey ssh remove <host>  EC2 から撤去し、タグと記録を消す（clean が呼ぶ。remove --print <host> は撤去スクリプトを出すだけ）
+  aws-survey ssh clean-policy   登録済みホストが無いのに残った接続ポリシーを消す（clean が呼ぶ）
 
   aws-survey lambda pull <関数名>... | --all [--region <r>] [--with-deps]
-                                Lambda 関数のデプロイ済みのコードを取り出し、絞り込んで code/ に置く
+                                Lambda 関数のデプロイ済みのコードを取り出し、絞り込んで code/ に置く（lambda が呼ぶ）
   aws-survey lambda list        取り出してある関数とレイヤー（AWS は叩かない）
   aws-survey lambda remove <関数名>... | --all
-                                取り出したコードを消す
-
-  aws-survey c4 [--force]       報告の C4 図（out/report/c4/workspace.dsl）を PNG にする（scan / claude / codex の終わりに自動で行う）
+                                取り出したコードを消す（clean が呼ぶ）
 HELP
 }
 
@@ -1262,5 +1288,6 @@ case "$CMD" in
   ssh)         exec "$LIBEXEC_DIR/commands/ssh.sh" "$@" ;;
   lambda)      exec "$LIBEXEC_DIR/commands/lambda.sh" "$@" ;;
   c4)          exec "$LIBEXEC_DIR/commands/c4.sh" "$@" ;;
+  clean)       exec "$LIBEXEC_DIR/commands/clean.sh" "$@" ;;
   *)           die "不明なコマンド: ${CMD}（aws-survey --help）" ;;
 esac

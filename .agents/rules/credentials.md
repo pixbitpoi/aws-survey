@@ -39,8 +39,8 @@
 
 利用者に見せる「次に打つコマンド」は `load-env.sh` が入れる `AWS_SURVEY_CMD`（`aws-survey` か `<本体>/aws-survey`）で
 組み立てる。`./run.sh` のようなスクリプト名を案内文に書かない。入口は `aws-survey`（`role` / `credentials` / `verify` /
-`scan` / `claude` / `codex` / `login` / `run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh` / `c4`）。実体は `role` / `credentials` / `verify` /
-`run` / `scan` / `login` / `doctor` / `ls` / `ec2` / `ssh` / `lambda` / `c4` が `libexec/commands/<名前>.sh`、`claude` / `codex` は `libexec/commands/agent.sh`
+`scan` / `claude` / `codex` / `login` / `run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh` / `c4` / `clean`）。実体は `role` / `credentials` / `verify` /
+`run` / `scan` / `login` / `doctor` / `ls` / `ec2` / `ssh` / `lambda` / `c4` / `clean` が `libexec/commands/<名前>.sh`、`claude` / `codex` は `libexec/commands/agent.sh`
 （第 1 引数がエージェント名）、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。
 イメージのビルドは `libexec/docker.sh`（`run` と `lambda pull` と `libexec/container.sh` が共有する）。
 調査コンテナ一式（一時キー・指示書・`method/`・`out/`・`code/`・Claude / Codex のボリューム）のマウント列は `libexec/launch.sh`
@@ -48,8 +48,9 @@
 `out/` も指示書もボリュームも付けてはいけない。
 
 引数なしの `aws-survey` は段階 4（一時キー）までを止まらずに進め、段階 5 以降は `guide_ready` で「準備完了」と次のコマンドを順に
-案内して止まる（`ls` → `scan` → `claude` / `codex`。`run` は出さない）。`scan` は時間がかかり、`claude` / `codex` は端末を渡すので、
-自動では実行しない。段階 5「初期調査」は `setup.scanned`（`scan` が成功時に分までの日時で書く）で済・未済を見る。
+案内する（`ls` → `scan` → `claude` / `codex`。`run` は出さない。初期調査済みなら最後に `clean`）。初期調査がまだなら、端末では続けて
+`scan` に入るかを 1 回だけ聞き（`guide_offer_scan`。Enter で `scan.sh` に exec）、黙っては始めない（数十分かかる）。`claude` / `codex` は
+端末を渡すので自動では実行しない。段階 5「初期調査」は `setup.scanned`（`scan` が成功時に分までの日時で書く）で済・未済を見る。
 `out/.survey/state.md` があれば対話で始めた扱いで段階 6 に進める。
 
 ### 非対話の棚卸し（`scan`）
@@ -193,6 +194,19 @@ AWS は叩かない）を添える。Organizations の一覧（`organizations li
 出力は `c4/.new/` に書いてから入れ替える（ビューを消したときに古い PNG を残さない）。`out/` に書くホストの部品はこれだけで、
 書くのは PNG と `_render-error.txt` に限る（DSL と報告は触らない）。引数なしの `aws-survey` は PNG が DSL より古いときだけ `c4` を並べ、
 `status` は状態を 1 行出す（`c4_state`）。偽の `docker` での検証は `tests/test_c4.py`、`scan` からの呼び出しは `tests/test_scan.py` の `C4`。
+
+### 後片付け（`clean`）
+
+`libexec/commands/clean.sh`。残っているものの判定はファイルだけで行い（`ssh.hosts`・`setup.ssh_policy_attached`・`setup.role_created` と
+`auth.route`・`$AWS_DIR`・Docker のボリュームとイメージ・`code/lambda/*/*/_manifest.json`）、消すときだけ AWS を叩く。順は依存の逆で、
+EC2 の診断ゲートウェイ（`ssh.sh remove` を 1 台ずつ）→ ホストが無いのに残ったポリシー（`ssh.sh clean-policy`。`remove` の 5/5 と同じ
+`cleanup_diag_policy`）→ 調査用ロール（`own_role` で `role_created` があるものだけ。付いているポリシーを外し、インラインを消してから
+`delete-role`。消えたら `setup.role_created` / `readonly_verified` / `ssh_policy_attached` を戻し `trust.json` を消す。`route_decided` は
+判断なので残す）→ ホスト側（`$AWS_DIR`、4 本のボリュームとイメージ、`lambda remove --all`）。`out/` と `environment.json` は消さない。
+AWS 側は元プロファイルで、切れていれば端末で `refresh_command` を 1 度走らせ、それでも使えなければ AWS 側を飛ばしてホスト側だけ進める。
+権限が無いなど消せなかったものは `LEFT` に積んで最後にまとめ、手で打つコマンドを添えて 1 で終わる。利用者が「残す」と答えたものは `KEPT` で、
+失敗ではない（0 で終わる）。端末でなければ `--yes` が要り、`--list` は判定だけ。調査コンテナが動いていれば止まる。
+偽の `aws` / `docker` での検証は `tests/test_clean.py`。
 
 ## 利用者に見せる出力
 
