@@ -24,7 +24,7 @@ cd tests/live/ec2
 AWS_PROFILE=<管理者> ./launch.sh                 # web2 を起動（--bare で中身を構成せずに起動）
 ./configure.sh --check web2                     # 起動時の構成の完了を待ち、サービス・待ち受け・応答を見る
 cd <対象フォルダ> && aws-survey ssh setup web2 --log shop=/var/log/shop/*.log --log messages=/var/log/messages*
-aws-survey ssh verify web2 && aws-survey run    # 調査コンテナで method/経路.md に沿って読ませる
+aws-survey ssh verify web2 && aws-survey run    # 調査コンテナで method/routes.md に沿って読ませる
 aws-survey ssh remove web2                      # 対象フォルダで。ゲートウェイとタグ・ポリシーを外す
 cd tests/live/ec2 && ./cleanup.sh web2          # インスタンス・SG・（作っていれば）インスタンスプロファイル
 ```
@@ -32,7 +32,7 @@ cd tests/live/ec2 && ./cleanup.sh web2          # インスタンス・SG・（�
 EC2 に渡るのは `configure.sh --payload` の出力（「EC2 側」から下。コメント行なし）だけ。user-data は
 `describe-instance-attribute` や IMDS で読めるので、ホスト側の使い方やコメントは渡さない。
 
-## lambda/ — `aws-survey lambda pull` と `method/経路.md`
+## lambda/ — `aws-survey lambda pull` と `method/routes.md`
 
 Python（版 1 に alias `live`、`$LATEST` は別のコード、レイヤー参照、直書きの秘密・`.env`・同梱の依存）と
 Node.js（100 KiB 超のバンドルとソースマップ、`node_modules`）の関数を作る。関数は起動せず、実行ロールに権限は付けない。
@@ -42,7 +42,7 @@ cd tests/live/lambda
 AWS_PROFILE=<管理者> ./launch.sh                 # shop-order-api / shop-thumbnail / shop-common
 cd <対象フォルダ> && aws-survey lambda pull --all
 <リポジトリ>/tests/live/lambda/check.sh <対象フォルダ>   # 取り出した code/ を 32 項目で見る（AWS は叩かない）
-aws-survey run                                  # 調査コンテナで method/経路.md に沿って読ませる
+aws-survey run                                  # 調査コンテナで method/routes.md に沿って読ませる
 aws-survey lambda remove --all                  # 対象フォルダの code/
 cd tests/live/lambda && ./cleanup.sh            # 関数・レイヤーの版・実行ロール
 ```

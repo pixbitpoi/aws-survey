@@ -333,7 +333,7 @@ zip の大半は依存ライブラリで、読みたいのは関数自身のコ�
 | マウント | `libexec/commands/run.sh` | `<対象フォルダ>/code` を空でも作り、常に `/home/node/aws-survey/code:ro`。調査中に `pull` したものが起動し直さずに見える（`method/07` の依頼文の前提） |
 | 読み取りの許可 | `container/settings.json` | `Read(//home/node/aws-survey/code/**)` を allow、`WebFetch` / `WebSearch` を deny（§6.1）、`Bash(rg:*)` を allow（`--pre` / `--hostname-bin` はフックが拒否。下の「コードの検索とフック」） |
 | フック | `container/hooks/aws-readonly-guard.sh` | §6.1 の拒否と、下の「コードの検索」。Codex 側は `aws` を Bash ガードへ委ねているので追加は無い |
-| `method/経路.md` | `container/method/` | `_manifest.json` → ハンドラ → 呼んでいる AWS サービスとリソース名・環境変数の名前、の読み方。設定と突き合わせる。起動しないこと、依存は一覧で見ること、読めない形の扱い、コードが無いときはユーザーにホストでの取り出しを頼むこと |
+| `method/routes.md` | `container/method/` | `_manifest.json` → ハンドラ → 呼んでいる AWS サービスとリソース名・環境変数の名前、の読み方。設定と突き合わせる。起動しないこと、依存は一覧で見ること、読めない形の扱い、コードが無いときはユーザーにホストでの取り出しを頼むこと |
 | `survey-status` | `container/survey-status` | 取り出してある関数の数と最後に取り出した日時（`_manifest.json` を数えるだけ。AWS は叩かない。`survey-status` はログインのたびに走るので、関数の数だけ `get-function-configuration` を呼ぶのは重い）。取り出したあとに更新されたかは、読むときに調査エージェントが `CodeSha256` を比べる（`method/07`） |
 
 **コードの検索とフック。** いまのフックは、コマンドのどこかに `aws` / `boto3` の字面があると「単独の `aws` コマンド」の形を

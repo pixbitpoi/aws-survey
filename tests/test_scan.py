@@ -243,8 +243,8 @@ class Scan(ScanCase):
         launch = self.agent_run()
         prompt = launch[launch.index('-p') + 1]
         self.assertIn('応答できません', prompt)
-        self.assertIn('method/調べ方.md', prompt)
-        self.assertIn('method/報告.md', prompt)                             # the report shape and the finish criteria live there
+        self.assertIn('method/survey.md', prompt)
+        self.assertIn('method/report.md', prompt)                             # the report shape and the finish criteria live there
         self.assertIn('報告', prompt)                                    # through to the report, not just the raw data
         self.assertIn('一時キーは自動で入れ替わる', prompt)               # so the agent does not wind down on the clock
         self.assertIn('「検証」', prompt)                                    # a second run verifies the report first

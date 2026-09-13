@@ -187,7 +187,7 @@ $ aws-survey ssh rotate            # 鍵を作り直して、登録済みホス�
 ```
 
 調査コンテナの中では `ec2 <host> <動詞>` で使います。エージェントは `survey-status` に出るホストを見て、
-自分で `method/経路.md` に従って進めます。端末で `aws-survey scan` を実行したときは、始める前に登録するかを聞きます。
+自分で `method/routes.md` に従って進めます。端末で `aws-survey scan` を実行したときは、始める前に登録するかを聞きます。
 
 ```
 ec2 web1 help                                       使える動詞の一覧
@@ -221,7 +221,7 @@ $ aws-survey lambda list                 # 取り出してある関数とレイ�
 取り出したコードは対象フォルダの `code/` に置かれ、`aws-survey lambda remove <関数名>`（全部なら `--all`）で消せます。
 コードが変わっていなければ、もう一度 `pull` しても落とし直しません。
 
-調査コンテナの中では、エージェントが `survey-status` に出る件数を見て、`method/経路.md` に従って読みます。端末で `aws-survey scan` を実行したときは、始める前に取り出すかを聞きます。
+調査コンテナの中では、エージェントが `survey-status` に出る件数を見て、`method/routes.md` に従って読みます。端末で `aws-survey scan` を実行したときは、始める前に取り出すかを聞きます。
 
 どちらの追加も、引数なしの `aws-survey` が準備の最後（調査の段階）に「任意の追加」として現状を出します。
 登録済みホストや取り出してある関数が無ければ、足すためのコマンド（`aws-survey ec2` / `aws-survey lambda`）が「次はこの順で進めます」に並びます。
