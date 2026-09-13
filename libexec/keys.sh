@@ -62,6 +62,54 @@ mfa_source_profile() {
   if profile_is_long_term_key "$p"; then echo "${p}-mfa"; else echo "$p"; fi
 }
 
+# ---- 元プロファイル（強い権限）を使える状態にする ----
+# 元プロファイルを使うコマンド（credentials / role / ssh setup・rotate・remove / lambda pull）は入口でここを通る。
+# 使えなければ（無い・期限切れ）environment.json の refresh_command（既定は aws-login。MFA コードの入力やブラウザでの認証を
+# 求めることがある）を 1 度だけ走らせて確かめ直す。簡潔表示（ui_fold の中）では端末に直接つなぐ。
+# 使えれば SOURCE_ARN に身元を入れて 0。駄目なら SOURCE_ERR に aws の出力を入れて 1（止め方と案内は呼ぶ側）
+source_check() {
+  SOURCE_ARN=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --output text 2>&1) && return 0
+  SOURCE_ERR="$SOURCE_ARN"; SOURCE_ARN=""; return 1
+}
+source_ensure() {
+  SOURCE_ARN=""; SOURCE_ERR=""; SOURCE_REFRESHED=0
+  source_check && return 0
+  [ -n "${REFRESH_CMD:-}" ] && [ "$REFRESH_CMD" != null ] || return 1
+  ui_warn "$PROFILE_SRC が使えません"
+  ui_raw "$SOURCE_ERR"
+  echo ""
+  ui_text "environment.json に書いてあるログインのコマンドを実行します。MFA コードの入力やブラウザでの認証を求められることがあります。"
+  ui_pause
+  ui_tty "    $(ui_cmd "$REFRESH_CMD")
+"
+  # 利用者自身が environment.json に書いたコマンド。対話的でよい
+  if ui_compact; then eval "$REFRESH_CMD" > /dev/tty 2>&1; else eval "$REFRESH_CMD"; fi
+  ui_resume
+  SOURCE_REFRESHED=1
+  echo ""
+  ui_text "もう一度確かめます。"
+  source_check
+}
+# source_ensure が 1 のときの案内文
+source_hint() {
+  if [ "${SOURCE_REFRESHED:-0}" = 1 ]; then
+    printf '%s' "ログインのコマンドを実行しても $PROFILE_SRC が使えるようになりませんでした。
+  コマンド: $REFRESH_CMD
+  environment.json の auth.refresh_command を見直してください。"
+    return 0
+  fi
+  local reason
+  case "${SOURCE_ERR:-}" in
+    *ExpiredToken*|*expired*) reason="$PROFILE_SRC のログインが期限切れです。" ;;
+    *"could not be found"*|*"The config profile"*) reason="プロファイル $PROFILE_SRC がありません。" ;;
+    *) reason="$PROFILE_SRC が使えません（上のエラーを確認してください）。" ;;
+  esac
+  printf '%s' "$reason
+  $PROFILE_SRC でログインし直してから、もう一度実行してください。
+  毎回この手間をかけたくない場合は、そのログインのコマンドを environment.json の auth.refresh_command に
+  書いておくと、次からここで自動的に実行します（例: \"aws-login --profile ${PROFILE_SRC%-mfa}\"）。"
+}
+
 # ---- 足りなければ発行し直す ----
 # 一時キーを使うコマンドは、利用者に credentials を打たせず、入口でここを通る。発行し直すのは次のどれか:
 # 無い・期限切れ・期限を読めない・残りが要る分数に足りない・登録済みホスト（ssh.hosts）と発行時の記録（session.json の

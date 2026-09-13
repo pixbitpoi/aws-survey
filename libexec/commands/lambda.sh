@@ -17,6 +17,7 @@
 set -uo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/keys.sh"
 . "$LIBEXEC_DIR/docker.sh"
 . "$LIBEXEC_DIR/container.sh"
 . "$LIBEXEC_DIR/menu.sh"
@@ -72,14 +73,9 @@ parse_args() {
 
 # ---- 元プロファイルと取り出し専用の一時キー ----
 check_source_profile() {
-  local who
-  if ! who=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --output text 2>&1); then
-    ui_err "元プロファイル $PROFILE_SRC が使えません"
-    ui_raw "$who"
-    [ -z "${REFRESH_CMD:-}" ] || [ "$REFRESH_CMD" = null ] || ui_text "ログインし直すコマンド: $(ui_cmd "$REFRESH_CMD")"
-    die "取り出し専用の一時キーは元プロファイルで発行します。$PROFILE_SRC でログインしてから、もう一度実行してください。"
-  fi
-  ui_ok "$who"
+  source_ensure || { ui_err "元プロファイル $PROFILE_SRC が使えません"; die "取り出し専用の一時キーは元プロファイルで発行します。
+  $(source_hint)"; }
+  ui_ok "$SOURCE_ARN"
 }
 
 # 調査用ロールを、Lambda の 4 つだけを許すインラインポリシーで借りる。--policy-arns は渡さないので、有効な権限は

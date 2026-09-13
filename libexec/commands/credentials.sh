@@ -20,15 +20,7 @@ command -v aws >/dev/null || die "aws コマンドが見つかりません。"
 [ -f "$GUARD" ] || die "session-guard.json が見つかりません: $GUARD"
 jq -e . "$GUARD" >/dev/null 2>&1 || die "session-guard.json が壊れています。"
 
-# 元プロファイルの確認。使えなければ、設定された更新コマンドで一度だけ直しにいく。
-#
-# ⚠️ 元プロファイルの有効化のしかたは環境ごとに違う（SSO のブラウザ認証、MFA コードの入力、
-#    会社ごとのスクリプト…）。ここに書き分けず、environment.json の auth.refresh_command で持つ。
-#    未設定なら、何を実行すべきかを伝えて終わる。
-check_source() {
-  who=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --output text 2>&1)
-}
-
+# 元プロファイルの確認は keys.sh の source_ensure（使えなければ refresh_command を 1 度走らせる）
 # MFA 済みを求めるロールを、MFA を通していない長期キーで借りようとしている（environment.json の auth.source_profile が
 # aws-login の元プロファイルのまま）。借りる元を aws-login の保存先 <名>-mfa に直して続ける（聞いて「はい」のときだけ。
 # 読めなければ案内だけで止まる）。refresh_command が無ければ aws-login にする。直したあとは <名>-mfa が無い・切れている
@@ -70,35 +62,8 @@ if [ "$MFA_REQUIRED" = true ] && profile_is_long_term_key "$PROFILE_SRC"; then
   ui_warn "$PROFILE_SRC は MFA を通していない長期キーなので、MFA 済みを求めるロール $ROLE_NAME を借りられません"
   fix_source_or_die
 fi
-if ! check_source; then
-  ui_warn "使えません"
-  ui_raw "$who"
-  if [ -n "${REFRESH_CMD:-}" ] && [ "$REFRESH_CMD" != "null" ]; then
-    echo ""
-    ui_text "environment.json に書いてあるログインのコマンドを実行します。MFA コードの入力やブラウザでの認証を求められることがあります。"
-    ui_pause
-    ui_tty "    $(ui_cmd "$REFRESH_CMD")
-"
-    # 利用者自身が environment.json に書いたコマンド。対話的でよい（簡潔表示では端末に直接つなぐ）
-    if ui_compact; then eval "$REFRESH_CMD" > /dev/tty 2>&1; else eval "$REFRESH_CMD"; fi
-    ui_resume
-    echo ""
-    ui_text "もう一度確かめます。"
-    check_source || { ui_raw "$who"; die "ログインのコマンドを実行しても $PROFILE_SRC が使えるようになりませんでした。
-  コマンド: $REFRESH_CMD
-  environment.json の auth.refresh_command を見直してください。"; }
-  else
-    case "$who" in
-      *ExpiredToken*|*expired*) reason="$PROFILE_SRC のログインが期限切れです。" ;;
-      *"could not be found"*|*"The config profile"*) reason="プロファイル $PROFILE_SRC がありません。" ;;
-      *) reason="$PROFILE_SRC が使えません（上のエラーを確認してください）。" ;;
-    esac
-    die "$reason
-  $PROFILE_SRC でログインし直してから、もう一度実行してください。
-  毎回この手間をかけたくない場合は、そのログインのコマンドを environment.json の auth.refresh_command に
-  書いておくと、次からここで自動的に実行します（例: \"aws-login --profile ${PROFILE_SRC%-mfa}\"）。"
-  fi
-fi
+source_ensure || die "$(source_hint)"
+who="$SOURCE_ARN"
 ui_ok "$who"
 # 借りたロール（Identity Center を含む）からのログインは、AWS の決まりで 1 時間まで。ロール側を延ばしても変わらないので、
 # environment.json の auth.duration_seconds をその場で直して続けられるようにする（聞いて「はい」のときだけ。読めなければ案内だけで止まる）

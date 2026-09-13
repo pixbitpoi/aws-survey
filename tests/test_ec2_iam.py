@@ -57,6 +57,9 @@ svc, op = (argv[0], argv[1]) if len(argv) > 1 else ("", "")
 if op == "get-caller-identity":
     if os.environ.get("AWS_PROFILE") == "claude-ro":       # verify runs with the issued key
         print("arn:aws:sts::000000000000:assumed-role/fake-role/claude-survey-x"); sys.exit(0)
+    prof = argv[argv.index("--profile") + 1] if "--profile" in argv else ""
+    if prof.endswith("-mfa") and not os.path.exists(os.path.join(state, "mfa-login")):   # aws-login がまだ作っていない
+        sys.stderr.write("The config profile (%s) could not be found\n" % prof); sys.exit(255)
     print("arn:aws:iam::000000000000:user/fake"); sys.exit(0)
 if op == "get-role":
     if os.environ.get("FAKE_ROLE") != "exists" and not os.path.exists(role_file):
@@ -184,7 +187,41 @@ class IamCase(unittest.TestCase):
         return json.loads((self.state / 'policy.json').read_text())
 
 
+# aws-login の偽物。MFA の一時キーを <名>-mfa に保存した印を置くだけ
+FAKE_AWS_LOGIN = '''#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["FAKE_LOG"], "a") as f:
+    f.write(json.dumps(["aws-login"] + sys.argv[1:]) + "\\n")
+open(os.path.join(os.environ["FAKE_STATE"], "mfa-login"), "w").close()
+'''
+
+
 class RoleCreate(IamCase):
+    def test_a_missing_mfa_profile_is_made_by_aws_login_first(self):
+        # 借りる元が aws-login の保存先 <名>-mfa で、まだ無い（init 直後）。role --create の入口で refresh_command を走らせてから進む
+        self.write_environment()
+        config = json.loads((self.target / 'environment.json').read_text())
+        config['auth'].update(source_profile='fake-src-mfa', mfa_required=True, refresh_command='aws-login --profile fake-src')
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        (self.bin / 'aws-login').write_text(FAKE_AWS_LOGIN)
+        (self.bin / 'aws-login').chmod(0o755)
+        result = self.run_cli('role', '--create')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('fake-src-mfa が使えません', result.stdout)
+        self.assertIn('aws-login --profile fake-src', result.stdout)
+        calls = self.calls()
+        self.assertIn(['aws-login', '--profile', 'fake-src'], calls)
+        self.assertLess(calls.index(['aws-login', '--profile', 'fake-src']),
+                        next(i for i, c in enumerate(calls) if len(c) > 2 and c[2] == 'create-role'))
+        self.assertEqual(len(self.calls('create-policy')), 1)
+        # refresh_command が無ければ、案内だけで止まる
+        (self.bin / 'aws-login').unlink(); (self.state / 'mfa-login').unlink()
+        config['auth'].update(refresh_command=None)
+        (self.target / 'environment.json').write_text(json.dumps(config))
+        result = self.run_cli('role', '--create')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('プロファイル fake-src-mfa がありません', result.stderr + result.stdout)
+
     def test_creates_policy_and_attaches_it_after_readonly(self):
         self.write_environment()
         result = self.run_cli('role', '--create')

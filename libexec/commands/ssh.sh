@@ -207,14 +207,9 @@ prepare_script() {
 src() { aws --profile "$PROFILE_SRC" --region "$REGION" --output json "$@"; }
 
 check_source_profile() {
-  local who
-  if ! who=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --output text 2>&1); then
-    ui_err "元プロファイル $PROFILE_SRC が使えません"
-    ui_raw "$who"
-    [ -z "${REFRESH_CMD:-}" ] || [ "$REFRESH_CMD" = null ] || ui_text "ログインし直すコマンド: $(ui_cmd "$REFRESH_CMD")"
-    die "導入は元プロファイル（強い権限）で行います。$PROFILE_SRC でログインしてから、もう一度実行してください。"
-  fi
-  ui_ok "$who"
+  source_ensure || { ui_err "元プロファイル $PROFILE_SRC が使えません"; die "導入は元プロファイル（強い権限）で行います。
+  $(source_hint)"; }
+  ui_ok "$SOURCE_ARN"
 }
 
 # 対象を instance-id に解決する。Name タグなら running のものが 1 台だけ見つかること。

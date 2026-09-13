@@ -187,7 +187,11 @@ AWS は叩かない）を添える。Organizations の一覧（`organizations li
 `init` で作った対象や手で書いた対象）、`auth.duration_seconds` と同じ型で「`<名>` → `<名>-mfa` に直して続けますか？ (Y/n)」と聞き、
 はいなら `source_profile` と（無ければ）`refresh_command` を書き換えて続ける（`fix_source_or_die`。読めなければ案内だけで止まる）。
 直したあとは `<名>-mfa` が無い・切れているときの通常の流れ（`refresh_command` を 1 度走らせる）に乗るので、aws-login が MFA コードを
-聞いて `<名>-mfa` を作り、それで借りる。`doctor` の 1/4 も同じ判定で ⚠ を出す。偽の `aws` / `aws-login` での検証は `tests/test_cli.py`
+聞いて `<名>-mfa` を作り、それで借りる。`doctor` の 1/4 も同じ判定で ⚠ を出す。
+元プロファイルを使うコマンド（`credentials` / `role` / `ssh setup`・`rotate`・`remove` / `lambda pull`）は入口で `keys.sh` の `source_ensure` を通る。
+使えなければ（無い・期限切れ）`refresh_command` を 1 度だけ走らせて確かめ直し、それでも駄目なら `source_hint` の案内で止まる。`init` 直後は
+`<名>-mfa` がまだ無いので、最初に元プロファイルを使う `role --create` がここで aws-login を走らせる。`clean` は自前の `source_ok`
+（切れていればホスト側だけ進める）。`credentials` だけに書かないこと（`role` に無くて `init` 直後に止まった。2026-09-13）。偽の `aws` / `aws-login` での検証は `tests/test_cli.py`
 （`FAKE_LONG_TERM` / `FAKE_MFA_DEVICES` / `FAKE_MFA_LOGIN_FILE`）。
 全角括弧が変数の直後に来るときは `$VAR（` ではなく `${VAR}（` と波括弧で囲む。
 本体の場所を `$PWD` で、対象フォルダの場所をスクリプトの位置で決めない。`cd` してから相対パスで

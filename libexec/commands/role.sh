@@ -13,6 +13,7 @@
 set -uo pipefail
 
 . "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/keys.sh"
 
 # 信頼ポリシーは対象固有の生成物なので、本体ではなく対象フォルダに置く
 TRUST_OUT="$AWS_SURVEY_DIR/trust.json"
@@ -149,10 +150,8 @@ echo ""
 
 # ---- 1. 元プロファイルが生きているか ----
 ui_head "1/3 ホストのプロファイル $PROFILE_SRC でログインできているか"
-if ! who=$(aws sts get-caller-identity --profile "$PROFILE_SRC" --query Arn --output text 2>&1); then
-  ui_raw "$who"
-  die "$PROFILE_SRC が使えません。ログインし直してから、もう一度実行してください。"
-fi
+source_ensure || die "$(source_hint)"
+who="$SOURCE_ARN"
 ui_ok "$who"
 # ロールはこのログインのアカウントに作られる。environment.json の account_id が別のアカウントなら、自分で作る経路では
 # 作っても調べたいアカウントには無いので止まる。借りる経路（管理者が対象アカウントに用意したロール）なら ⚠ だけ出す
