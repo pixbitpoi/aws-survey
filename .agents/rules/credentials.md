@@ -39,8 +39,8 @@
 
 利用者に見せる「次に打つコマンド」は `load-env.sh` が入れる `AWS_SURVEY_CMD`（`aws-survey` か `<本体>/aws-survey`）で
 組み立てる。`./run.sh` のようなスクリプト名を案内文に書かない。入口は `aws-survey`（`role` / `credentials` / `verify` /
-`scan` / `claude` / `codex` / `login` / `run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh`）。実体は `role` / `credentials` / `verify` /
-`run` / `scan` / `login` / `doctor` / `ls` / `ec2` / `ssh` / `lambda` が `libexec/commands/<名前>.sh`、`claude` / `codex` は `libexec/commands/agent.sh`
+`scan` / `claude` / `codex` / `login` / `run` / `status` / `doctor` / `init` / `ls` / `ec2` / `lambda` / `ssh` / `c4`）。実体は `role` / `credentials` / `verify` /
+`run` / `scan` / `login` / `doctor` / `ls` / `ec2` / `ssh` / `lambda` / `c4` が `libexec/commands/<名前>.sh`、`claude` / `codex` は `libexec/commands/agent.sh`
 （第 1 引数がエージェント名）、`status` / `init` と段階の判定は `bin/aws-survey` 本体にある。
 イメージのビルドは `libexec/docker.sh`（`run` と `lambda pull` と `libexec/container.sh` が共有する）。
 調査コンテナ一式（一時キー・指示書・`method/`・`out/`・`code/`・Claude / Codex のボリューム）のマウント列は `libexec/launch.sh`
@@ -181,6 +181,18 @@ AWS は叩かない）を添える。Organizations の一覧（`organizations li
 参照するのもやめる。対象を切り替えても一時キーが上書きされないよう、`AWS_DIR` は `name` ごとに分ける。
 リポジトリ直下に `run.sh` などのラッパーを復活させない。開発中の動作確認は `./bin/aws-survey` を直接叩くか、
 別フォルダから `AWS_SURVEY_DIR` / `--dir` で対象を指す。
+
+### 報告の C4 図（`c4`）
+
+調査エージェントは構成図を Structurizr DSL（`out/report/c4/workspace.dsl`）で書き、PNG はホストの `libexec/commands/c4.sh` が作る
+（調査コンテナには docker も Java も無い）。`scan` と `run` は終わりに `c4.sh --auto` を呼び、DSL が無い・PNG が最新なら黙り、
+描けなければ `out/report/c4/_render-error.txt` に原因を残して、調査の成否は変えない（次の回のエージェントが `survey-status` で知って直す。
+コンテナでは DSL の文法を確かめられないので、これが唯一の戻り道）。描くのは Structurizr の公式イメージ（`-playwright` タグ。
+版は `c4.sh` にだけ置く）で、渡すのは `out/report/c4/` のマウントだけ。`--network none` で動かすので、DSL の `theme` や `!include` の URL は
+効かない（`method/report.md` が `styles` の直書きを求めるのはそのため）。一時キーも `container.sh` も使わない（読むのは AWS ではなく DSL）。
+出力は `c4/.new/` に書いてから入れ替える（ビューを消したときに古い PNG を残さない）。`out/` に書くホストの部品はこれだけで、
+書くのは PNG と `_render-error.txt` に限る（DSL と報告は触らない）。引数なしの `aws-survey` は PNG が DSL より古いときだけ `c4` を並べ、
+`status` は状態を 1 行出す（`c4_state`）。偽の `docker` での検証は `tests/test_c4.py`、`scan` からの呼び出しは `tests/test_scan.py` の `C4`。
 
 ## 利用者に見せる出力
 

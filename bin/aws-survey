@@ -121,6 +121,29 @@ lambda_pulled_count() {
   echo "$n"
 }
 
+# 報告の C4 図（調査エージェントが書く out/report/c4/workspace.dsl と、ホストが描く PNG）の状態。
+#   none  DSL が無い   error 描けなかった（_render-error.txt あり）   stale PNG が無い・DSL より古い   ok 最新
+# 描くのは scan / claude / codex の終わり（libexec/commands/c4.sh --auto）。ここは判定だけ
+c4_state() {
+  local d="$AWS_SURVEY_DIR/out/report/c4" p n=0
+  [ -f "$d/workspace.dsl" ] || { echo none; return; }
+  [ ! -f "$d/_render-error.txt" ] || { echo error; return; }
+  for p in "$d"/*.png; do
+    [ -f "$p" ] || { echo stale; return; }
+    [ "$p" -nt "$d/workspace.dsl" ] || { echo stale; return; }
+    n=$((n + 1))
+  done
+  [ "$n" -gt 0 ] && echo ok || echo stale
+}
+c4_png_count() {
+  local p n=0
+  for p in "$AWS_SURVEY_DIR"/out/report/c4/*.png; do
+    [ -f "$p" ] || continue
+    case "$p" in *-key.png) ;; *) n=$((n + 1)) ;; esac
+  done
+  echo "$n"
+}
+
 # EC2 の中を調べる準備が途中なら、次の 1 手を EC2_NEXT / EC2_NEXT_DESC に、状況を EC2_DETAIL に入れて 0 を返す。
 # 順に見る: 接続を許すポリシーをロールに付けたか → その権限を含めて一時キーを発行したか → 各ホストに実際に繋いで確かめたか。
 #   ポリシー   role --create が setup.ssh_policy_attached に記録する（ssh remove が最後のホストで消す）
@@ -344,6 +367,7 @@ guide_ready() {
   if scan_done && { [ -n "$SSH_HOSTS" ] || [ "$(lambda_pulled_count)" -gt 0 ]; }; then
     also_cmd "$CMD_NAME scan" "任意。足した経路（EC2 の中・Lambda のコード）を非対話で読み、報告を更新します"
   fi
+  [ "$(c4_state)" != stale ] || also_cmd "$CMD_NAME c4" "報告の C4 図が DSL より古いので、PNG に描き直します"
   if [ -n "$agent" ]; then
     also_cmd "$CMD_NAME $agent" "$(agent_label "$agent") と対話で調査を進めます"
     case "$agent" in
@@ -1069,6 +1093,12 @@ cmd_status() {
   else
     ui_skip "未開始"
   fi
+  case "$(c4_state)" in
+    none)  ;;
+    error) ui_warn "C4 図: 描けていません（out/report/c4/_render-error.txt。次の回のエージェントが直します）" ;;
+    stale) ui_warn "C4 図: DSL より古い（$CMD_NAME c4 で描き直す）" ;;
+    ok)    ui_ok "C4 図: $(c4_png_count) 枚（out/report/c4/）" ;;
+  esac
   echo ""
   show_extras
   if [ -n "${SSH_HOSTS:-}" ]; then
@@ -1208,6 +1238,8 @@ HELP
   aws-survey lambda list        取り出してある関数とレイヤー（AWS は叩かない）
   aws-survey lambda remove <関数名>... | --all
                                 取り出したコードを消す
+
+  aws-survey c4 [--force]       報告の C4 図（out/report/c4/workspace.dsl）を PNG にする（scan / claude / codex の終わりに自動で行う）
 HELP
 }
 
@@ -1229,5 +1261,6 @@ case "$CMD" in
   ec2)         exec "$LIBEXEC_DIR/commands/ec2.sh" "$@" ;;
   ssh)         exec "$LIBEXEC_DIR/commands/ssh.sh" "$@" ;;
   lambda)      exec "$LIBEXEC_DIR/commands/lambda.sh" "$@" ;;
+  c4)          exec "$LIBEXEC_DIR/commands/c4.sh" "$@" ;;
   *)           die "不明なコマンド: ${CMD}（aws-survey --help）" ;;
 esac

@@ -33,18 +33,94 @@
 
 ### 2. 構成図
 
-Mermaid で、入口 → コンピュート → データストアの流れを描きます。系統が複数あれば系統ごとに 1 つ。
-図に入れるのは繋がりが分かっているものだけで、推測の線は点線（`-.->`）にします。図に入らなかったものは 4 節に書きます。
+C4 モデルで描きます。Structurizr DSL を `out/report/c4/workspace.dsl` に書き、報告のこの節には PNG を貼ります。
+PNG はこの環境では作れません。この回の終わりに外で作られ、`out/report/c4/<ビューのキー>.png`（凡例は `<ビューのキー>-key.png`）として
+同じ場所に置かれます。DSL に誤りがあると `out/report/c4/_render-error.txt` に原因が置かれるので、`survey-status` にそれが出ていたら
+読んで DSL を直すのが先です。DSL の文法はこの環境では確かめられないので、下の見本の形から外れないでください。
 
-```mermaid
-flowchart LR
-  user((利用者)) --> cf[CloudFront d1234]
-  cf --> alb[ALB shop-prod]
-  alb --> ecs[ECS shop-api x2]
-  ecs --> rds[(Aurora shop-db)]
-  ecs --> sqs[SQS shop-jobs]
-  sqs --> fn[Lambda shop-worker]
-  fn -.-> s3[(S3 shop-receipts 存在しない)]
+**書き方。**
+
+- 系統（独立したシステム）1 つが `softwareSystem`、その中の AWS リソースが `container`。技術の欄に種類（`ECS Fargate x2`、`Aurora MySQL`）を書きます
+- 利用者は `person`、AWS の外のもの（GitHub Actions・SaaS・他のアカウント）は `softwareSystem` に `tags "外部"`
+- 線は繋がりが分かっているものだけ。推測の線は `tags "推測"`（点線になる）。参照先が存在しないものは `tags "存在しない"`。
+  データストアは `tags "データ"`（円筒になる）。図に入らなかったものは 4 節に書きます
+- ビューは `systemLandscape "landscape"`（全体）と、系統ごとの `container <系統> "<系統>-containers"`。キーは英数字とハイフンだけ（ファイル名になる）
+- どのビューにも `include *` と `autoLayout lr` を書きます。`theme`・`!include`・URL は使いません（外に出ない環境なので効かない）。
+  `styles` は見本のものをそのまま写します
+- 報告のこの節には `![全体](c4/landscape.png)` と系統ごとの `![shop](c4/shop-containers.png)` を、1 行ずつ貼ります
+- 本文の中で小さく見せたい流れ（非同期の順序・バッチの並び・状態遷移）は Mermaid で本文に書いて構いません。C4 の代わりにはしません
+
+**見本**（`workspace.dsl`。名前・説明・線は対象に合わせて書き換え、`styles` はそのまま）:
+
+```
+workspace "アカウント 123456789012 の構成" {
+    model {
+        user = person "利用者" "ブラウザ"
+        github = softwareSystem "GitHub Actions" "デプロイ元（AWS の外）" {
+            tags "外部"
+        }
+        shop = softwareSystem "shop（EC サイト）" "注文 API と決済らしい" {
+            cf  = container "CloudFront d1234" "配信" "CloudFront"
+            alb = container "ALB shop-prod" "入口" "ALB"
+            api = container "shop-api" "注文 API" "ECS Fargate x2"
+            db  = container "shop-db" "注文データ" "Aurora MySQL" {
+                tags "データ"
+            }
+            q   = container "shop-jobs" "非同期ジョブ" "SQS"
+            fn  = container "shop-worker" "領収書を S3 に置くらしい（コード未読）" "Lambda Python 3.12"
+            s3  = container "shop-receipts" "存在しない" "S3" {
+                tags "データ" "存在しない"
+            }
+        }
+        user -> cf "HTTPS"
+        cf -> alb "443"
+        alb -> api "443"
+        api -> db "3306"
+        api -> q "SendMessage"
+        q -> fn "トリガー"
+        fn -> s3 "PutObject" {
+            tags "推測"
+        }
+        github -> api "デプロイ（OIDC）"
+    }
+    views {
+        systemLandscape "landscape" {
+            include *
+            autoLayout lr
+        }
+        container shop "shop-containers" {
+            include *
+            autoLayout lr
+        }
+        styles {
+            element "Element" {
+                background #1168bd
+                color #ffffff
+            }
+            element "Person" {
+                shape person
+                background #08427b
+            }
+            element "外部" {
+                background #999999
+            }
+            element "データ" {
+                shape cylinder
+            }
+            element "存在しない" {
+                background #ffffff
+                color #cc0000
+                border dashed
+            }
+            relationship "Relationship" {
+                dashed false
+            }
+            relationship "推測" {
+                dashed true
+            }
+        }
+    }
+}
 ```
 
 ### 3. 系統ごとの構成
@@ -141,7 +217,7 @@ AWS の API では決められなかったことを、何を見れば決まる�
 報告を「書けた」と言う前に、読み手の立場で確かめます。
 
 - [ ] 1 節だけ読んで、このアカウントが何をしているか（または分からない理由）が言える
-- [ ] 構成図があり、3 節の経路と食い違わない
+- [ ] `c4/workspace.dsl` があり、ビューが 3 節の系統と 1 対 1 で、線が 3 節の経路と食い違わない。`c4/_render-error.txt` が無い
 - [ ] 主要なリソース（コンピュート・データストア・入口・ロール）が 1 つずつ表にあり、役割が書いてある。本文に「〜は N 個」だけの文が無い
 - [ ] 6 節に、事実の突き合わせから言えることが根拠つきで書いてある（本当に何も無いなら、そう書いてある）
 - [ ] 推測が推測と分かる書き方になっている。読めなかったもの・見ていないリージョンが書いてある
@@ -159,6 +235,7 @@ AWS の API では決められなかったことを、何を見れば決まる�
 | 推測が事実になっていないか | 名前から用途を決めつけている箇所。`raw/` のどこにも無い断定は推測 |
 | 役に立つか | 上の「完了の基準」を 1 つずつ。1 節と図だけで全体が掴めるか、表に役割があるか、6 節が薄くないか |
 | 黙って埋めていないか | 拒否された操作・読めなかったものが報告か確認事項に残っているか |
+| 図が本文と合っているか | `c4/workspace.dsl` の要素と線を 3 節の表・経路と突き合わせる。`c4/_render-error.txt` があれば DSL を直す |
 
 食い違いは `out/.survey/log/NN-verify.md` に残し（見た件数・食い違い・直したもの・引き直した問い合わせ・確認事項へ移したもの）、
 本文を直します。もう一度 AWS に聞けば決まることは聞いて決め、引き直した生データを `raw/` に保存します。

@@ -53,4 +53,6 @@ status=0
 launch_run -it --name "$SURVEY_NAME" -- "$@" || status=$?
 
 launch_record_verified
+# 中で書かれた（書き直された）C4 図の DSL を PNG にする。無ければ・最新なら黙る（libexec/commands/c4.sh）。失敗しても対話の終了コードは変えない
+AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/c4.sh" --auto || true
 exit "$status"

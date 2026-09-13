@@ -282,7 +282,7 @@ scan_keys_loop() {
 scan_summary() (   # サブシェル。無いフォルダや空の grep で止まらないよう、set -e と pipefail を外す
   set +e; set +o pipefail
   local mark="$1" raw="$OUT_DIR/.survey/raw" report="$OUT_DIR/report/構成報告.md" \
-        asks="$OUT_DIR/report/ユーザー確認事項.md" raw_n names line
+        asks="$OUT_DIR/report/ユーザー確認事項.md" raw_n names line c4_n
   raw_n=$(find "$raw" -type f -newer "$mark" 2>/dev/null | wc -l | tr -d ' ')
   names=$(find "$raw" -type f -newer "$mark" 2>/dev/null | sed 's|.*/||' | sort | head -n 5 | tr '\n' ' ')
   ui_head "out/ に残したもの"
@@ -304,7 +304,15 @@ scan_summary() (   # サブシェル。無いフォルダや空の grep で止�
   else
     ui_skip "確認事項（report/ユーザー確認事項.md）は書かれていません"
   fi
-  find "$OUT_DIR" -type f -newer "$mark" 2>/dev/null | grep -v "^$raw/" | grep -vx "$report" | grep -vx "$asks" | sed "s|^$OUT_DIR/||" | sort \
+  if [ -f "$OUT_DIR/report/c4/workspace.dsl" ] && [ "$OUT_DIR/report/c4/workspace.dsl" -nt "$mark" ]; then
+    c4_n=$(find "$OUT_DIR/report/c4" -maxdepth 1 -name '*.png' ! -name '*-key.png' -newer "$mark" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${c4_n:-0}" -gt 0 ]; then
+      ui_ok "C4 図 ${c4_n} 枚  report/c4/（DSL は workspace.dsl。凡例は -key.png）"
+    elif [ -f "$OUT_DIR/report/c4/_render-error.txt" ]; then
+      ui_warn "C4 図の DSL（report/c4/workspace.dsl）は書かれましたが PNG にできませんでした。原因は report/c4/_render-error.txt にあり、次の回のエージェントが直します"
+    fi
+  fi
+  find "$OUT_DIR" -type f -newer "$mark" 2>/dev/null | grep -v "^$raw/" | grep -v "^$OUT_DIR/report/c4/" | grep -vx "$report" | grep -vx "$asks" | sed "s|^$OUT_DIR/||" | sort \
     | while IFS= read -r line; do
         case "$line" in
           .survey/env/check.md) ui_ok "環境の確認の記録  $line" ;;
@@ -491,6 +499,9 @@ fi
 
 ui_ok "初期調査を終えました（$(ui_duration "$scan_elapsed")）"
 echo ""
+# エージェントが書いた C4 図の DSL（report/c4/workspace.dsl）を PNG にする。無ければ・最新なら黙る（libexec/commands/c4.sh）。
+# 失敗しても初期調査の成否は変えない（原因は c4/_render-error.txt に残り、次の回のエージェントが直す）
+AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/c4.sh" --auto || true
 scan_summary "$START_MARK"
 echo ""
 # 報告があって初めて「済み」。無ければ次も scan を案内する（前回の生データを使って続きから始める。やり直しではない）

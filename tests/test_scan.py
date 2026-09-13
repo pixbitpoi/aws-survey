@@ -40,6 +40,18 @@ if argv[:1] == ["ps"]:
     sys.exit(0)
 if argv[:1] != ["run"]:
     sys.exit(0)
+if any(a.startswith("structurizr/") for a in argv):
+    # the C4 renderer (libexec/commands/c4.sh) after the agent: writes PNGs where -output points, through the c4 mount
+    assert "--network" in argv and argv[argv.index("--network") + 1] == "none"
+    assert not any(".aws-claude" in a for a in argv), "the renderer must not carry the key"
+    if "structurizr/structurizr:fail" in argv:
+        print("12:00:00.000 [main] ERROR com.structurizr.command.ExportCommand -- bad DSL", file=sys.stderr); sys.exit(1)
+    src = next(argv[i + 1] for i, a in enumerate(argv) if a == "-v").split(":")[0]
+    out = os.path.join(src, os.path.relpath(argv[argv.index("-output") + 1], "/usr/local/structurizr"))
+    os.makedirs(out, exist_ok=True)
+    for name in ("landscape.png", "landscape-key.png"):
+        open(os.path.join(out, name), "wb").write(b"png")
+    sys.exit(0)
 image_i = next(i for i, a in enumerate(argv) if a.endswith(":latest"))
 cmd = argv[image_i + 1 :]
 mounts = {}
@@ -80,6 +92,9 @@ if (cmd[0] == "claude" and "-p" in cmd) or (cmd[0] == "codex" and "exec" in cmd)
         open(os.path.join(out, ".survey", "log", "01-baseline.md"), "w").write("# 第 1 回\n")
         open(os.path.join(out, "report", "構成報告.md"), "w").write("# 構成報告\n\n## 概要\n\n- 2 件\n\n## システムごとの経路\n\n## 外からは分からないこと\n\n## 付録: リソース一覧\n")
         open(os.path.join(out, "report", "ユーザー確認事項.md"), "w").write("# 確認事項\n\n## 中を見れば分かること\n\n## ユーザーにしか分からないこと\n\n### Q1. 何のシステムですか\n\n回答:\n")
+        if os.environ.get("FAKE_SCAN_C4"):
+            os.makedirs(os.path.join(out, "report", "c4"), exist_ok=True)
+            open(os.path.join(out, "report", "c4", "workspace.dsl"), "w").write("workspace {\n}\n")
     if os.environ.get("FAKE_SCAN_SLOW"):
         import time; time.sleep(float(os.environ["FAKE_SCAN_SLOW"]))
     if cmd[0] == "codex":
@@ -737,6 +752,42 @@ class InteractiveAgent(ScanCase):
         first_docker = next(i for i, c in enumerate(calls) if c[0] == 'docker')
         self.assertLess(assume, first_docker)
         self.assertIn('-it', self.docker_runs()[-1])
+
+
+class C4(ScanCase):
+    """After the agent, the C4 DSL it wrote is rendered to PNG on the host (libexec/commands/c4.sh --auto)."""
+
+    def setUp(self):
+        super().setUp()
+        self.add_tool('id', '#!/bin/sh\ncase "$1" in -u) echo 501 ;; -g) echo 20 ;; esac\n')
+
+    def test_a_dsl_written_by_the_agent_is_rendered_after_the_run_and_listed(self):
+        self.ready(agent='claude'); self.authed('claude')
+        result = self.run_cli('scan', FAKE_SCAN_WRITES='1', FAKE_SCAN_C4='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        runs = self.docker_runs()
+        renders = [c for c in runs if any(a.startswith('structurizr/') for a in c)]
+        self.assertEqual(len(renders), 1)
+        self.assertLess(runs.index(self.agent_run()), runs.index(renders[0]))       # after the agent, never before
+        c4 = self.target / 'out' / 'report' / 'c4'
+        self.assertTrue((c4 / 'landscape.png').exists())
+        self.assertIn('C4 図 1 枚  report/c4/', result.stdout)
+        self.assertNotIn('report/c4/landscape.png', result.stdout)                   # folded into the one line, not listed file by file
+
+    def test_without_a_dsl_nothing_is_rendered(self):
+        self.ready(agent='claude'); self.authed('claude')
+        result = self.run_cli('scan', FAKE_SCAN_WRITES='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(any(any(a.startswith('structurizr/') for a in c) for c in self.docker_runs()))
+        self.assertNotIn('C4', result.stdout)
+
+    def test_a_render_failure_is_named_but_does_not_fail_the_survey(self):
+        self.ready(agent='claude'); self.authed('claude')
+        result = self.run_cli('scan', FAKE_SCAN_WRITES='1', FAKE_SCAN_C4='1', AWS_SURVEY_C4_IMAGE='structurizr/structurizr:fail')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.environment()['setup']['scanned'] is not None, True)
+        self.assertIn('PNG にできませんでした', result.stdout)
+        self.assertTrue((self.target / 'out' / 'report' / 'c4' / '_render-error.txt').exists())
 
 
 if __name__ == '__main__':

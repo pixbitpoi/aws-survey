@@ -9,6 +9,7 @@ SESSION_FILE=/home/node/.aws-claude/session.json
 CRED_FILE=/home/node/.aws-claude/credentials
 SSH_CONFIG=/home/node/.aws-claude/ssh/config
 CODE_DIR=/home/node/aws-survey/code
+C4_DIR=/home/node/aws-survey/out/report/c4
 
 # プロファイル・リージョン・アカウント。資格情報があるときだけ最後に出す。
 show_context() {
@@ -18,6 +19,28 @@ show_context() {
   sui_text "$line"
   show_hosts
   show_code
+  show_c4
+}
+
+# 報告の C4 図。DSL（out/report/c4/workspace.dsl）はこの環境で書き、PNG はこの環境の外で作られて同じ場所に置かれる。
+# 作れなかったときは _render-error.txt が置かれるので、それを直す仕事として出す。DSL が無い対象では何も出さない。
+show_c4() {
+  local n=0 p
+  [ -f "$C4_DIR/workspace.dsl" ] || return 0
+  if [ -f "$C4_DIR/_render-error.txt" ]; then
+    sui_warn "C4 図の DSL（out/report/c4/workspace.dsl）を PNG にできませんでした。"
+    sui_next "out/report/c4/_render-error.txt の原因を読んで DSL を直してください（作法は method/report.md「構成図」）。"
+    return 0
+  fi
+  for p in "$C4_DIR"/*.png; do
+    [ -f "$p" ] || continue
+    case "$p" in *-key.png) ;; *) n=$((n + 1)) ;; esac
+  done
+  if [ "$n" -gt 0 ]; then
+    sui_line "C4 図: PNG ${n} 枚（out/report/c4/。DSL を書き直すと、この回の終わりに描き直されます）"
+  else
+    sui_line "C4 図: DSL あり。PNG はこの回の終わりに作られます（out/report/c4/）"
+  fi
 }
 
 # 取り出してある Lambda のコード（ro マウント）。関数ごとの _manifest.json を数えるだけで、AWS は叩かない。
