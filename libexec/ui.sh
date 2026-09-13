@@ -86,9 +86,9 @@ is_chained_arn() { case "$1" in *:assumed-role/*) return 0 ;; *) return 1 ;; esa
 is_chained_principal() { case "$1" in *:assumed-role/*|*:role/*) return 0 ;; *) return 1 ;; esac; }
 # 上限の説明。ui_chain_limit <environment.json の duration_seconds>
 ui_chain_limit() {
-  ui_warn "いまのログインは借りたロールなので、ここから借りる一時キーは 1 時間が上限です（environment.json は $(( $1 / 60 )) 分）"
-  ui_text "AWS の決まり（ロールチェーン）で、調査用ロールの上限（MaxSessionDuration）を延ばしても変わりません。Identity Center のログインも同じです。"
-  ui_text "1 時間を超える長さにするには、IAM ユーザーの長期キー（MFA 付き）でログインする経路が要ります。"
+  ui_warn "いまのログインは一時キー（借りたロールか MFA のセッション）なので、ここから借りる一時キーは 1 時間が上限です（environment.json は $(( $1 / 60 )) 分）"
+  ui_text "AWS の決まり（ロールチェーン）で、調査用ロールの上限（MaxSessionDuration）を延ばしても変わりません。Identity Center のログインも aws-login の MFA も同じです。"
+  ui_text "一時キーは各コマンドの入口で自動的に発行し直すので、1 時間でも調査は続きます。"
 }
 
 # ホームフォルダの下のパスを ~ で省略する（画面に出すときだけ。ファイルやコマンドに書く値には使わない）

@@ -167,7 +167,7 @@ if [ -n "$who_account" ] && [ "$who_account" != "$ACCOUNT_ID" ]; then
   ui_warn "ログインしているアカウント（${who_account}）と、調べるアカウント（${ACCOUNT_ID}）が違います。借りるロールは調べるアカウント側に要ります"
 fi
 # 借りたロールからのログインは、ロール側の上限にかかわらず 1 時間まで。ロールを直しても変わらないので、ここで environment.json 側を案内する
-if is_chained_arn "$who" && [ "$DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
+if source_limited "$who" && [ "$DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
   ui_chain_limit "$DURATION"
   ui_text "environment.json の auth.duration_seconds を ${CHAIN_MAX_SECONDS} にしてください（$AWS_SURVEY_CMD credentials がその場で直すこともできます）。"
 fi

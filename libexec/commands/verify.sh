@@ -47,7 +47,8 @@ esac
 
 echo ""
 ui_head "2/7 読み取りは通るか"
-vpc=$(aws ec2 describe-vpcs --max-items 1 --query 'Vpcs[0].VpcId' --output text 2>&1)
+# --max-items を付けると VPC が 2 つ以上のとき 2 ページ目の None が続き、3/7 の ID が壊れる（2026-09-13 に実環境で発生）。1 行目だけ使う
+vpc=$(aws ec2 describe-vpcs --query 'Vpcs[0].VpcId' --output text 2>&1 | head -n 1)
 case "$vpc" in
   vpc-*) ok "VPC の一覧を読めました（${vpc}）" ;;
   *)     ng "読み取りが通りません" "$vpc" ;;

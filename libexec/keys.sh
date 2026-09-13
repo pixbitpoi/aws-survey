@@ -55,6 +55,14 @@ profile_is_long_term_key() {
   [ -z "$(profile_conf aws_session_token "$p")" ] || return 1
   [ -z "$(profile_conf sso_session "$p")$(profile_conf sso_start_url "$p")$(profile_conf role_arn "$p")$(profile_conf credential_process "$p")" ]
 }
+# 一時キー（aws-login の MFA セッションなど。名前が <名>-mfa か aws_session_token がある）なら 0。
+# ここからロールを借りると、借りたロールからと同じく AWS の決まりで 1 時間が上限（2026-09-13 に実環境で確認）
+profile_is_session_key() {
+  case "$1" in *-mfa) return 0 ;; esac
+  [ -n "$(profile_conf aws_session_token "$1")" ]
+}
+# いまのログイン（Arn と元プロファイル）から借りる一時キーが 1 時間で頭打ちか。source_limited <Arn>
+source_limited() { is_chained_arn "$1" || profile_is_session_key "$PROFILE_SRC"; }
 # MFA を求めるときにロールを借りる元。長期キーの <名> なら aws-login の保存先 <名>-mfa、それ以外はそのまま
 mfa_source_profile() {
   local p="$1"

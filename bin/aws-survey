@@ -787,15 +787,20 @@ init_interactive() {
     mfa_def=$(mfa_default_from_arn "$I_ARN")
     ask I_MFA "mfa_required (y/n)" "$([ "$mfa_def" = true ] && echo y || echo n)" valid_bool to_bool
   fi
+  init_resolve_source
 
   init_begin "region" "主に見るリージョン。既定リージョンになります。"
   region_def=$(profile_region "$I_PROFILE")
   ask I_REGION "region" "$region_def" valid_region
 
-  # 借りたロールからのログイン（Identity Center も）は、AWS の決まり（ロールチェーン）で 1 時間が上限。聞かずに固定する
+  # 借りたロールからのログイン（Identity Center も）と、aws-login の MFA セッション（<名>-mfa）からは、AWS の決まり
+  # （ロールチェーン）で 1 時間が上限。聞かずに固定する
   if is_chained_principal "$I_ARN"; then
     I_DURATION=$CHAIN_MAX_SECONDS
     init_fixed "セッションの上限" "$(duration_label "$I_DURATION")" "（借りたロールからのログインは、AWS の決まりで 1 時間が上限）"
+  elif profile_is_session_key "$I_PROFILE"; then
+    I_DURATION=$CHAIN_MAX_SECONDS
+    init_fixed "セッションの上限" "$(duration_label "$I_DURATION")" "（MFA の一時キーからロールを借りるときは、AWS の決まりで 1 時間が上限）"
   else
     init_begin "duration_seconds" \
       "1 回の調査セッションに取れる時間。一時キーの長さになります。" \
@@ -871,8 +876,10 @@ init_noninteractive() {
   # 既定が決められる項目だけ埋める
   [ -n "$I_NAME" ]     || I_NAME=$(default_name)
   [ -n "$I_MFA" ]      || I_MFA=$(mfa_default_from_arn "$I_ARN")
+  I_MFA=$(to_bool "$I_MFA")
+  init_resolve_source
   if [ -z "$I_DURATION" ]; then
-    if is_chained_principal "$I_ARN"; then I_DURATION=$CHAIN_MAX_SECONDS; else I_DURATION=$DURATION_DEFAULT; fi
+    if is_chained_principal "$I_ARN" || profile_is_session_key "$I_PROFILE"; then I_DURATION=$CHAIN_MAX_SECONDS; else I_DURATION=$DURATION_DEFAULT; fi
   fi
   [ -n "$I_ROLE" ]     || I_ROLE=aws-survey-readonly
   I_MFA=$(to_bool "$I_MFA")
@@ -912,6 +919,9 @@ init_validate() {
   valid_duration "$I_DURATION" || init_die "duration_seconds が不正です: ${I_DURATION}（900〜43200）"
   if is_chained_principal "$I_ARN" && [ "$I_DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
     init_die "duration_seconds ${I_DURATION} は長すぎます。貸す相手（${I_ARN}）はロールを借りてのログインなので、AWS の決まり（ロールチェーン）で 1 時間（3600）が上限です。ロール側の上限では延ばせません。"
+  fi
+  if profile_is_session_key "$I_PROFILE" && [ "$I_DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
+    init_die "duration_seconds ${I_DURATION} は長すぎます。${I_PROFILE} は MFA の一時キーなので、そこからロールを借りるときは AWS の決まり（ロールチェーン）で 1 時間（3600）が上限です。"
   fi
   valid_role "$I_ROLE"         || init_die "role_name が不正です: $I_ROLE"
   # <名>-mfa は aws-login が最初の credentials のときに作るので、元の <名> があればよい
@@ -1061,7 +1071,6 @@ cmd_init() {
   print_places
   init_confirm_replace
   if [ "$INIT_MODE" = noninteractive ]; then init_noninteractive; else init_interactive; fi
-  init_resolve_source
   init_validate
   init_write
   init_scaffold

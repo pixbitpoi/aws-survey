@@ -89,7 +89,7 @@ fix_duration_or_die() {
   ui_text "environment.json の auth.duration_seconds を ${CHAIN_MAX_SECONDS} にしてから、もう一度実行してください: $ENV_FILE"
   die "一時キーを発行できませんでした。$OUT は変更していません。"
 }
-if is_chained_arn "$who" && [ "$DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
+if source_limited "$who" && [ "$DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
   ui_chain_limit "$DURATION"
   fix_duration_or_die
 fi

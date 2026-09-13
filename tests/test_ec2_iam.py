@@ -48,6 +48,8 @@ def read_doc(arg):
     return json.load(open(arg[len("file://"):])) if arg.startswith("file://") else json.loads(arg)
 def fail(msg, code=254):
     sys.stderr.write("An error occurred (%s)\n" % msg); sys.exit(code)
+if argv[:2] == ["configure", "get"]:          # ~/.aws の設定は何も無い（長期キーでも一時キーでもない）
+    sys.exit(1)
 policy_file = os.path.join(state, "policy.json")
 attached_file = os.path.join(state, "attached.txt")
 role_file = os.path.join(state, "role")
@@ -111,6 +113,8 @@ if op == "assume-role":
     sys.exit(0)
 # ---- verify ----
 if op == "describe-vpcs":
+    if "--max-items" in argv:                       # ページ分けで 2 行目に None が続く（実環境の再現）
+        print("vpc-0fake\nNone"); sys.exit(0)
     print("vpc-0fake"); sys.exit(0)
 if op == "create-tags":
     fail("UnauthorizedOperation")
@@ -408,6 +412,16 @@ class Verify(IamCase):
         self.assertIn('ポート転送（AWS-StartPortForwardingSession）は拒否されました', result.stdout)
         self.assertIn('問題あり          0 件', result.stdout)
         self.assertTrue(json.loads((self.target / 'environment.json').read_text())['setup']['readonly_verified'])
+
+    def test_the_canary_vpc_is_a_single_id(self):
+        # VPC が 2 つ以上あると --max-items 1 の出力に None が続き、3/7 の create-tags が InvalidID で判定できなくなっていた
+        self.prepare()
+        result = self.run_cli('verify')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tags = self.calls('create-tags')
+        self.assertEqual(len(tags), 1)
+        self.assertEqual(tags[0][tags[0].index('--resources') + 1], 'vpc-0fake')
+        self.assertNotIn('判定できません', result.stdout)
 
     def test_an_allowed_session_is_a_failure(self):
         self.prepare()

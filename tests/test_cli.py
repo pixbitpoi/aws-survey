@@ -959,7 +959,8 @@ class Init(CliCase):
     def test_interactive_long_term_key_borrows_from_the_mfa_profile(self):
         # 長期キーの fake-src を選んで MFA を求めると、借りる元は aws-login の保存先 fake-src-mfa（まだ無くてよい）。
         # mfa_serial が無く、登録済みのデバイスが 1 つなら元プロファイルに保存する
-        answers = ['', '1', '', '', '3600', '', '', '', '']
+        # MFA の一時キーからロールを借りると 1 時間が上限（ロールチェーン）なので duration_seconds は聞かれない
+        answers = ['', '1', '', '', '', '', '', '']
         serial = 'arn:aws:iam::000000000000:mfa/dev'
         result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_LONG_TERM='fake-src', FAKE_MFA_DEVICES=serial)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -967,7 +968,10 @@ class Init(CliCase):
         self.assertEqual(config['auth']['source_profile'], 'fake-src-mfa')
         self.assertEqual(config['auth']['refresh_command'], 'aws-login --profile fake-src')
         self.assertEqual(config['auth']['mfa_required'], True)
+        self.assertEqual(config['auth']['duration_seconds'], 3600)
         self.assertIn('◆ ロールを借りる元: fake-src-mfa', result.stdout)
+        self.assertIn('◆ セッションの上限: 1 時間 （MFA の一時キーからロールを借りるときは', result.stdout)
+        self.assertNotIn('◆ duration_seconds', result.stdout)
         self.assertIn(f'◆ MFA デバイス: {serial}', result.stdout)
         self.assertIn(['aws', 'configure', 'set', 'mfa_serial', serial, '--profile', 'fake-src'], self.calls())
         # デバイスが 2 つ以上・設定済み・MFA を求めないなら、設定に触らない（2 回目からは差し替えの y が先）
@@ -987,8 +991,13 @@ class Init(CliCase):
         # fake-src-mfa を直接渡しても、元の fake-src があれば通る
         result = self.run_cli('init', **INIT_ENV, FAKE_LONG_TERM='fake-src')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['source_profile'], 'fake-src-mfa')
+        config = json.loads((self.target / 'environment.json').read_text())
+        self.assertEqual(config['auth']['source_profile'], 'fake-src-mfa')
+        self.assertEqual(config['auth']['duration_seconds'], 3600)          # MFA の一時キーからは 1 時間が上限
         self.assertTrue(all(c[1] == 'configure' for c in self.calls()), self.calls())
+        result = self.run_cli('init', '--force', **INIT_ENV, FAKE_LONG_TERM='fake-src', AWS_SURVEY_INIT_DURATION_SECONDS='10800')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('1 時間（3600）が上限', result.stderr)
         result = self.run_cli('init', '--force', **{**INIT_ENV, 'AWS_SURVEY_INIT_SOURCE_PROFILE': 'fake-src-mfa'})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(json.loads((self.target / 'environment.json').read_text())['auth']['source_profile'], 'fake-src-mfa')
@@ -999,7 +1008,7 @@ class Init(CliCase):
     def test_interactive_hides_base_profile_when_mfa_destination_exists(self):
         # 一覧に <名>-mfa があるとき、元の <名> は候補に出ず、番号は残った候補で振り直される
         profiles = 'fake-src\\nsso-prof\\nbase\\nbase-mfa'
-        answers = ['', 'base', '3', '', '', '3600', '', '', '', '']
+        answers = ['', 'base', '3', '', '', '', '', '', '']     # base-mfa は MFA の一時キーなので duration_seconds は聞かれない
         result = self.run_cli('init', input='\n'.join(answers) + '\n', FAKE_PROFILES=profiles)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('base は <名>-mfa がある長期キー側なので省いています', result.stdout)
