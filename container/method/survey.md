@@ -38,11 +38,29 @@
    リージョンごとの `describe-*` で続けます。Resource Explorer のインデックスがあれば、それも入口になります。
 3. **系統を辿る。** 入口（CloudFront・ALB・API Gateway・関数 URL・Route 53・イベント）から、コンピュート、データストアへ。
    繋がりは、トリガー・環境変数の名前・実行ロールの許可先・SG の参照・ターゲットグループから辿ります。
+   入口が多ければ、入口の数だけ辿ります。35 の CloudFront は 35 の経路で、それぞれの別名・オリジン・WAF・ログ先を取り、
+   ALB のルールはホスト名 → ターゲットグループ → 登録ターゲットとその health まで引きます（`method/report.md` 3 節の経路の表の材料）。
    `survey-status` に経路が出ていれば、EC2 の中と Lambda のコードも読みます（`method/routes.md`）。
 4. **網羅性を担保する。** `method/report.md` の付録の領域（リージョン / コンピュート / データ / 配信 / 非同期 / 監視 / 権限 / 稼働）を
    1 つずつ見て、無かったものも空の生データを残します。「無かった」と「見ていない」を区別するためです。
    ロールは 1 つずつ信頼関係と主なポリシーを読みます。SG は ENI から実際に付いているリソースを引き直します。
    ロググループは削除済みリソースの痕跡が残るので、構成の履歴を読む材料になります。
+
+   **代表確認で済ませないもの。** 一覧に出る名前だけでは役割も状態も分からない種類は、1 つずつ取ります。数が多いほど、
+   読み手はコンソールで追えないので、報告の価値はここで決まります。独立したコマンドは 1 回の応答にまとめて投げれば時間はかかりません。
+
+   | 種類 | 全件で取るもの | 取り方の例 |
+   | --- | --- | --- |
+   | S3 バケット | 公開ブロックとポリシーの公開判定、容量とオブジェクト数、ライフサイクル、バージョニング、誰が参照するか（CloudFront のオリジン・ALB/CloudFront のログ先・ロールの許可先） | `get-public-access-block` / `get-bucket-policy-status` / `get-bucket-lifecycle-configuration` を 1 つずつ。容量は `cloudwatch get-metric-data` に全バケットの `BucketSizeBytes` / `NumberOfObjects` を `file://` で 1 回 |
+   | IAM ユーザー | 全員のコンソールログイン・MFA・アクセスキーの最終使用、所属グループと直付けポリシー | `get-account-authorization-details` に大半がある。最終使用は `list-access-keys` → `get-access-key-last-used` を 1 人ずつ |
+   | IAM ロール | 信頼関係・主なポリシー・最終使用 | 同上と `RoleLastUsed` |
+   | CloudFront | 別名・オリジン（種類と先）・WAF・ログ先・有効か | `list-distributions` の `--query` で全項目 |
+   | ALB / NLB | リスナー → ルール（ホスト・パス）→ ターゲットグループ → ターゲットと health | `describe-rules` はリスナーごと、`describe-target-health` はターゲットグループごと |
+   | Route 53 | ゾーンごとのレコードのうち、AWS のリソース（CloudFront・ALB・EIP・S3）を指すもの | `list-resource-record-sets` をゾーンごと。経路の表の「入口」の裏付け |
+   | EC2 | 稼働中も停止中も、名前・タイプ・サブネット・公開 IP・SG・インスタンスプロファイル・起動日 | `describe-instances` を状態で絞らない |
+   | セキュリティグループ | 実際に付いている ENI と、0.0.0.0/0 からの受信 | ENI から引き直す |
+   | Lambda | ランタイム・トリガー・実行ロール・関数 URL・直近 30 日の呼び出し | `method/routes.md` の絞った `--query` |
+   | 証明書・ドメイン | 期限・使用先・自動更新 | `acm describe-certificate` を 1 つずつ、`route53domains list-domains` |
 5. **報告を書く。** 領域ごとに集めて書いても構いません。全部集めてからでなくてよいですが、報告まで書き切ってから回を終えます。
    生データだけで終わった回は、ユーザーには何も伝わりません。
 
