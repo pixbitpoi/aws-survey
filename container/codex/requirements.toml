@@ -1,0 +1,20 @@
+allowed_approval_policies = ["never"]
+allowed_sandbox_modes = ["danger-full-access", "read-only"]
+allowed_web_search_modes = ["disabled"]
+allow_managed_hooks_only = true
+
+[features]
+hooks = true
+# write_stdin の追加入力は PreToolUse を再実行しないため、unified exec は無効にする。
+unified_exec = false
+
+[hooks]
+managed_dir = "/etc/codex/hooks"
+
+[[hooks.PreToolUse]]
+matcher = "*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "/usr/bin/python3 /etc/codex/hooks/codex-guard.py"
+timeout = 10

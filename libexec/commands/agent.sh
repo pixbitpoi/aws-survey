@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# 調査コンテナで Claude Code / Codex を対話で起動する（ホストで実行）
+#   aws-survey claude [claude の引数...]   Claude Code を起動する（-c で直前の会話の続き、-r で選んで再開）
+#   aws-survey codex  [codex の引数...]    Codex を起動する（resume --last で直前の会話の続き）
+# 実体は libexec/commands/agent.sh <claude|codex> [...]。run.sh に exec する薄い皮で、持つのは一時キーの判定（足りなければ発行し直す）・
+# 使うエージェントの記録・モデルと effort のフラグ・見出しだけ。初期調査の報告が out/ にあれば、中のエージェントはそれを手にユーザーと続きから進める。
+set -euo pipefail
+
+. "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/container.sh"
+. "$LIBEXEC_DIR/launch.sh"
+
+AGENT="${1:-}"; shift || true
+case "$AGENT" in
+  claude|codex) ;;
+  *) ui_die "エージェントは claude か codex です: ${AGENT:-（指定なし）}" ;;
+esac
+case "${1:-}" in
+  -h|--help|help)
+    sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0 ;;
+esac
+
+# 対話で起動するので端末が要る（端末でなければ docker run -it が失敗する）
+{ [ -t 0 ] && [ -t 1 ]; } || ui_die "端末で実行してください（$AWS_SURVEY_CMD $AGENT は対話でエージェントを起動します）。"
+
+# 読み取り専用と確かめ済みか。一時キーが無い・切れている・残りが短ければ（対話は長いので総時間の半分、上限 30 分）発行し直す
+container_require_key "$(key_session_min)" || exit 1
+
+# 最後に使ったエージェントとして記録する（scan の既定と、案内文の「次に打つコマンド」に使う）。
+# モデルと effort は environment.json の agent から CLI のフラグにして渡す（libexec/agents.sh）
+env_set_agent "$AGENT"
+launch_agent_flags "$AGENT"
+
+AWS_SURVEY_RUN_TITLE="aws-survey $AGENT" exec "$LIBEXEC_DIR/commands/run.sh" "$AGENT" "${AGENT_FLAGS[@]}" "$@"

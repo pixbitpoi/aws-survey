@@ -1,0 +1,99 @@
+# AWS 構成調査環境の開発・運用
+
+Claude Code / Codex 共通の指示。これは AWS を調査するための一式であり、対象インフラの説明書ではない。
+
+## ホストと調査コンテナ
+
+- **ホスト**（このリポジトリ）: 調査環境の開発。`aws-survey` が AWS 接続の準備と起動を持つ。
+  `aws-survey scan`（非対話の初期調査）か `aws-survey claude` / `codex`（対話）でコンテナが立ち上がったら、ホスト側の仕事は無い。
+- **調査コンテナ**: AWS を読み取り専用で調べる実行環境。中で動く **調査エージェント** が
+  白紙で基礎調査の報告を書き、以後はユーザーと対話で進め、`out/` に記録する。
+- 対象の概要・調査項目・調査の目的をホストから先渡ししない。調査エージェントが白紙で調べて報告を作る。
+- 調査エージェントに渡す文書に、ホスト手順・隔離設計・ホスト側の判断を書かない。
+  制約は環境から見える事実として書く。
+- 接続設定と到達点は `environment.json`、調査の記憶は `out/` に分ける。
+- この 3 語を使い分ける。「渡る・届く・起動する」はコンテナ、「調べる・書く・報告する」はエージェント、
+  それを用意する側がホスト。
+
+## 作業前に読むもの
+
+必要な文書だけ読む。開発作業に対象アカウントの設定は不要。
+
+| 依頼・対象 | 読むもの |
+| --- | --- |
+| 準備・立ち上げ・起動・一時キー | 手順書は置かない。`aws-survey`（引数なし）の出力に従う。段階の判定・次の 1 手・実行までコマンドが持つ。一時キーは各コマンドが入口で自動的に発行し直す（`.agents/rules/credentials.md`「一時キーは各コマンドの入口で自動的に発行し直す」） |
+| `libexec/commands/scan.sh`（非対話の初期調査。起動前に経路を足す問い・報告まで・一時キーの見張り）・`agent.sh`（`claude` / `codex` の対話起動）・`login.sh`（エージェントのログイン）・`libexec/launch.sh`（`run` と `scan` が共有する調査コンテナ一式のマウント列。ログインと CLI のフラグも）・`libexec/agents.sh`（エージェント名・モデル・effort の既定と候補）・段階「初期調査」と `guide_ready` | `.agents/rules/credentials.md` の「非対話の棚卸し（`scan`）」の段落。偽の `docker` での検証は `tests/test_scan.py`（`scan` の docker 引数と指示文・認証の判定とログイン・エージェントの記憶とフラグ・量の見積もりと進捗の表示・終わったあとの `out/` の案内、`claude` / `codex` の pty 起動）、段階と案内は `tests/test_cli.py` |
+| 調査中の進め方・報告のあとのユーザーとの進め方・報告に何を書かせるか | ホストでは持たない。調査エージェント（`container/instructions/survey-agents.md` と `container/method/` の 3 本: `report.md`・`survey.md`・`routes.md`）が自分で持つ。触るときは `.agents/rules/container.md` |
+| エラー | 手順書は置かない。`aws-survey doctor`（ツールの有無と発行の切り分け）と各コマンドの出力から読む |
+| リリース・Homebrew の formula 更新 | `docs/release.md`（配布物の範囲もここ） |
+| `container/**`・`Dockerfile` | `.agents/rules/container.md` |
+| `bin/aws-survey`・`libexec/**`・`templates/`・接続設定 | `.agents/rules/credentials.md` |
+| `libexec/ec2/**`（EC2 に置く診断ゲートウェイと、導入・撤去スクリプトの雛形）・`libexec/commands/ssh.sh`（SSM 経由の導入と登録、`ssh verify`、`ssh rotate`、`ssh remove`。最後のホストでの `diag-ssh-<name>` の detach / delete も `remove` が持つ） | `docs/design-ec2-ssh.md` の第 2 節（名前）・第 4 節（セットアップと EC2 に作るもの。SSM の上限の実測値は第 4.3 節、`rotate` / `remove` とポリシーの片付けは第 4.6 節）・第 5 節（仕様）。実装の段階と未確認事項は第 10 節。偽の `aws` での検証は `tests/test_ssh_setup.py`（`setup` / `list` / `rotate` / `remove`。IAM の呼び出し順も）、`ssh verify` と `remove --print` は偽の `docker` で `tests/test_ssh_install.py` |
+| `container/ec2`（調査コンテナの `ec2` ラッパー、二層の SSM セッションの後片付け、`--selftest`）・フックの `ec2` / `ssh` の判定・`Dockerfile` の session-manager-plugin・`container/method/routes.md` の EC2 の節・`survey-status` の登録済みホスト表示 | `.agents/rules/container.md` に加えて `docs/design-ec2-ssh.md` の第 7 節（自己診断の項目と SSM セッションの終わり方・起動時の後片付けの実測）・第 8 節（コンテナ側の部品とフックの判定）。通る例・落ちる例とラッパーの引数の渡し方・後片付けの呼び出し順は `tests/test_guards.py`（偽の `ssh` と `aws`）、配置は `tests/test_launcher.py`。`method/routes.md` の EC2 の節はゲートウェイの動詞（第 5 節）と食い違わせない |
+| `libexec/commands/lambda.sh`（`lambda pull` / `list` / `remove`、取り出し専用の一時キー）・`libexec/lambda/extract.py`（抽出器）・`libexec/docker.sh`（`run` と共有するイメージのビルド） | `.agents/rules/credentials.md` に加えて `docs/design-lambda-code.md` の第 4 節（コマンドと取り出し先）・第 5 節（展開・拒否パターン・マスク・依存・ソースマップ）・第 6.2 節（取り出し専用の一時キー）。抽出器は `tests/test_lambda_extract.py`（組み立てた zip）、`pull` / `list` / `remove` は `tests/test_lambda_pull.py`（偽の `aws` / `curl` / `docker`。偽の `docker` が本物の抽出器を走らせる）。拒否パターンとマスクは `gateway.py` から import し、写さない |
+| `container/method/routes.md` の Lambda の節・`run.sh` の `code/` のマウント・`survey-status` の取り出してある関数の表示・フックのコードの検索の例外と `lambda get-function` の拒否 | `.agents/rules/container.md` に加えて `docs/design-lambda-code.md` の第 6.1 節（調査コンテナの一時キーとフック）・第 7 節（コンテナ側の部品）。通る例・落ちる例は `tests/test_guards.py`、マウントと `settings.json` は `tests/test_launcher.py`。`method/routes.md` の Lambda の節は抽出器が書く `_manifest.json` の項目と食い違わせない |
+| `libexec/container.sh`（一時キーだけを渡して調査コンテナのイメージで 1 コマンド）・`libexec/inventory.sh`（コンテナに貸す列挙。1 行 1 JSON）・`libexec/menu.sh`（矢印キーの選択）・`libexec/keys.sh`（一時キーの判定と、各コマンドの入口で残り時間を見て自動で発行し直す `key_ensure`）・`libexec/commands/ls.sh` / `ec2.sh`・`lambda.sh` の引数なし（対話モード）・`show_extras` の案内 | `.agents/rules/credentials.md` の「利用者に見せる入口はリソース名」の段落。`inventory.sh` を偽 `aws` で直接叩くのが `tests/test_inventory.py`、偽 `docker` と pty で `ls` / `ec2` / `lambda` を通すのが `tests/test_resources.py`。`container/` には置かない理由は `.agents/rules/container.md` |
+| `libexec/commands/c4.sh`（報告の C4 図の DSL を PNG にする。`scan` / `run` の終わりに `--auto`）・`bin/aws-survey` の `c4_state`・`container/survey-status` の C4 の表示・`container/method/report.md`「構成図」の DSL の見本 | `.agents/rules/credentials.md` の「報告の C4 図（`c4`）」の段落と `.agents/rules/container.md`。偽の `docker` での検証は `tests/test_c4.py`、`scan` からの呼び出しは `tests/test_scan.py` |
+| `libexec/commands/clean.sh`（後片付け。EC2 の撤去 → ポリシー → 自分で作った調査用ロール → ホストの鍵・ボリューム・コード）・`ssh.sh` の `clean-policy`・引数なしの `aws-survey` が準備完了のあとに `scan` を聞く `guide_offer_scan` | `.agents/rules/credentials.md` の「後片付け（`clean`）」の段落。偽の `aws` / `docker` での検証は `tests/test_clean.py`、`scan` を聞く流れは `tests/test_cli.py` の pty のテスト |
+| `diag-ssh-<name>` ポリシー（`role.sh` の作成・アタッチ、`credentials.sh` の `--policy-arns`、`verify.sh` の 6・7 項目目） | `.agents/rules/credentials.md` に加えて `docs/design-ec2-ssh.md` の第 6 節（ポリシーの内容と `PackedPolicySize` の実測）・第 7 節（検証）。偽の `aws` での検証は `tests/test_ec2_iam.py` |
+| 実 AWS での確認（EC2 の経路・Lambda のコードの取り出し）・`tests/live/**` | `tests/live/README.md`。検証用のアカウントに対象を作って `aws-survey` を通し、答案用紙（`check.sh`）で見て、片付ける。unittest にも配布物にも入らない。対象に置くものにテストの意図を残さない（調査エージェントが読む） |
+
+上の規則は新規ファイルにも適用する。`.agents/rules/` はどのエージェントも自動では読み込まない。この表に従って読む。
+`container/instructions/` は配布用の調査指示であり、開発中の自分の役割を切り替える指示ではない。
+`method/` は編集・レビューするときだけ読む。
+
+## 利用者との進め方
+
+- 手順書を読むのはエージェント。ユーザーに節番号を案内して作業を委ねない。
+- 必要な質問と、代われないホスト操作・ログイン・承認だけを依頼する。
+- ホスト操作を依頼するときは、目的を 1 行添え、コマンドを 1 本渡し、結果を読んで次へ進む。ホストの入口は `aws-survey` で、引数なしの出力が次の 1 手を示す。利用者の端末では、その 1 手を聞かずにその場で実行し、起動まで進む（エージェントが叩いたときは端末ではないので 1 手ごとに聞き、読めなければ案内だけ）。
+- 実行環境のツール有無と権限を確認する。「aws / docker が無い」と決めつけない。
+- `README.md` と `docs/security.md` はユーザー向けの入口。手順書は置かない。ホストの操作は `aws-survey` が案内から実行まで持ち、開発時の規則は `.agents/rules/` に置く。
+
+## 変更の不変条件
+
+守るべきことの一覧。理由・具体的な手順・触るときの注意は `.agents/rules/` にある。
+同じ話が両方に出るのは重複ではなく、常に読む一覧と、そこを触るときだけ読む詳細の関係。
+片方に寄せない（一覧を消すと常時の歯止めが無くなり、詳細を消すと理由が失われる）。
+
+- 対象固有の値は `environment.json` に置き、スクリプトは `libexec/load-env.sh` から読む。
+- `--policy-arns arn=...ReadOnlyAccess` を外さない。Deny のみのセッションポリシーと対で使う。
+  `diag-ssh-<name>` はその後ろに並べる任意の追加で、許すのは `diag:ssh=<name>` タグ付きインスタンスへの `AWS-StartSSHSession` だけ。
+  `ssm:SendCommand` を調査用ロールや一時キーに足さない。
+- Lambda のコードの取り出しはホストだけで行う。取り出し専用の一時キーは Lambda の読み取り 4 つだけで、ファイルに書かず、調査コンテナに渡さない。
+  調査コンテナの一時キーでは `lambda:GetFunction` / `lambda:GetLayerVersion` を Deny したままにする。
+- 長期 AWS キー・元プロファイル・資格情報の再発行機能を調査コンテナに渡さない。
+- EC2 に残すもの（`libexec/ec2/`）の名前に「ai」「agent」「survey」を含めない。root 読み取り段は 5 動詞固定で、任意パスの読み取りを足さない。シェルを経由せず argv を list で渡す。
+- ガードはイメージへ焼き込み、root 所有を保つ。プロンプトだけを安全性の根拠にしない。
+- 調査の共通指示は `container/instructions/survey-agents.md`、詳細は `method/` の 3 本（`report.md`・`survey.md`・`routes.md`）。番号を付けず、同じ規則を 2 か所に書かない。
+- 報告に求めるのは「何をしていて、どう組まれていて、どこが気になるか」（`method/report.md`）。守りの規則を足すときは、役に立つ成果物を出す指示より多くしない。
+- 対象固有の知識は `out/` に置く。調査エージェントに事前の計画・承認のゲートを課さない（理由は `.agents/rules/container.md`「承認や計画のゲートを置かない」）。
+- `out/` を削除・整理しない。ノウハウの昇格では対象固有の例を落とし、元の記録は残す。
+- 共通ルールはこのファイルと `.agents/rules/` が正本。`CLAUDE.md` に複製しない。
+- **このリポジトリの追跡対象はすべて公開される。**実対象の構成・調査結果・そこから得た数字に触れる記述は、
+  `out/`（Git 管理外）にだけ書く。`AGENTS.md`・`.agents/rules/`・`method/`・`docs/` は
+  対象に依存しない書き方を保つ。
+
+## 検証と引き継ぎ
+
+- シェル変更: `bash -n`。ガード・起動配線の変更: `python3 -m unittest discover -s tests -v`。
+- イメージ変更: 対象資格情報を渡さないコンテナでビルド・CLI 起動・権限を確認する。
+- AWS ポリシー変更: ホストで `aws-survey verify` を再実行する（実 AWS が必要）。
+- 実環境で未確認の事項を完了扱いしない。作業の区切りで、検証できたことと残っていることを区別してユーザーに伝える。
+
+## コミットメッセージ
+
+1 行目は Conventional Commits の型と、日本語の要約。本文は箇条書きで 3 つ程度、多くても 5 つ。
+
+```
+feat: 調査コンテナのログイン画面を整える
+
+- ロケールを C.UTF-8 にして日本語ファイル名の文字化けを直す
+- ログイン時の案内と survey-status の見た目を揃える
+- シェル履歴をコンテナの作り直しをまたいで残す
+```
+
+- 型は `feat` / `fix` / `docs` / `refactor` / `test` / `chore`。スコープは付けない。
+- 要約は「何をしたか」を 1 行で。なぜ・どうやっては本文に書く。
+- 箇条書きは変更ごとに 1 行。変更が 1 つなら本文は省く。
+- 5 つに収まらないなら、コミットを分ける。

@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# Claude Code のインフラ調査用に、読み取り専用の一時キーを発行する（ホストで実行）
+#
+#   前提: environment.json が記入済みで、そこに書いたロールが作られていること（aws-survey role）
+#         元プロファイル（environment.json の auth.source_profile）が有効であること
+#   使い方: aws-survey credentials   （実体は libexec/commands/credentials.sh）
+# 表示は libexec/ui.sh の部品で組む。
+set -uo pipefail
+
+. "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/keys.sh"
+
+GUARD="$LIBEXEC_DIR/session-guard.json"
+OUT="$AWS_DIR"
+
+die() { ui_die "$@"; }
+
+# ---- 前提チェック ----
+command -v aws >/dev/null || die "aws コマンドが見つかりません。"
+[ -f "$GUARD" ] || die "session-guard.json が見つかりません: $GUARD"
+jq -e . "$GUARD" >/dev/null 2>&1 || die "session-guard.json が壊れています。"
+
+# 元プロファイルの確認は keys.sh の source_ensure（使えなければ refresh_command を 1 度走らせる）
+# MFA 済みを求めるロールを、MFA を通していない長期キーで借りようとしている（environment.json の auth.source_profile が
+# aws-login の元プロファイルのまま）。借りる元を aws-login の保存先 <名>-mfa に直して続ける（聞いて「はい」のときだけ。
+# 読めなければ案内だけで止まる）。refresh_command が無ければ aws-login にする。直したあとは <名>-mfa が無い・切れている
+# ときの通常の流れ（refresh_command を 1 度走らせる）に乗る
+fix_source_or_die() {
+  local orig="$PROFILE_SRC" dest="${PROFILE_SRC}-mfa" ans tmp refresh
+  refresh="$REFRESH_CMD"; [ -n "$refresh" ] && [ "$refresh" != null ] || refresh="aws-login --profile $orig"
+  ui_text "MFA を通した一時キーは aws-login が $dest に保存します。ロールを借りる元はそちらです。"
+  ui_pause
+  ui_tty "$(printf '  %s❯%s environment.json の auth.source_profile を %s → %s に直して、そのまま続けますか？ %s(Y/n)%s: ' \
+    "$C_CYAN" "$C_RESET" "$orig" "$dest" "$C_DIM" "$C_RESET")"
+  if read_line ans; then
+    ui_resume
+    [ -t 0 ] || echo ""
+    case "$ans" in
+      ""|y|Y|yes|YES)
+        tmp=$(mktemp) && jq --arg p "$dest" --arg r "$refresh" '.auth.source_profile = $p | .auth.refresh_command = $r' "$ENV_FILE" > "$tmp" \
+          && mv "$tmp" "$ENV_FILE" || die "environment.json を書き換えられませんでした: $ENV_FILE"
+        PROFILE_SRC="$dest"; REFRESH_CMD="$refresh"
+        ui_ok "environment.json の auth.source_profile を $dest にしました"
+        return 0 ;;
+    esac
+  fi
+  ui_resume
+  echo ""
+  ui_text "environment.json の auth.source_profile を $dest にしてから、もう一度実行してください: $ENV_FILE"
+  die "一時キーを発行できませんでした。$OUT は変更していません。"
+}
+
+ui_title "aws-survey credentials"
+ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
+ui_kv "アカウント" "$ACCOUNT_ID"
+ui_kv "リージョン" "$REGION"
+ui_kv "ロール" "$ROLE_NAME"
+echo ""
+
+ui_head "1/3 ホストのプロファイル $PROFILE_SRC でログインできているか"
+if [ "$MFA_REQUIRED" = true ] && profile_is_long_term_key "$PROFILE_SRC"; then
+  ui_warn "$PROFILE_SRC は MFA を通していない長期キーなので、MFA 済みを求めるロール $ROLE_NAME を借りられません"
+  fix_source_or_die
+fi
+source_ensure || die "$(source_hint)"
+who="$SOURCE_ARN"
+ui_ok "$who"
+# 借りたロール（Identity Center を含む）からのログインは、AWS の決まりで 1 時間まで。ロール側を延ばしても変わらないので、
+# environment.json の auth.duration_seconds をその場で直して続けられるようにする（聞いて「はい」のときだけ。読めなければ案内だけで止まる）
+fix_duration_or_die() {
+  local ans tmp
+  ui_pause
+  ui_tty "$(printf '  %s❯%s environment.json の auth.duration_seconds を %s → %s に直して、そのまま発行しますか？ %s(Y/n)%s: ' \
+    "$C_CYAN" "$C_RESET" "$DURATION" "$CHAIN_MAX_SECONDS" "$C_DIM" "$C_RESET")"
+  if read_line ans; then
+    ui_resume
+    [ -t 0 ] || echo ""
+    case "$ans" in
+      ""|y|Y|yes|YES)
+        tmp=$(mktemp) && jq --argjson d "$CHAIN_MAX_SECONDS" '.auth.duration_seconds = $d' "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE" \
+          || die "environment.json を書き換えられませんでした: $ENV_FILE"
+        DURATION=$CHAIN_MAX_SECONDS
+        ui_ok "environment.json の auth.duration_seconds を ${CHAIN_MAX_SECONDS} にしました"
+        return 0 ;;
+    esac
+  fi
+  ui_resume
+  echo ""
+  ui_text "environment.json の auth.duration_seconds を ${CHAIN_MAX_SECONDS} にしてから、もう一度実行してください: $ENV_FILE"
+  die "一時キーを発行できませんでした。$OUT は変更していません。"
+}
+if source_limited "$who" && [ "$DURATION" -gt "$CHAIN_MAX_SECONDS" ]; then
+  ui_chain_limit "$DURATION"
+  fix_duration_or_die
+fi
+echo ""
+
+# ---- ロールの存在確認 ----
+ui_head "2/3 ロール $ROLE_NAME があるか"
+if ! aws iam get-role --profile "$PROFILE_SRC" --role-name "$ROLE_NAME" \
+       --query 'Role.Arn' --output text >/dev/null 2>&1; then
+  case "$AUTH_ROUTE" in
+    own_role) die "ロール $ROLE_NAME がありません。$AWS_SURVEY_CMD role --create を先に実行してください。" ;;
+    *)        die "ロール $ROLE_NAME を確認できません。この出力を Claude Code / Codex に伝えてください。" ;;
+  esac
+fi
+ui_ok "あります"
+echo ""
+
+# ---- 一時キーの発行 ----
+# --policy-arns は必須。session-guard.json は Deny しか書いていないため、
+# これを外すとセッションポリシー側に Allow が無くなり全 API が拒否される。
+# EC2 の中を調べる機能（ssh.hosts）があるときは、登録済みインスタンスへの SSH 接続だけを許す
+# diag-ssh-<name>（role --create が作る）を ReadOnlyAccess と並べる。無いときは渡さない（ポリシーが無くても発行できる）。
+ui_head "3/3 読み取り専用の一時キーを発行する（$((DURATION / 60)) 分）"
+extra_policy_arns=()
+if [ -n "$SSH_HOSTS" ]; then
+  extra_policy_arns+=("arn=$DIAG_POLICY_ARN")
+  ui_text "登録済みホスト（${SSH_HOSTS}）への SSH 接続を許す $DIAG_POLICY_NAME も付けます。"
+fi
+if ! json=$(
+  aws sts assume-role \
+    --profile "$PROFILE_SRC" \
+    --role-arn "$ROLE_ARN" \
+    --role-session-name "${SESSION_NAME_PREFIX}-$(date +%Y%m%d-%H%M%S)" \
+    --duration-seconds "$DURATION" \
+    --policy-arns arn=arn:aws:iam::aws:policy/ReadOnlyAccess ${extra_policy_arns[@]+"${extra_policy_arns[@]}"} \
+    --policy "$(jq -c . "$GUARD")" \
+    --output json 2>&1
+); then
+  ui_err "発行できませんでした"
+  ui_raw "$json"
+  echo ""
+  ui_head "対処の目安"
+  case "$json" in
+    *PackedPolicyTooLarge*)
+      ui_text "セッションポリシーが上限（圧縮後のサイズ）を超えています。"
+      ui_text "libexec/session-guard.json の Action を減らしてください。" ;;
+    *ExpiredToken*)
+      ui_text "$PROFILE_SRC のログインが期限切れです。ログインし直してから、もう一度実行してください。" ;;
+    *"$DIAG_POLICY_NAME"*)
+      ui_text "EC2 の中を調べる権限（${DIAG_POLICY_NAME}）がまだ無いか、付いていません。"
+      ui_text "$AWS_SURVEY_CMD role --create で作って付けてから、もう一度実行してください。" ;;
+    *"not authorized to perform: sts:AssumeRole"*|*AccessDenied*)
+      if is_sso_arn "$PRINCIPAL_ARN"; then
+        ui_text "Identity Center のログインでは、信頼ポリシーに「MFA 済みの人だけ」の条件があると借りられません。"
+        ui_text "$AWS_SURVEY_CMD role で確かめられます（⚠ が出たら、その案内に沿って直します）。"
+      fi
+      ui_text "ロールを作った直後なら、IAM の反映待ちかもしれません。10 秒ほど待ってもう一度実行してください。"
+      ui_text "それでも駄目なら信頼ポリシーを確認してください:"
+      ui_text "  aws iam get-role --profile $PROFILE_SRC --role-name $ROLE_NAME --query 'Role.AssumeRolePolicyDocument'"
+      ui_text "$AWS_SURVEY_CMD doctor でも切り分けられます。" ;;
+    *"role chaining"*)
+      ui_chain_limit "$DURATION"
+      fix_duration_or_die
+      echo ""
+      ui_text "直した設定で発行し直します。"
+      echo ""
+      exec bash "$0" "$@" ;;
+    *DurationSeconds*|*duration*)
+      ui_text "ロールのセッション上限より長い時間を要求しています。"
+      ui_text "environment.json の auth.duration_seconds を短くするか、ロール側を延ばしてください:"
+      ui_text "  aws iam update-role --profile $PROFILE_SRC --role-name $ROLE_NAME --max-session-duration $DURATION" ;;
+    *)
+      ui_text "上のエラーメッセージを確認してください。" ;;
+  esac
+  die "一時キーを発行できませんでした。$OUT は変更していません。"
+fi
+
+packed=$(echo "$json" | jq -r '.PackedPolicySize // "n/a"')
+ui_ok "一時キーを発行しました（$((DURATION / 60)) 分）"
+ui_kv "セッションポリシー" "上限の ${packed}%（100% を超えると発行できません）"
+
+# ---- ここまで来て初めて書き込む ----
+mkdir -p "$OUT"
+chmod 700 "$OUT"
+
+cat > "$OUT/config" <<CFG
+[profile claude-ro]
+region = $REGION
+output = json
+cli_pager =
+max_attempts = 3
+CFG
+
+umask 077
+echo "$json" | jq -r '.Credentials |
+  "[claude-ro]\naws_access_key_id = \(.AccessKeyId)\naws_secret_access_key = \(.SecretAccessKey)\naws_session_token = \(.SessionToken)"' \
+  > "$OUT/credentials"
+chmod 600 "$OUT/credentials"
+
+# 期限切れのとき、コンテナ内の survey-status がユーザーに伝える文言。
+# 何を実行すればよいかを具体的に出せるようにしておく。
+RENEW_HINT="cd $AWS_SURVEY_DIR && $AWS_SURVEY_CMD credentials"
+
+# コンテナ内の survey-status が「残り時間」と「いま何をすべきか」を出すために使う。
+# duration_seconds を渡すのが要点で、これが無いと残り時間を判断の閾値に換算できない。
+# ssh_hosts は発行時の登録済みホスト。引数なしの aws-survey が、いまの登録と比べて発行し直しを案内する。
+echo "$json" | jq \
+  --argjson dur "$DURATION" \
+  --arg region "$REGION" \
+  --arg account "$ACCOUNT_ID" \
+  --arg role "$ROLE_NAME" \
+  --arg renew "$RENEW_HINT" \
+  --arg ssh_hosts "$SSH_HOSTS" \
+  '{expiration: .Credentials.Expiration, duration_seconds: $dur,
+    region: $region, account_id: $account, role_name: $role,
+    renew_hint: $renew, ssh_hosts: $ssh_hosts}' \
+  > "$OUT/session.json"
+chmod 644 "$OUT/session.json"
+rm -f "$OUT/expires"
+
+ui_kv "プロファイル" "claude-ro（読み取り専用）"
+ui_kv "置き場" "$OUT"
+ui_kv "期限" "$(echo "$json" | jq -r .Credentials.Expiration)"
+echo ""
+# 読み取り専用の検証が済んでいなければ、run ではなく verify を案内する
+if [ -z "$(jq -r '.setup.readonly_verified // empty' "$ENV_FILE")" ]; then
+  next_cmd "$AWS_SURVEY_CMD verify" "この一時キーが読み取り専用であることを確かめます（省略できません）"
+else
+  survey_next_cmd
+fi

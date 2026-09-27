@@ -1,0 +1,516 @@
+#!/usr/bin/env bash
+# 調査コンテナでエージェントを非対話で 1 回走らせ、対象アカウントの初期調査だけを行わせる（ホストで実行）
+#   aws-survey scan                    記録してあるエージェント（未定なら矢印キーで選ぶ）で初期調査を行う
+#   aws-survey scan --agent codex      エージェントを指定する（記録も更新する）
+#   aws-survey scan --force            初期調査が済んでいても、聞かずにやり直す（端末でないときはこれが要る）
+# 実体は libexec/commands/scan.sh。通常は aws-survey 経由で呼ぶ。
+#
+# ユーザーは待つだけ。中のエージェントは環境の確認（初回）と基礎調査（method/survey.md）を行い、生データを out/…/raw/ に集め、
+# 報告（report/構成報告.md と report/ユーザー確認事項.md）まで書き切って終わる。ユーザーには聞かない（聞きたいことは確認事項に書く）。
+# 深掘りと確認事項への回答は aws-survey claude / codex で対話して進める。
+# 「白紙の棚卸し」は開発側の言葉で、利用者に見せる文と表示では「初期調査」で通す（.agents/rules/credentials.md）。
+# 端末では、始める前に ls と同じ列挙（Cost Explorer 込み）で調査の量を見積もり、待っているあいだは推定の進捗をプログレスバーで出す。
+# 見積もりは画面に出すだけで、ファイルにもエージェントにも渡さない。終わったら out/ に残したものを言い換え、次の 1 手を示す。
+# ホストから渡す指示は「基礎調査を報告まで・ユーザーに聞かずに終える」に限る。対象の概要・調査項目・サービス名は渡さない
+# （AGENTS.md「ホストと調査コンテナ」。白紙で調べさせる設計は、先に教えると発見ではなく確認になるため）。
+# 報告まで書くと一時キーの 1 時間を超えうるので、エージェントが動いているあいだ、ホストが一時キーを見張って入れ替える（scan_keys_loop）。
+# 一時キーは ro のディレクトリマウントなので、書き換えればコンテナの次の aws 呼び出しから効く（survey-status もそう案内している）。
+# 初期調査が済んでいれば（setup.scanned）、前回の日時を出して、やり直すかを先に聞く（Enter は「やり直さない」。--force で聞かない）。
+# 報告が書かれないまま終わった回は setup.scanned を付けず、もう一度 scan を案内する（次の回は raw/ を使って続きから。method/survey.md）。
+# 端末では起動前に、量の見積もりの列挙で分かった EC2（SSM 管理下で稼働中・未登録）と Lambda（未取り出し）について、中まで読めるようにするかを聞き、
+# ssh setup → role --create → credentials → ssh verify と lambda pull をここから通してから 1 回起動する（scan_routes）。初回の報告に中まで入れるため。
+# エージェントは survey-status から経路を知るだけで、対象の概要は渡さない。
+# Claude / Codex の認証はコンテナ内のボリュームに残る。無ければ先に対話でログインだけ済ませ（launch.sh の launch_agent_login。
+# 通常は init が済ませている）、そのあと非対話で続ける。モデルと effort は environment.json の agent から渡す（libexec/agents.sh）。
+set -euo pipefail
+
+. "$(cd "$(dirname "$0")/.." && pwd)/load-env.sh"
+. "$LIBEXEC_DIR/container.sh"
+. "$LIBEXEC_DIR/launch.sh"   # container.sh が docker.sh を読む
+. "$LIBEXEC_DIR/menu.sh"
+
+AGENT_OPT=""; FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --agent)   [ $# -ge 2 ] || ui_die "--agent には claude か codex を指定してください。"; AGENT_OPT="$2"; shift 2 ;;
+    --agent=*) AGENT_OPT="${1#--agent=}"; shift ;;
+    --force|-f) FORCE=1; shift ;;
+    -h|--help|help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) ui_die "scan の不明なオプション: $1（--agent claude|codex / --force）" ;;
+  esac
+done
+case "$AGENT_OPT" in ""|claude|codex) ;; *) ui_die "--agent は claude か codex です: $AGENT_OPT" ;; esac
+
+# ホストから渡す指示。基礎調査を報告まで・聞かずに終える、以外を書かない（対象・調査項目・サービス名を含めない）
+SCAN_PROMPT='この回はユーザーが応答できません。質問や、答えを待つことは行わないでください。
+AGENTS.md と method/survey.md の「ユーザーが応答できない回」に従い、環境の確認（初回なら）と基礎調査を行ってください。
+生データを集めて（白紙の棚卸し）終わりではなく、method/report.md の骨子で報告（report/構成報告.md と report/ユーザー確認事項.md）まで書き切り、
+最後に method/report.md の「完了の基準」を自分で確かめてください。
+報告が既にあれば method/report.md の「検証」を先に行い、survey-status に出ている経路（中を調べられるもの）は聞かずに読んで、報告の本文を更新してください。
+report/ユーザー確認事項.md の回答欄に書かれていれば、それを答えとして扱ってください。
+この回のあいだ一時キーは自動で入れ替わるので、残り時間で切り上げないでください。
+ユーザーに聞きたいことと、経路が無くて中を見られないものは report/ユーザー確認事項.md に書き、次の回にユーザーと話せるようにしておいてください。'
+
+on_terminal() { [ -t 0 ] && [ -t 1 ]; }
+
+# ---- 調査の量の見積もり ----
+# 端末で進捗を出すときだけ。ls と同じ列挙（libexec/inventory.sh）を Cost Explorer 込みで一時キーに読ませ、課金のあるサービスと
+# リソースの数から、生データ（.survey/raw/raw-*）の見込み数 EST_FILES と所要時間の目安 EST_SECONDS を決める。読めなければ一般的な目安。
+# 係数は実測に合わせて直す値で、ここにだけ置く: 生データは「4 + サービスごとに 2 + リソース 5 件ごとに 1」（6〜60 件）、
+# 時間は「150 秒 + 生データ 1 件あたり 50 秒 + 報告を書く 600 秒」、環境の確認（初回）があれば 120 秒足す。
+EST_REPORT_SECONDS=600
+EST_FILES=12; EST_SECONDS=$((150 + 50 * 12 + EST_REPORT_SECONDS))
+SCAN_INV=""      # 見積もりに使った列挙。scan_routes が EC2 と Lambda の候補を拾うのにも使う
+scan_estimate() {
+  local inv billed cost_ok active denied items s note
+  inv=$(container_inventory_spin cost ec2 lambda vpc s3 rds ecs elb cloudfront 2>/dev/null) || true
+  SCAN_INV="$inv"
+  if [ -z "$inv" ] || ! jq -e 'select(.kind == "service" and .status == "ok")' <<< "$inv" >/dev/null 2>&1; then
+    ui_text "調査の量を見積もれなかったので、一般的な目安（$(ui_duration "$EST_SECONDS")ほど）で進捗を出します。"
+  else
+    cost_ok=$(jq -r 'select(.kind == "service" and .service == "cost" and .status == "ok") | .service' <<< "$inv" | wc -l | tr -d ' ')
+    billed=$(jq -r 'select(.kind == "item" and .service == "cost") | select(.id | test("Tax|Support|Refund|Credit") | not) | .id' <<< "$inv" | wc -l | tr -d ' ')
+    active=$(jq -r 'select(.kind == "service" and .status == "ok" and .service != "cost" and .service != "ssm" and (.count // 0) > 0) | .service' <<< "$inv" | wc -l | tr -d ' ')
+    denied=$(jq -r 'select(.kind == "service" and .status != "ok" and .service != "cost" and .service != "ssm") | .service' <<< "$inv" | wc -l | tr -d ' ')
+    items=$(jq -r 'select(.kind == "service" and .status == "ok" and .service != "cost") | .count // 0' <<< "$inv" | awk '{ s += $1 } END { print s + 0 }')
+    s=$((active + denied)); [ "$s" -ge "$billed" ] || s=$billed
+    EST_FILES=$((4 + 2 * s + items / 5)); [ "$EST_FILES" -ge 6 ] || EST_FILES=6; [ "$EST_FILES" -le 60 ] || EST_FILES=60
+    if [ "$cost_ok" -gt 0 ]; then note="課金のあるサービス ${billed}、リソース ${items} 件"; else note="リソース ${items} 件（Cost Explorer は読めず）"; fi
+    [ "$denied" -eq 0 ] || note="${note}、読めないサービス ${denied}"
+    EST_SECONDS=$((150 + 50 * EST_FILES + EST_REPORT_SECONDS))
+    [ -f "$OUT_DIR/.survey/env/check.md" ] || EST_SECONDS=$((EST_SECONDS + 120))
+    ui_ok "見積もり: ${note}。目安は $(ui_duration "$EST_SECONDS")ほど（進捗は推定です）"
+  fi
+}
+
+# ---- 経路を足す（端末だけ・任意）----
+# 見積もりの列挙にある EC2（running・SSM Online・未登録）と Lambda（未取り出し）を候補にして、起動前に聞く。
+# 足すのはホストのコマンドで、EC2 は ssh setup → role --create → credentials → ssh verify の 4 手（引数なしの aws-survey と同じ順）、
+# Lambda は lambda pull。ui_fold で 1 手 1 行に畳む（AWS_SURVEY_CHAIN=1 になるので、各コマンドは末尾の案内を黙り、ssh setup は
+# 自分で aws-survey に進まない）。失敗したら警告して、その経路なしで初期調査を始める（あとから足して scan し直せる。scan_next が案内する）。
+# ロールを借りている経路（auth.route が own_role でない）では role --create がポリシーを表示するだけなので、導入までで止めて管理者への依頼を案内する。
+# choose_menu / choose_multi は EXIT トラップを潰すので、SCAN_LOG の trap より前に呼ぶ。
+SSH_SH="$LIBEXEC_DIR/commands/ssh.sh"
+# まだ足していない候補を SCAN_INV から拾う（登録済み・取り出し済みは除く）。scan_routes の問いと、終わったあとの案内（scan_next）が使う
+#   scan_candidates → ec2_ids / ec2_labels / fn_names / fn_labels（呼ぶ側の配列）
+scan_candidates() {
+  local id name state ssm type modified registered
+  ec2_ids=(); ec2_labels=(); fn_names=(); fn_labels=()
+  [ -n "$SCAN_INV" ] || return 0
+  registered=$(jq -r '.ssh.hosts // {} | .[].instance_id' "$ENV_FILE" 2>/dev/null)
+  while IFS=$'\t' read -r id name state ssm type; do
+    [ -n "$id" ] || continue
+    [ "$state" = running ] && [ "$ssm" = Online ] || continue
+    ! grep -qx "$id" <<< "$registered" || continue
+    ec2_ids+=("$id"); ec2_labels+=("${id}${name:+  $name}${type:+  $type}")
+  done < <(jq -r 'select(.kind == "item" and .service == "ec2") | [.id, .name, .state, (.extra.ssm // "?"), (.extra.type // "")] | @tsv' <<< "$SCAN_INV")
+  while IFS=$'\t' read -r id state modified; do
+    [ -n "$id" ] || continue
+    [ ! -f "$AWS_SURVEY_DIR/code/lambda/$REGION/$id/_manifest.json" ] || continue
+    fn_names+=("$id"); fn_labels+=("${id}  更新 ${modified%%.*}")
+  done < <(jq -r 'select(.kind == "item" and .service == "lambda") | [.id, .state, (.extra.modified // "")] | @tsv' <<< "$SCAN_INV")
+}
+scan_routes() {
+  local -a ec2_ids=() ec2_labels=() fn_names=() fn_labels=() chosen=()
+  local id picks sel act alias ok=0 failed=0
+  scan_candidates
+  [ ${#ec2_ids[@]} -gt 0 ] || [ ${#fn_names[@]} -gt 0 ] || return 0
+
+  echo ""
+  ui_head "中まで読めるようにする（任意）"
+  ui_text "AWS の API で見えるのはリソースの外側までです。先に経路を足すと、EC2 の中（ログ・サービスの状態）と Lambda のコードが初期調査の報告に入ります。"
+  ui_text "足すのはこのホストでの作業で、EC2 には診断ゲートウェイを置きます（読むだけ。あとで $AWS_SURVEY_CMD ssh remove で外せます）。"
+  echo ""
+
+  if [ ${#ec2_ids[@]} -gt 0 ]; then
+    choose_menu act "EC2 が ${#ec2_ids[@]} 台あります（SSM 管理下で稼働中・未登録）。中を調べられるようにしますか？" 0 \
+      "一覧から選んで登録する" "今回は足さない"
+    ui_ok "EC2: $act"
+    if [ "$act" = "一覧から選んで登録する" ]; then
+      chosen=()
+      choose_multi picks "中を調べたいインスタンスを選んでください（Space で複数）" "${ec2_labels[@]}"
+      for sel in $picks; do chosen+=("${ec2_ids[sel]}"); ui_ok "${ec2_labels[sel]}"; done
+      ok=0
+      for id in "${chosen[@]}"; do
+        if ui_fold "EC2 ${id} に診断ゲートウェイを導入した" "$AWS_SURVEY_CMD ssh setup $id" bash "$SSH_SH" setup "$id"; then ok=$((ok + 1)); else failed=1; fi
+      done
+      if [ "$ok" -gt 0 ]; then
+        if [ "$AUTH_ROUTE" = own_role ] || [ -z "$AUTH_ROUTE" ]; then
+          ui_fold "接続を許すポリシーを調査用ロールに付けた" "$AWS_SURVEY_CMD role --create" bash "$LIBEXEC_DIR/commands/role.sh" --create \
+            && ui_fold "その権限を含めて一時キーを発行し直した" "$AWS_SURVEY_CMD credentials" bash "$LIBEXEC_DIR/commands/credentials.sh" < /dev/null \
+            || failed=1
+          if [ "$failed" -eq 0 ]; then
+            for id in "${chosen[@]}"; do
+              alias=$(jq -r --arg id "$id" '.ssh.hosts // {} | to_entries[] | select(.value.instance_id == $id) | .key' "$ENV_FILE" 2>/dev/null | head -n 1)
+              [ -n "$alias" ] || continue
+              ui_fold "${alias} に調査コンテナから接続して確かめた" "$AWS_SURVEY_CMD ssh verify $alias" bash "$SSH_SH" verify "$alias" || failed=1
+            done
+          fi
+        else
+          ui_warn "ロールを借りているので、接続を許すポリシーは管理者に付けてもらう必要があります。$(ui_cmd "$AWS_SURVEY_CMD") がポリシーを表示します"
+          ui_text "付いたら $(ui_cmd "$AWS_SURVEY_CMD") で残りの手を進め、$(ui_cmd "$AWS_SURVEY_CMD scan") をもう一度実行すると中を読んで報告を更新します。"
+          failed=1
+        fi
+      fi
+    fi
+    echo ""
+  fi
+
+  if [ ${#fn_names[@]} -gt 0 ]; then
+    choose_menu act "Lambda 関数が ${#fn_names[@]} 個あります（未取り出し）。コードを取り出して読めるようにしますか？" 0 \
+      "全部取り出す" "一覧から選ぶ" "今回は足さない"
+    ui_ok "Lambda: $act"
+    chosen=()
+    case "$act" in
+      "全部取り出す") chosen=("${fn_names[@]}") ;;
+      "一覧から選ぶ")
+        choose_multi picks "コードを読みたい関数を選んでください（Space で複数）" "${fn_labels[@]}"
+        for sel in $picks; do chosen+=("${fn_names[sel]}"); ui_ok "${fn_labels[sel]}"; done ;;
+    esac
+    if [ ${#chosen[@]} -gt 0 ]; then
+      ui_fold "Lambda のコードを取り出した（${#chosen[@]} 関数）" "$AWS_SURVEY_CMD lambda pull ${chosen[*]}" bash "$LIBEXEC_DIR/commands/lambda.sh" pull "${chosen[@]}" < /dev/null || failed=1
+    fi
+    echo ""
+  fi
+
+  if [ "$failed" -ne 0 ]; then
+    ui_warn "足せなかった経路があります。初期調査はそのまま始めます（あとから足して $AWS_SURVEY_CMD scan をもう一度実行すると、中を読んで報告を更新します）"
+    echo ""
+  fi
+  # 経路を足すと環境の記録（登録済みホスト）が変わる。起動時の判定は load-env.sh が読んだ値を使うので、読み直す
+  SSH_HOSTS=$(jq -r '.ssh.hosts // {} | keys | join(" ")' "$ENV_FILE")
+  return 0
+}
+
+# ---- 進捗 ----
+# 端末で待っているあいだ、回転する印の行に、推定の進捗（プログレスバーと %）・経過時間・out/ に書かれた記録を 1 秒ごとに出す。
+# エージェントは何分も黙って働くので、固まっていないことと、あとどれくらいかを見せる（ui.sh の簡潔表示の部品を借りる）。
+# 前半（生データが見込み数に届くまで）は 2 つを混ぜて直線的に進める: 生データの数 ÷ 見込み数（7 割）と、経過時間 ÷ 目安の時間（3 割）。
+# 見込み数に届いたら「思ったより量が多い」局面で、そのときの値から 94% に向けて、届いてからの生データの数と時間に比例して
+# 半分ずつ詰めていく（同じ量をもう一度こなすと残りの半分。止まらず、100% にも届かない）。表示は戻さず、上限は 95%。
+# 生データは raw/ の下の新しいファイルを名前を問わず数える（method は raw- で始めるよう求めるが、進捗はそれに依らない）。
+# 報告（report/構成報告.md）が書かれたら 90% 以上。100% は終わったときの ✔ が担う。
+#   scan_progress <受け渡しの場所>   （& で起動し、終わったら kill する。keep が開始の目印）
+scan_bar() {  # <percent> → ████████░░░░░░░░░░░░  40%
+  local p="$1" i bar=''
+  for ((i = 0; i < 20; i++)); do if [ $((i * 5)) -lt "$p" ]; then bar+='█'; else bar+='░'; fi; done
+  printf '%s %3d%%' "$bar" "$p"
+}
+# 推定の % を 1 つ返す。状態（前回の値・後半に入った時点）は呼ぶ側の変数で持つ。
+#   scan_percent <生データの数> <経過秒> → PCT を更新（PREV / B_N / B_EL / B_BASE を読み書き）
+scan_percent() {
+  local n="$1" el="$2" pf pt p k x kf kt
+  if [ "$B_EL" -lt 0 ] && [ "$n" -ge "$EST_FILES" ]; then
+    B_N=$n; B_EL=$el; B_BASE=$PREV; [ "$B_N" -ge 1 ] || B_N=1; [ "$B_EL" -ge 1 ] || B_EL=1
+  fi
+  if [ "$B_EL" -lt 0 ]; then
+    pf=$((100 * n / EST_FILES)); pt=$((100 * el / EST_SECONDS)); [ "$pt" -le 100 ] || pt=100
+    p=$(( (7 * pf + 3 * pt) / 10 ))
+  else
+    k=$((n - B_N)); x=$((el - B_EL))
+    [ "$k" -ge 0 ] || k=0; [ "$x" -ge 0 ] || x=0     # find が一時的に数えられず n が減っても、0 で割らず表示を戻さない
+    kf=$((100 * k / (k + B_N))); kt=$((100 * x / (x + B_EL)))
+    p=$(( B_BASE + (94 - B_BASE) * (7 * kf + 3 * kt) / 1000 ))
+  fi
+  [ "$p" -le 95 ] || p=95
+  [ "$p" -ge "$PREV" ] || p=$PREV
+  PREV=$p; PCT=$p
+}
+scan_progress() {
+  local dir="$1" raw="$OUT_DIR/.survey/raw" log="$OUT_DIR/report/構成報告.md"
+  local start now el n m last msg PCT=0 PREV=0 B_N=0 B_EL=-1 B_BASE=0
+  set +e; set +o pipefail          # 背景の 1 ループ。find が無い・読めないときも黙って回り続ける
+  start=$(date +%s)
+  while :; do
+    now=$(date +%s); el=$((now - start))
+    n=$(find "$raw" -type f -newer "$dir/keep" 2>/dev/null | wc -l | tr -d ' '); n=${n:-0}
+    m=$(find "$OUT_DIR" -type f -newer "$dir/keep" 2>/dev/null | wc -l | tr -d ' '); m=${m:-0}
+    last=$(find "$OUT_DIR" -type f -newer "$dir/keep" -exec ls -t {} + 2>/dev/null | head -n 1); last=${last##*/}
+    if [ -f "$log" ] && [ "$log" -nt "$dir/keep" ] && [ "$PREV" -lt 90 ]; then PREV=90; fi
+    scan_percent "$n" "$el"
+    msg="初期調査中 $(scan_bar "$PCT")  経過 $(ui_duration "$el")  記録 ${m} 件${last:+  最新 ${last}}"
+    printf '%s' "$msg" > "$dir/msg.tmp" && mv -f "$dir/msg.tmp" "$dir/msg"
+    sleep 1
+  done
+}
+
+# ---- 一時キーの見張り ----
+# エージェントが動いているあいだ、一時キーの残りを見て、survey-status が「着手中の領域を仕上げてください」を出す境目
+# （総時間の 2/3、上限 40 分。container/survey-status と同じ式）を切る前に発行し直す。エージェントが時間で切り上げないため。
+# 発行し直しは credentials.sh（非対話。stdin は /dev/null）。元プロファイルが切れていれば、credentials.sh はログインのコマンドを
+# 対話で走らせようとするので、先に元プロファイルを確かめ、切れていれば利用者に別の端末で発行し直すよう伝えて待つ（中の調査は続く）。
+# 間隔は AWS_SURVEY_SCAN_KEY_INTERVAL 秒（既定 60。テストが縮める）。報せは <受け渡しの場所>/keep（端末。回転する行の上に出る）か標準出力へ。
+#   scan_keys_loop <報せの出力先>   （& で起動し、終わったら kill する）
+SCAN_KEY_INTERVAL="${AWS_SURVEY_SCAN_KEY_INTERVAL:-60}"
+scan_refresh_min() {
+  local total="${KEY_TOTAL_MIN:-$(( DURATION / 60 ))}" m
+  m=$(( total * 2 / 3 )); [ "$m" -le 40 ] || m=40; [ "$m" -ge 1 ] || m=1
+  echo "$m"
+}
+scan_keys_loop() {
+  local sink="$1" warned=0 rc sp=""
+  set +e; set +o pipefail
+  trap 'kill "$sp" 2>/dev/null; exit 0' TERM     # 待ち（sleep）の途中でも止まる。sleep を残すと標準出力を握ったままになる
+  while :; do
+    sleep "$SCAN_KEY_INTERVAL" & sp=$!; wait "$sp"
+    key_state
+    if [ "$KEY_STATE" = valid ] && [ "$KEY_LEFT_MIN" -ge "$(scan_refresh_min)" ]; then warned=0; continue; fi
+    if ! aws sts get-caller-identity --profile "$PROFILE_SRC" >/dev/null 2>&1; then
+      if [ "$warned" -eq 0 ]; then
+        printf '%s\n' "⚠ 一時キーの残りが約 ${KEY_LEFT_MIN:-0} 分ですが、ホストのプロファイル ${PROFILE_SRC} のログインが切れていて発行し直せません。別の端末で $AWS_SURVEY_CMD credentials を実行してください（この初期調査はそのまま続きます）" >> "$sink"
+        warned=1
+      fi
+      continue
+    fi
+    AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/credentials.sh" < /dev/null > /dev/null 2>&1; rc=$?
+    key_state
+    if [ "$rc" -eq 0 ] && [ "$KEY_STATE" = valid ]; then
+      printf '%s\n' "✔ 一時キーを入れ替えました（残り約 ${KEY_LEFT_MIN} 分。初期調査は続いています）" >> "$sink"
+      warned=0
+    elif [ "$warned" -eq 0 ]; then
+      printf '%s\n' "⚠ 一時キーを発行し直せませんでした。別の端末で $AWS_SURVEY_CMD credentials を実行してください（この初期調査はそのまま続きます）" >> "$sink"
+      warned=1
+    fi
+  done
+}
+
+# ---- 終わったあとの案内 ----
+# out/ に何が残ったかを、この回に書かれた（開始の目印より新しい）ファイルだけ、置き場所ごとに言い換えて示す。
+# 生データは件数と名前、報告（report/構成報告.md）と確認事項（report/ユーザー確認事項.md）は見出しを抜き出す。中身の要約はしない
+# （読むのは利用者と、対話の回のエージェント）。
+#   scan_summary <開始の目印>
+scan_summary() (   # サブシェル。無いフォルダや空の grep で止まらないよう、set -e と pipefail を外す
+  set +e; set +o pipefail
+  local mark="$1" raw="$OUT_DIR/.survey/raw" report="$OUT_DIR/report/構成報告.md" \
+        asks="$OUT_DIR/report/ユーザー確認事項.md" raw_n names line c4_n
+  raw_n=$(find "$raw" -type f -newer "$mark" 2>/dev/null | wc -l | tr -d ' ')
+  names=$(find "$raw" -type f -newer "$mark" 2>/dev/null | sed 's|.*/||' | sort | head -n 5 | tr '\n' ' ')
+  ui_head "out/ に残したもの"
+  if [ "${raw_n:-0}" -gt 0 ]; then
+    ui_ok "生データ ${raw_n} 件  .survey/raw/"
+    ui_text "AWS の API の出力そのまま（${names% }$([ "$raw_n" -le 5 ] || echo " …")）。あとから jq で引き直せます。"
+  else
+    ui_skip "生データ（.survey/raw/）は書かれていません"
+  fi
+  if [ -f "$report" ] && [ "$report" -nt "$mark" ]; then
+    ui_ok "報告  report/構成報告.md"
+    grep -E '^## ' "$report" | head -n 14 | sed 's/^#* *//' | while IFS= read -r line; do ui_text "  ・$line"; done
+  else
+    ui_skip "報告（report/構成報告.md）は書かれていません。生データだけで終わったか、途中で終わった可能性があります"
+  fi
+  if [ -f "$asks" ] && [ "$asks" -nt "$mark" ]; then
+    ui_ok "確認事項  report/ユーザー確認事項.md"
+    grep -E '^#{1,3} ' "$asks" | head -n 12 | sed 's/^#* *//' | while IFS= read -r line; do ui_text "  ・$line"; done
+  else
+    ui_skip "確認事項（report/ユーザー確認事項.md）は書かれていません"
+  fi
+  if [ -f "$OUT_DIR/report/c4/workspace.dsl" ] && [ "$OUT_DIR/report/c4/workspace.dsl" -nt "$mark" ]; then
+    c4_n=$(find "$OUT_DIR/report/c4" -maxdepth 1 -name '*.png' ! -name '*-key.png' -newer "$mark" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${c4_n:-0}" -gt 0 ]; then
+      ui_ok "C4 図 ${c4_n} 枚  report/c4/（DSL は workspace.dsl。凡例は -key.png）"
+    elif [ -f "$OUT_DIR/report/c4/_render-error.txt" ]; then
+      ui_warn "C4 図の DSL（report/c4/workspace.dsl）は書かれましたが PNG にできませんでした。原因は report/c4/_render-error.txt にあり、次の回のエージェントが直します"
+    fi
+  fi
+  find "$OUT_DIR" -type f -newer "$mark" 2>/dev/null | grep -v "^$raw/" | grep -v "^$OUT_DIR/report/c4/" | grep -vx "$report" | grep -vx "$asks" | sed "s|^$OUT_DIR/||" | sort \
+    | while IFS= read -r line; do
+        case "$line" in
+          .survey/env/check.md) ui_ok "環境の確認の記録  $line" ;;
+          .survey/env/aws-audit.log) ;;
+          .survey/*) ui_ok "エージェントの記録  $line" ;;
+          *) ui_ok "$line" ;;
+        esac
+      done
+)
+
+# 次の 1 手。報告を読む → まだ足していない経路があればそれを足す（任意）→ 対話で続ける。
+# 経路の案内は実態に合わせる: 見積もりの列挙（SCAN_INV）から残りの候補を数え、無ければ ec2 / lambda を並べない。
+# 列挙が無い（端末でない）ときは、登録済みホストと取り出してあるコードの有無で出し分ける。EC2 と Lambda の一覧は各コマンドが出すので、ここでは並べない
+#   scan_next <エージェント>
+scan_next() {
+  local agent="$1" pulled
+  local -a ec2_ids=() ec2_labels=() fn_names=() fn_labels=()
+  ui_head "次にやること"
+  ui_text "報告（$(ui_path "$OUT_DIR/report/構成報告.md")）を読みます。確認事項（$(ui_path "$OUT_DIR/report/ユーザー確認事項.md")）には回答欄があり、そこに書けば次の回が読みます。"
+  pulled=0   # code/lambda が無いと find が失敗する（set -e / pipefail）ので、あるときだけ数える
+  [ ! -d "$AWS_SURVEY_DIR/code/lambda" ] || pulled=$(find "$AWS_SURVEY_DIR/code/lambda" -mindepth 3 -maxdepth 3 -name _manifest.json 2>/dev/null | wc -l | tr -d ' ')
+  if [ -n "$SCAN_INV" ]; then
+    scan_candidates
+    if [ ${#ec2_ids[@]} -gt 0 ] || [ ${#fn_names[@]} -gt 0 ]; then
+      ui_text "まだ中を読めるようにしていないものがあります（EC2 ${#ec2_ids[@]} 台・Lambda ${#fn_names[@]} 関数）。足すなら、先に経路を足してからもう一度 scan します（要らなければ飛ばせます）。"
+      [ ${#ec2_ids[@]} -eq 0 ] || also_cmd "$AWS_SURVEY_CMD ec2" "EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
+      [ ${#fn_names[@]} -eq 0 ] || also_cmd "$AWS_SURVEY_CMD lambda" "Lambda のコードを取り出して読めるようにします。一覧から選びます"
+      also_cmd "$AWS_SURVEY_CMD scan" "経路を足したあと、もう一度実行すると、中を読んで報告を非対話で更新します"
+      echo ""
+    elif [ -n "$SSH_HOSTS" ] || [ "${pulled:-0}" -gt 0 ]; then
+      ui_text "中を読む経路（${SSH_HOSTS:+EC2 ${SSH_HOSTS}}${SSH_HOSTS:+${pulled:+・}}${pulled:+Lambda ${pulled} 関数}）はすべて足してあり、報告に入っています。"
+    fi
+  elif [ -z "$SSH_HOSTS" ] && [ "${pulled:-0}" -eq 0 ]; then
+    ui_text "AWS の API で見えるのはリソースの外側までです。中まで調べるなら、先に経路を足します（要らなければ飛ばせます）。"
+    also_cmd "$AWS_SURVEY_CMD ec2" "EC2 の中（ログ・サービスの状態）を調べられるようにします。一覧から選びます"
+    also_cmd "$AWS_SURVEY_CMD lambda" "Lambda のコードを取り出して読めるようにします。一覧から選びます"
+    also_cmd "$AWS_SURVEY_CMD scan" "経路を足したあと、もう一度実行すると、中を読んで報告を非対話で更新します"
+    echo ""
+  fi
+  next_cmd "$AWS_SURVEY_CMD $agent" "報告を手に対話で続けます。質問への回答・中を読む・確認事項の答えを伝える、のどれからでも"
+  also_cmd "$AWS_SURVEY_CMD clean" "調査を終えたら。対象アカウントとこのホストに残したもの（ロール・EC2 の設定・鍵・コンテナ）を片付けます"
+}
+
+ui_title "aws-survey scan"
+ui_kv "対象フォルダ" "$AWS_SURVEY_DIR"
+ui_kv "アカウント" "$ACCOUNT_ID"
+ui_kv "リージョン" "$REGION"
+echo ""
+
+# ---- 0. すでに初期調査が済んでいないか ----
+# setup.scanned（成功時に分までの日時で書く）があれば、一時キーを発行し直す前に、前回の日時を出して続けるかを聞く。
+# 打ち直しただけで数十分の調査を始めないため。Enter は「続けない」。端末でなければ read_line が諦めるので --force が要る。
+# 2 回目は白紙からのやり直しではない。エージェントが報告を検証し、そのあと足した経路（EC2 の中・Lambda のコード）を読んで
+# 報告を更新する（method/survey.md）。out/ は消さない（記録が足されるだけ。out/ は調査エージェントの領分）。
+SCANNED=$(jq -r '.setup.scanned // empty' "$ENV_FILE")
+if [ -n "$SCANNED" ] && [ "$FORCE" -eq 0 ]; then
+  ui_warn "初期調査はすでに済んでいます（前回: $(sed 's/T/ /; s/[+-][0-9]\{4\}$//' <<< "$SCANNED")）"
+  ui_text "もう一度行うと、報告を検証し、そのあと足した経路（EC2 の中・Lambda のコード）と確認事項の回答欄を読んで、報告を更新します（数十分かかります。out/ の記録は消しません）。"
+  printf '  %s❯%s 初期調査を続けますか？ %s(y/N)%s: ' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET"
+  if ! read_line ans; then
+    echo ""
+    ui_text "答えを読めませんでした。続けるなら $(ui_cmd "$AWS_SURVEY_CMD scan --force") を実行してください。"
+    exit 1
+  fi
+  case "$ans" in
+    y|Y|yes|YES) echo "" ;;
+    *)
+      ui_text "続けません。前回の結果はそのまま out/ にあります。"
+      if [ -n "${AGENT_OPT:-$SURVEY_AGENT}" ]; then
+        next_cmd "$AWS_SURVEY_CMD ${AGENT_OPT:-$SURVEY_AGENT}" "前回の初期調査の結果を手に、何を明らかにしたいかを中で決めて調査を進めます"
+      else
+        next_cmd "$AWS_SURVEY_CMD" "次の 1 手を案内します"
+      fi
+      exit 0 ;;
+  esac
+fi
+
+# ---- 1. 一時キー ----
+# あり・期限内・読み取り専用と確かめ済みか。初期調査は時間がかかるので、残りが短ければ（総時間の半分、上限 30 分。
+# libexec/keys.sh の key_session_min）聞かずに発行し直してから始める。閾値はホスト側だけの値で、調査エージェント向けの文書には書かない
+container_require_key "$(key_session_min)" || exit 1
+
+# ---- 2. エージェント ----
+AGENT="${AGENT_OPT:-$SURVEY_AGENT}"
+if [ -z "$AGENT" ]; then
+  if menu_available; then
+    choose_menu pick "調査に使うエージェントを選んでください" 0 "Claude Code（claude）" "Codex（codex）"
+    case "$pick" in Codex*) AGENT=codex ;; *) AGENT=claude ;; esac
+  else
+    ui_err "調査に使うエージェントがまだ決まっていません"
+    next_cmd "$AWS_SURVEY_CMD scan --agent claude" "Claude Code で初期調査を行います（--agent codex なら Codex）"
+    exit 1
+  fi
+fi
+env_set_agent "$AGENT"
+launch_agent_flags "$AGENT"
+ui_ok "エージェント: $(agent_summary "$AGENT" "$SURVEY_AGENT_MODEL" "$SURVEY_AGENT_EFFORT")"
+
+# ---- 3. 同じ out/ に向いたコンテナが動いていないか ----
+command -v docker >/dev/null || ui_die "docker コマンドが見つかりません。Docker Desktop を導入して起動してください。"
+for n in "$SURVEY_NAME" "${SURVEY_NAME}-scan"; do
+  if launch_container_running "$n"; then
+    ui_die "調査コンテナ（${n}）が動いています。同じ out/ に 2 つのエージェントを同時には走らせられません。中の会話を終えてから実行してください。"
+  fi
+done
+
+# ---- 4. イメージ・ボリューム・認証（launch.sh） ----
+docker_check_shared "$AWS_DIR" || exit 1
+launch_prepare_dirs
+launch_agent_login "$AGENT" || exit 1
+echo ""
+
+# ---- 5. 経路（端末だけ）と実行 ----
+# 見積もりの列挙は経路の候補にも使うので、端末では先に読む。scan_routes は EXIT トラップを潰す（choose_menu）ので、SCAN_LOG の trap より前
+if on_terminal; then
+  scan_estimate
+  scan_routes
+  echo ""
+fi
+ui_head "初期調査（$(agent_label "$AGENT")）"
+ui_text "対象アカウントに何があるかを洗い出し、構成の報告と確認事項を out/ に書きます。質問はしないので、待つだけです。"
+ui_text "止めるときは Ctrl-C（もう一度 $AWS_SURVEY_CMD scan を実行すると、それまでに残した生データを使って続きから書きます）。"
+echo ""
+# 出力は画面に流しつつ、失敗の原因（ログイン切れなど）を読むために一時ファイルにも残す。out/ には書かない（out/ は調査エージェントの領分）
+SCAN_LOG=$(mktemp) || ui_die "一時ファイルを作れません。"
+START_MARK=$(mktemp) || ui_die "一時ファイルを作れません。"     # この回に書かれたファイルを見分ける目印（進捗とまとめが -newer で見る）
+trap 'rm -f "$SCAN_LOG" "$START_MARK"' EXIT
+# Codex の `exec` は既定で、フックの起動（hook: PreToolUse）・実行した各コマンド・out/ への差分を逐一流す。
+# 読めるのはエージェントの文章だけなので、`--json`（1 行 1 イベント）で受けて agent_message とエラーだけを文章に戻す
+# （Claude Code の `--output-format text` に相当）。stderr（ログイン切れなどの CLI 自身の報せ）は素通しにして、失敗の原因の grep に残す。
+scan_codex_text() {
+  jq --unbuffered -Rr '(fromjson? // empty)
+    | if .type == "item.completed" and .item.type == "agent_message" then .item.text + "\n"
+      elif .type == "error" then "error: " + (.message // tostring)
+      elif .type == "turn.failed" then "error: " + (.error.message // tostring)
+      else empty end'
+}
+agent_cmd() {
+  case "$AGENT" in
+    claude) launch_run --name "${SURVEY_NAME}-scan" -- claude "${AGENT_FLAGS[@]}" -p "$SCAN_PROMPT" --output-format text ;;
+    # ガードが拒否するたびに Codex 本体が stderr に ERROR（codex_core::tools::router）を出す。拒否の理由はエージェントに返っていて、
+    # 環境確認ではわざと拒否させるので、そのログだけ消す（他の ERROR、たとえば 401 は残す）
+    codex)  launch_run --name "${SURVEY_NAME}-scan" -e 'RUST_LOG=codex_core::tools::router=off,error' \
+              -- codex "${AGENT_FLAGS[@]}" exec --skip-git-repo-check --color never --json "$SCAN_PROMPT" | scan_codex_text ;;
+  esac
+}
+status=0
+if on_terminal; then
+  # 端末では回転する印と推定の進捗を 1 行に出し続ける。エージェントの出力はその上に流す（keep）
+  scan_start=$(date +%s)
+  SPIN_DIR=$(mktemp -d) || ui_die "一時ディレクトリを作れません。"
+  : > "$SPIN_DIR/keep"; touch "$START_MARK"; printf '%s' "初期調査中 $(scan_bar 0)  始めています" > "$SPIN_DIR/msg"
+  ui_spin_loop "$SPIN_DIR" &
+  spid=$!
+  scan_progress "$SPIN_DIR" &
+  ppid=$!
+  scan_keys_loop "$SPIN_DIR/keep" &
+  kpid=$!
+  agent_cmd < /dev/null >> "$SPIN_DIR/keep" 2>&1 || status=$?
+  kill "$ppid" "$kpid" 2>/dev/null || true; wait "$ppid" "$kpid" 2>/dev/null || true
+  ui_spin_end "$SPIN_DIR" "$spid"
+  cp "$SPIN_DIR/keep" "$SCAN_LOG"
+  rm -rf "$SPIN_DIR"
+else
+  scan_start=$(date +%s)
+  touch "$START_MARK"
+  scan_keys_loop /dev/stdout &
+  kpid=$!
+  agent_cmd < /dev/null 2>&1 | tee "$SCAN_LOG" || status=${PIPESTATUS[0]}
+  kill "$kpid" 2>/dev/null || true; wait "$kpid" 2>/dev/null || true
+fi
+scan_elapsed=$(( $(date +%s) - scan_start ))
+echo ""
+launch_record_verified
+
+if [ "$status" -ne 0 ]; then
+  ui_err "初期調査が途中で終わりました（終了コード ${status}）"
+  if grep -qiE 'not logged in|log ?in|unauthorized|authentication' "$SCAN_LOG" 2>/dev/null; then
+    ui_text "ログインが切れているようです。$(ui_cmd "$AWS_SURVEY_CMD $AGENT") で起動して入り直してから、もう一度 $AWS_SURVEY_CMD scan を実行してください。"
+  else
+    ui_text "上の出力を確認してから、もう一度 $(ui_cmd "$AWS_SURVEY_CMD scan") を実行してください。"
+  fi
+  exit "$status"
+fi
+
+ui_ok "初期調査を終えました（$(ui_duration "$scan_elapsed")）"
+echo ""
+# エージェントが書いた C4 図の DSL（report/c4/workspace.dsl）を PNG にする。無ければ・最新なら黙る（libexec/commands/c4.sh）。
+# 失敗しても初期調査の成否は変えない（原因は c4/_render-error.txt に残り、次の回のエージェントが直す）
+AWS_SURVEY_CHAIN=1 bash "$LIBEXEC_DIR/commands/c4.sh" --auto || true
+scan_summary "$START_MARK"
+echo ""
+# 報告があって初めて「済み」。無ければ次も scan を案内する（前回の生データを使って続きから始める。やり直しではない）
+if [ -f "$OUT_DIR/report/構成報告.md" ]; then
+  env_mark_setup scanned "初期調査を済ませた" "$(date '+%FT%H:%M%z')"
+  echo ""
+  scan_next "$AGENT"
+else
+  ui_warn "報告が書かれていないので、初期調査は済んでいない扱いにします"
+  next_cmd "$AWS_SURVEY_CMD scan" "もう一度実行すると、残した生データを使って続きから書きます"
+fi
